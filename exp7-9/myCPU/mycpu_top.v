@@ -2,12 +2,14 @@ module mycpu_top(
     input  wire        clk,
     input  wire        resetn,
     // inst sram interface
-    output wire        inst_sram_we,
+    output wire        inst_sram_en,
+    output wire [3:0]  inst_sram_we,
     output wire [31:0] inst_sram_addr,
     output wire [31:0] inst_sram_wdata,
     input  wire [31:0] inst_sram_rdata,
     // data sram interface
-    output wire        data_sram_we,
+    output wire        data_sram_en,
+    output wire [3:0]  data_sram_we,
     output wire [31:0] data_sram_addr,
     output wire [31:0] data_sram_wdata,
     input  wire [31:0] data_sram_rdata,
@@ -17,25 +19,46 @@ module mycpu_top(
     output wire [ 4:0] debug_wb_rf_wnum,
     output wire [31:0] debug_wb_rf_wdata
 );
+
+// pipeline: IF -> ID -> EX -> MEM -> WB
+
+// feat: we use vectors to show which state the signal is in
+
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
 
-reg         valid;
-always @(posedge clk) begin
-    if (reset) begin
-        valid <= 1'b0;
-    end
-    else begin
-        valid <= 1'b1;
-    end
-end
+localparam IF   = 0;
+localparam ID   = 1;
+localparam EX   = 2;
+localparam MEM  = 3;
+localparam WB   = 4;
+localparam TOTAL_STAGE_WIDTH = 5;
 
+
+
+// fill in stall allow flush logic later !!!
+
+
+reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
+// when is valid used in leaf control signals? write back to rf / write mem / change pc
+wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // the last stage (WB) would never stall it self; reset as 0
+wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // the last stage (WB) would always allow; reset as 1
+wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
+wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
+
+// only process in one stage
 wire [31:0] seq_pc;
 wire [31:0] nextpc;
 wire        br_taken;
-wire [31:0] br_target;
 wire [31:0] inst;
-reg  [31:0] pc;
+
+// should be stored between stages
+reg  [31:0] br_target [EX: ID];
+reg  [31:0] pc [WB: IF];
+
+
+// code review process !!!
+
 
 wire [11:0] alu_op;
 wire        load_op;
@@ -49,6 +72,7 @@ wire        src_reg_is_rd;
 wire [4: 0] dest;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
+wire        rj_eq_rd;
 wire [31:0] imm;
 wire [31:0] br_offs;
 wire [31:0] jirl_offs;
@@ -117,20 +141,38 @@ wire [31:0] mem_result;
  */
 wire [31:0] final_result;
 
-assign seq_pc       = pc + 3'h4;
-assign nextpc       = br_taken ? br_target : seq_pc;
+assign seq_pc       = pc[IF] + 32'h4;
+assign nextpc       = br_taken ? br_target[EX] : seq_pc;
 
 always @(posedge clk) begin
     if (reset) begin
-        pc <= 32'h1bfffffc;     //trick: to make nextpc be 0x1c000000 during reset 
+        pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset 
+                                    // no need to reset others for not valid
     end
     else begin
-        pc <= nextpc;
+        pc[IF]  <= nextpc;
+        pc[ID]  <= pc[IF];
+        pc[EX]  <= pc[ID];
+        pc[MEM] <= pc[EX];
+        pc[WB]  <= pc[MEM];
     end
 end
 
-assign inst_sram_we    = 1'b0;
-assign inst_sram_addr  = pc;
+                        // forward shift for valid sign     current stall sign      backward shift for allow sign
+assign next_valid = {valid[TOTAL_STAGE_WIDTH - 2: 0], 1'b1} & ~ stall & {1'b0, allow[TOTAL_STAGE_WIDTH - 1: 1]};
+
+always @(posedge clk) begin
+    if (reset) begin
+        valid <= 5'b0;
+    end
+    else begin
+        valid <= next_valid;
+    end
+end
+
+assign inst_sram_en    = 1'b1;        // 指令 RAM 片选：单周期下始终有效
+assign inst_sram_we    = 4'b0;        // 指令 RAM 只读，4 位字节写使能全 0
+assign inst_sram_addr  = pc[IF];      // 取指地址用 IF 级 PC
 assign inst_sram_wdata = 32'b0;
 assign inst            = inst_sram_rdata;
 
@@ -249,11 +291,21 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && valid;
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc + br_offs) :
-                                                   /*inst_jirl*/ (rj_value + jirl_offs);
+                  ) && valid[EX];
+// 分支目标：ID 级计算存入级间寄存器，EX 级判跳转时取用
+always @(posedge clk) begin
+    if (reset) begin
+        br_target[ID] <= 32'b0;
+        br_target[EX] <= 32'b0;
+    end
+    else begin
+        br_target[ID] <= (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[IF] + br_offs) :
+                                                       /*inst_jirl*/ (rj_value + jirl_offs);
+        br_target[EX] <= br_target[ID];
+    end
+end
 
-assign alu_src1 = src1_is_pc  ? pc[31:0] : rj_value;
+assign alu_src1 = src1_is_pc  ? pc[IF] : rj_value;
 assign alu_src2 = src2_is_imm ? imm : rkd_value;
 
 /* answer
@@ -266,14 +318,15 @@ alu u_alu(
     .alu_result (alu_result)
     );
 
-assign data_sram_we    = mem_we && valid;
+assign data_sram_en    = 1'b1;                 // 数据 RAM 片选：单周期下始终有效（流水化时可改为访存级有效信号）
+assign data_sram_we    = {4{mem_we && valid[MEM]}}; // only support word write
 assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
 
 assign mem_result   = data_sram_rdata;
 assign final_result = res_from_mem ? mem_result : alu_result;
 
-assign rf_we    = gr_we && valid;
+assign rf_we    = gr_we && valid[WB];
 assign rf_waddr = dest;
 assign rf_wdata = final_result;
 
@@ -281,8 +334,8 @@ assign rf_wdata = final_result;
 /* answer
  * bug：debug_wb_rf_we拼写错误
  */
-assign debug_wb_pc       = pc;
-assign debug_wb_rf_we    = {4{rf_we}};
+assign debug_wb_pc       = pc[WB];
+assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
 assign debug_wb_rf_wnum  = dest;
 assign debug_wb_rf_wdata = final_result;
 
