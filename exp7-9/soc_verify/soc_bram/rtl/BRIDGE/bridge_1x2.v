@@ -51,19 +51,20 @@ module bridge_1x2(
     input  wire                          clk,          // clock 
     input  wire                          resetn,       // reset, active low
     // master : cpu data
-    input  wire                          cpu_data_we,      // cpu data write byte enable
+    input  wire                          cpu_data_en,      // cpu data access enable
+    input  wire [3                   :0] cpu_data_we,      // cpu data write byte enable
     input  wire [31                  :0] cpu_data_addr,    // cpu data address
     input  wire [31                  :0] cpu_data_wdata,   // cpu data write data
     output wire [31                  :0] cpu_data_rdata,   // cpu data read data
     // slave : data ram 
     output wire                          data_sram_en,     // access data_sram enable
-    output wire                          data_sram_we,     // write enable 
+    output wire [3                   :0] data_sram_we,     // write enable 
     output wire [31                  :0] data_sram_addr,   // address
     output wire [31                  :0] data_sram_wdata,  // data in
     input  wire [31                  :0] data_sram_rdata,  // data out
     // slave : confreg 
     output wire                          conf_en,          // access confreg enable 
-    output wire                          conf_we,          // access confreg enable 
+    output wire [3                   :0] conf_we,          // access confreg enable 
     output wire [31                  :0] conf_addr,        // address
     output wire [31                  :0] conf_wdata,       // write data
     input  wire [31                  :0] conf_rdata        // read data
@@ -71,23 +72,40 @@ module bridge_1x2(
     wire sel_sram;  // cpu data is from data ram
     wire sel_conf;  // cpu data is from confreg
 
+    reg sel_sram_r; // reg of sel_dram 
+    reg sel_conf_r; // reg of sel_conf 
+
     assign sel_conf = (cpu_data_addr & `CONF_ADDR_MASK) == `CONF_ADDR_BASE;
     assign sel_sram = !sel_conf;
 
     // data sram
-    assign data_sram_en    = sel_sram;
+    assign data_sram_en    = cpu_data_en & sel_sram;
     assign data_sram_we    = cpu_data_we;
     assign data_sram_addr  = cpu_data_addr;
     assign data_sram_wdata = cpu_data_wdata;
 
     // confreg
-    assign conf_en    = sel_conf;
+    assign conf_en    = cpu_data_en & sel_conf;
     assign conf_we    = cpu_data_we;
     assign conf_addr  = cpu_data_addr;
     assign conf_wdata = cpu_data_wdata;
 
-    assign cpu_data_rdata = {32{sel_sram}} & data_sram_rdata
-                          | {32{sel_conf}} & conf_rdata;
+    always @ (posedge clk)
+    begin
+        if (!resetn)
+        begin
+            sel_sram_r <= 1'b0;
+            sel_conf_r <= 1'b0;
+        end
+        else
+        begin
+            sel_sram_r <= sel_sram;
+            sel_conf_r <= sel_conf;
+        end
+    end
+
+    assign cpu_data_rdata = {32{sel_sram_r}} & data_sram_rdata
+                          | {32{sel_conf_r}} & conf_rdata;
 
 endmodule
 

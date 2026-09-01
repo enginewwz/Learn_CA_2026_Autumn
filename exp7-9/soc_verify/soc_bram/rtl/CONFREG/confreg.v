@@ -70,6 +70,7 @@ THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 `define SIMU_FLAG_ADDR    16'hff20  //32'hbfaf_ff20
 `define OPEN_TRACE_ADDR   16'hff30  //32'hbfaf_ff30
 `define NUM_MONITOR_ADDR  16'hff40  //32'hbfaf_ff40
+
 module confreg
 #(parameter SIMULATION=1'b0)
 (
@@ -78,7 +79,7 @@ module confreg
     input  wire        resetn,
     // read and write from cpu
     input  wire        conf_en,
-    input  wire        conf_we,
+    input  wire [3 :0] conf_we,
     input  wire [31:0] conf_addr,
     input  wire [31:0] conf_wdata,
     output wire [31:0] conf_rdata,
@@ -120,34 +121,47 @@ module confreg
     reg         num_monitor;
 
 
-assign conf_rdata = (conf_addr[15:0]==`CR0_ADDR         )? cr0 :
-                    (conf_addr[15:0]==`CR1_ADDR         )? cr1 :
-                    (conf_addr[15:0]==`CR2_ADDR         )? cr2 :
-                    (conf_addr[15:0]==`CR3_ADDR         )? cr3 :        
-                    (conf_addr[15:0]==`CR4_ADDR         )? cr4 :
-                    (conf_addr[15:0]==`CR5_ADDR         )? cr5 :      
-                    (conf_addr[15:0]==`CR6_ADDR         )? cr6 :       
-                    (conf_addr[15:0]==`CR7_ADDR         )? cr7 :  
-                    (conf_addr[15:0]==`LED_ADDR         )? led_data:  
-                    (conf_addr[15:0]==`LED_RG0_ADDR     )? led_rg0_data :
-                    (conf_addr[15:0]==`LED_RG1_ADDR     )? led_rg1_data :
-                    (conf_addr[15:0]==`NUM_ADDR         )? num_data     :
-                    (conf_addr[15:0]==`SWITCH_ADDR      )? switch_data  :
-                    (conf_addr[15:0]==`BTN_KEY_ADDR     )? btn_key_data :
-                    (conf_addr[15:0]==`BTN_STEP_ADDR    )? btn_step_data :
-                    (conf_addr[15:0]==`SW_INTER_ADDR    )? sw_inter_data :
-                    (conf_addr[15:0]==`TIMER_ADDR       )? timer_r2     :
-                    (conf_addr[15:0]==`SIMU_FLAG_ADDR   )? simu_flag    :
-                    (conf_addr[15:0]==`IO_SIMU_ADDR     )? io_simu      :
-                    (conf_addr[15:0]==`VIRTUAL_UART_ADDR)? {24'd0,virtual_uart_data} :
-                    (conf_addr[15:0]==`OPEN_TRACE_ADDR  )? {31'd0,open_trace}  :
-                    (conf_addr[15:0]==`NUM_MONITOR_ADDR )? {31'd0,num_monitor} :
-                                                           32'd0;
-
-
+    // read data has one cycle delay
+    reg [31:0] conf_rdata_reg;
+    assign conf_rdata = conf_rdata_reg;
+    always @(posedge clk)
+    begin
+        if(~resetn)
+        begin
+            conf_rdata_reg <= 32'd0;
+        end
+        else if (conf_en)
+        begin
+            case (conf_addr[15:0])
+                `CR0_ADDR      : conf_rdata_reg <= cr0          ;
+                `CR1_ADDR      : conf_rdata_reg <= cr1          ;
+                `CR2_ADDR      : conf_rdata_reg <= cr2          ;
+                `CR3_ADDR      : conf_rdata_reg <= cr3          ;
+                `CR4_ADDR      : conf_rdata_reg <= cr4          ;
+                `CR5_ADDR      : conf_rdata_reg <= cr5          ;
+                `CR6_ADDR      : conf_rdata_reg <= cr6          ;
+                `CR7_ADDR      : conf_rdata_reg <= cr7          ;
+                `LED_ADDR      : conf_rdata_reg <= led_data     ;
+                `LED_RG0_ADDR  : conf_rdata_reg <= led_rg0_data ;
+                `LED_RG1_ADDR  : conf_rdata_reg <= led_rg1_data ;
+                `NUM_ADDR      : conf_rdata_reg <= num_data     ;
+                `SWITCH_ADDR   : conf_rdata_reg <= switch_data  ;
+                `BTN_KEY_ADDR  : conf_rdata_reg <= btn_key_data ;
+                `BTN_STEP_ADDR : conf_rdata_reg <= btn_step_data;
+                `SW_INTER_ADDR : conf_rdata_reg <= sw_inter_data;
+                `TIMER_ADDR    : conf_rdata_reg <= timer_r2     ;
+                `SIMU_FLAG_ADDR: conf_rdata_reg <= simu_flag    ;
+                `IO_SIMU_ADDR  : conf_rdata_reg <= io_simu      ;
+                `VIRTUAL_UART_ADDR : conf_rdata_reg <= {24'd0,virtual_uart_data} ;
+                `OPEN_TRACE_ADDR : conf_rdata_reg <= {31'd0,open_trace} ;
+                `NUM_MONITOR_ADDR: conf_rdata_reg <= {31'd0,num_monitor} ;
+                default        : conf_rdata_reg <= 32'd0;
+            endcase
+        end
+    end
 
 //conf write, only support a word write
-wire conf_write = conf_en & conf_we;
+wire conf_write = conf_en & (|conf_we);
 
 //-------------------------{confreg register}begin-----------------------//
 wire write_cr0 = conf_write & (conf_addr[15:0]==`CR0_ADDR);
