@@ -18,10 +18,10 @@ always @(posedge clk) begin
     if (we) rf[waddr] <= wdata;
 end
 
-//READ OUT 1
-assign rdata1 = (raddr1==5'b0) ? 32'b0 : rf[raddr1];
+//READ OUT 1    --write first
+assign rdata1 = (raddr1==5'b0) ? 32'b0 : (raddr1 != waddr || !we) ? rf[raddr1] : wdata;
 
-//READ OUT 2
-assign rdata2 = (raddr2==5'b0) ? 32'b0 : rf[raddr2];
+//READ OUT 2    --write first
+assign rdata2 = (raddr2==5'b0) ? 32'b0 : (raddr2 != waddr || !we) ? rf[raddr2] : wdata;
 
 endmodule
