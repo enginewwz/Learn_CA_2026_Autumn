@@ -144,7 +144,13 @@ wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
 
 wire [31:0] mem_result;
-wire        load_use;
+wire        load_use_hit;
+
+wire [MEM:EX] forwarding_hit1;  // stage that hit forwarding addr
+wire [31:0] forwarding_data1;
+
+wire [MEM:EX] forwarding_hit2;  // stage that hit forwarding addr
+wire [31:0] forwarding_data2;
 
 // no axi support yet
 
@@ -189,12 +195,24 @@ assign allow[ID]  = ~ stall[ID] && allow[EX];
 assign allow[IF]  = ~ stall[IF] && allow[ID];
 
 // stall for load use hazard
-assign load_use =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  || (rf_raddr2 == dest[EX])))  |
+assign load_use_hit =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  || (rf_raddr2 == dest[EX])))  |
                     (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) || (rf_raddr2 == dest[MEM]))) ;
 
-assign stall = load_use ? 5'b00010 : 5'b00000;
+assign stall = load_use_hit ? 5'b00010 : 5'b00000;
 
+// generate forwarding bits
+assign forwarding_hit1[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr1 == dest[EX]);
+assign forwarding_hit2[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr2 == dest[EX]);
+assign forwarding_hit1[MEM] = valid[MEM] && ~ mem_en[MEM] && gr_we[MEM] && (rf_raddr1 == dest[MEM]);
+assign forwarding_hit2[MEM] = valid[MEM] && ~ mem_en[MEM] && gr_we[MEM] && (rf_raddr2 == dest[MEM]);
 
+assign forwarding_data1 = forwarding_hit1[MEM] ? alu_result_reg [MEM] :
+                          forwarding_hit1[EX]  ? alu_result_reg [EX]  :
+                          src1_is_pc ? pc[IF] : rj_value;
+
+assign forwarding_data2 = forwarding_hit2[MEM] ? alu_result_reg [MEM] :
+                          forwarding_hit2[EX]  ? alu_result_reg [EX]  :
+                          src2_is_imm ? imm : rkd_value;
 
 assign inst_sram_en    = 1'b1;
 assign inst_sram_we    = 4'b0;
@@ -264,11 +282,11 @@ end
 // EX stage: operands selected at ID, latched to EX
 always @(posedge clk) begin
     if (receive_new_inst[ID]) begin
-        alu_src1[ID] <= src1_is_pc ? pc[IF] : rj_value; // pc[IF]: pc of the inst entering ID
+        alu_src1[ID] <= forwarding_data1;
         alu_src2[ID] <= src2_is_imm ? imm : rkd_value;
     end
     if (receive_new_inst[EX]) begin
-        alu_src1[EX] <= alu_src1[ID];
+        alu_src1[EX] <= forwarding_data2;
         alu_src2[EX] <= alu_src2[ID];
     end
 end
