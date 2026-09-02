@@ -52,6 +52,8 @@ wire [31:0] inst_rd;    // receive in ID stage
 
 // should be stored between stages
 reg  [31:0] pc [WB:IF];
+reg  [31:0] br_pc_reg;
+reg         br_reg;
 
 // IF -> ID
 reg  [31:0] inst [ID:IF];
@@ -199,6 +201,8 @@ assign fake_IF_rsp_valid = IF_rsp_ready;
 
 reg  MEM_req_valid;
 wire fake_MEM_req_ready;
+wire MEM_req_fire_wire;
+reg  MEM_req_fire_reg;
 wire MEM_req_fire;
 
 wire fake_MEM_rsp_valid;
@@ -209,26 +213,35 @@ wire MEM_rsp_fire;
 
 always @(posedge clk) begin
     if (reset)                          MEM_req_valid <= 1'b0;
-    else if (receive_new_inst[MEM])     MEM_req_valid <= valid[EX];
+    else if (receive_new_inst[MEM])     MEM_req_valid <= valid[EX] && mem_en[EX];
     else if (fake_MEM_req_ready)        MEM_req_valid <= 1'b0;
     else                                MEM_req_valid <= MEM_req_valid; 
 end
 
-assign MEM_req_fire = MEM_req_valid && fake_MEM_req_ready;
+always @(posedge clk) begin
+    if (reset)                          MEM_req_fire_reg <= 1'b0;
+    else if (receive_new_inst[MEM])     MEM_req_fire_reg <= 1'b0;
+    else if (MEM_req_fire_wire)         MEM_req_fire_reg <= 1'b1;
+    else                                MEM_req_fire_reg <= MEM_req_fire_reg;
+end
+
+assign MEM_req_fire_wire = MEM_req_valid && fake_MEM_req_ready;
+
+assign MEM_req_fire = MEM_req_fire_reg | MEM_req_fire_wire;
 
 assign fake_MEM_req_ready = MEM_req_valid;
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_fire_reg <= 1'b0;
     else if (receive_new_inst[MEM])     MEM_rsp_fire_reg <= 1'b0;
-    else if (MEM_req_fire)              MEM_rsp_fire_reg <= 1'b1;
+    else if (MEM_rsp_fire)              MEM_rsp_fire_reg <= 1'b1;
     else                                MEM_rsp_fire_reg <= MEM_rsp_fire_reg;
 end
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_ready    <= 1'b0;
     else if (receive_new_inst[MEM])     MEM_rsp_ready    <= 1'b0;
-    else if (MEM_req_fire)              MEM_rsp_ready    <= 1'b1;
+    else if (MEM_req_fire)              MEM_rsp_ready    <= mem_we[MEM];
     else                                MEM_rsp_ready    <= MEM_rsp_ready;
 end
 
@@ -240,11 +253,32 @@ assign fake_MEM_rsp_valid = MEM_rsp_ready;
 
 
 assign seq_pc       = pc[IF] + 32'h4;
-assign nextpc       = br_taken ? br_target : seq_pc;
+assign nextpc       = br_reg ? br_pc_reg : br_taken ? br_target : seq_pc;
+
+always @(posedge clk) begin
+    if (reset) begin
+        br_reg <= 1'b0;
+        br_pc_reg <= 32'b0;
+    end
+    else begin
+        if (receive_new_inst[IF]) begin
+            br_reg <= 1'b0;
+            br_pc_reg <= 32'b0;
+        end
+        else if (br_taken && ~ receive_new_inst[IF]) begin
+            br_reg <= 1'b1;
+            br_pc_reg <= nextpc;
+        end
+    end
+end
 
 always @(posedge clk) begin
     if (reset) begin
         pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset
+        pc[ID] <= 32'h0;
+        pc[EX] <= 32'h0;
+        pc[MEM] <= 32'h0;
+        pc[WB] <= 32'h0;
     end
     else begin
         if (receive_new_inst[IF] ) pc[IF]  <= nextpc;
@@ -257,7 +291,7 @@ end
 
 // first cycle for new stage
 assign cur_valid = valid & ~ flush;
-assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0], 1'b1} & allow;
+assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow;
 assign next_valid = receive_new_inst | (~ allow & cur_valid);
 
 always @(posedge clk) begin
@@ -270,7 +304,7 @@ always @(posedge clk) begin
 end
 
 // flush logic --> only flushes at stage ID
-assign flush = br_taken ? 5'b00011 : 5'b00000;
+assign flush = br_taken ? 5'b00001 : 5'b00000;
 
 // allow logic --> generate with stall logic
 assign allow[WB]  = 1'b1;
@@ -292,21 +326,21 @@ assign stall[ID] = load_use_hit;
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
-assign stall[MEM] = ~ MEM_rsp_fire && valid[MEM];
+assign stall[MEM] = (((~ MEM_rsp_fire & mem_we[MEM]) || ~ MEM_req_fire) & mem_en[MEM]) && valid[MEM];
 
 // generate forwarding bits
-assign forwarding_hit1[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr1 == dest[EX]);
-assign forwarding_hit2[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr2 == dest[EX]);
-assign forwarding_hit1[MEM] = valid[MEM] && ~ mem_en[MEM] && gr_we[MEM] && (rf_raddr1 == dest[MEM]);
-assign forwarding_hit2[MEM] = valid[MEM] && ~ mem_en[MEM] && gr_we[MEM] && (rf_raddr2 == dest[MEM]);
+assign forwarding_hit1[EX] = valid[EX] && ~mem_en[EX] && gr_we[EX] && (dest[EX] != 5'd0) && (rf_raddr1 == dest[EX]);
+assign forwarding_hit2[EX] = valid[EX] && ~mem_en[EX] && gr_we[EX] && (dest[EX] != 5'd0) && (rf_raddr2 == dest[EX]);
+assign forwarding_hit1[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && (dest[MEM] != 5'd0) && (rf_raddr1 == dest[MEM]);
+assign forwarding_hit2[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && (dest[MEM] != 5'd0) && (rf_raddr2 == dest[MEM]);
 
 assign forwarding_data1 = forwarding_hit1[MEM] ? alu_result_mem :
                           forwarding_hit1[EX]  ? alu_result     :
-                          src1_is_pc ? pc[IF] : rj_value;
+                          rf_rdata1;
 
 assign forwarding_data2 = forwarding_hit2[MEM] ? alu_result_mem :
                           forwarding_hit2[EX]  ? alu_result     :
-                          src2_is_imm ? imm : rkd_value;
+                          rf_rdata2;
 
 assign inst_sram_en    = IF_req_valid;
 assign inst_sram_we    = 4'b0;
@@ -386,8 +420,8 @@ end
 // EX stage: operands selected at ID, latched to EX
 always @(posedge clk) begin
     if (receive_new_inst[EX]) begin
-        alu_src1 <= forwarding_data1;
-        alu_src2 <= forwarding_data2;
+        alu_src1 <= src1_is_pc  ? pc[ID] : forwarding_data1;
+        alu_src2 <= src2_is_imm ? imm    : forwarding_data2;
     end
 end
 
@@ -397,7 +431,7 @@ always @(posedge clk) begin
         res_from_mem[EX] <= inst_ld_w;
         mem_we[EX]       <= inst_st_w;
         mem_en[EX]       <= inst_st_w | inst_ld_w;
-        mem_wdata[EX]    <= rkd_value;
+        mem_wdata[EX]    <= forwarding_data2;
     end
     if (receive_new_inst[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
@@ -466,8 +500,8 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-assign rj_value  = rf_rdata1;
-assign rkd_value = rf_rdata2;
+assign rj_value  = forwarding_data1;
+assign rkd_value = forwarding_data2;
 
 assign rj_eq_rd = (rj_value == rkd_value);
 assign br_taken = (   inst_beq  &&  rj_eq_rd
@@ -507,11 +541,11 @@ assign mem_result = data_sram_rdata;
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
 assign rf_waddr = dest[WB];
-assign rf_wdata = final_result;
+assign rf_wdata = final_result_wb;
 
 assign debug_wb_pc       = pc[WB];
 assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
 assign debug_wb_rf_wnum  = dest[WB];
-assign debug_wb_rf_wdata = final_result;
+assign debug_wb_rf_wdata = final_result_wb;
 
 endmodule
