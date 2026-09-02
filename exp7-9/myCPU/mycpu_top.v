@@ -159,8 +159,6 @@ wire [31:0] forwarding_data2;
 // fake axi path
 reg  IF_req_valid;
 wire fake_IF_req_ready;
-wire IF_req_fire_wire;
-reg  IF_req_fire_reg;
 wire IF_req_fire;
 
 wire fake_IF_rsp_valid;
@@ -178,25 +176,23 @@ always @(posedge clk) begin
     else                            IF_req_valid <= IF_req_valid; 
 end
 
-assign IF_req_fire_wire = IF_req_valid && fake_IF_req_ready;
+assign IF_req_fire = IF_req_valid && fake_IF_req_ready;
 
 always @(posedge clk) begin
     if (reset) begin
-        IF_req_fire_reg <= 1'b0;
+        IF_rsp_fire_reg <= 1'b0;
     end
-    else if (receive_new_inst[IF])              IF_req_fire_reg <= 1'b0;
-    else if (IF_req_valid && fake_IF_req_ready) IF_req_fire_reg <= 1'b1;
-    else                                        IF_req_fire_reg <= IF_req_fire_reg;
+    else if (receive_new_inst[IF])   IF_rsp_fire_reg <= 1'b0;
+    else if (IF_req_fire)            IF_rsp_fire_reg <= 1'b1;
+    else                             IF_rsp_fire_reg <= IF_rsp_fire_reg;
 end
 
-assign IF_req_fire = IF_req_fire_reg | IF_req_fire_wire;
+assign IF_rsp_fire = IF_rsp_fire_reg | IF_rsp_fire_wire;
 
-assign fake_IF_req_ready = IF_req_valid;
+assign fake_IF_rsp_valid = IF_rsp_ready;
 
 reg  MEM_req_valid;
 wire fake_MEM_req_ready;
-wire MEM_req_fire_wire;
-reg  MEM_req_fire_reg;
 wire MEM_req_fire;
 
 wire fake_MEM_rsp_valid;
@@ -209,25 +205,25 @@ always @(posedge clk) begin
     if (reset) begin
         MEM_req_valid <= 1'b0;
     end
-    else if (receive_new_inst[MEM])             MEM_req_valid <= valid[EX];
-    else if (fake_MEM_req_ready)                MEM_req_valid <= 1'b0;
-    else                                        MEM_req_valid <= MEM_req_valid; 
+    else if (receive_new_inst[MEM])     MEM_req_valid <= valid[EX];
+    else if (fake_MEM_req_ready)        MEM_req_valid <= 1'b0;
+    else                                MEM_req_valid <= MEM_req_valid; 
 end
 
-assign MEM_req_fire_wire = MEM_req_valid && fake_MEM_req_ready;
+assign MEM_req_fire = MEM_req_valid && fake_MEM_req_ready;
 
 always @(posedge clk) begin
     if (reset) begin
-        MEM_req_fire_reg <= 1'b0;
+        MEM_rsp_fire_reg <= 1'b0;
     end
-    else if (receive_new_inst[MEM])               MEM_req_fire_reg <= 1'b0;
-    else if (MEM_req_valid && fake_MEM_req_ready) MEM_req_fire_reg <= 1'b1;
-    else                                          MEM_req_fire_reg <= MEM_req_fire_reg;
+    else if (receive_new_inst[MEM])      MEM_rsp_fire_reg <= 1'b0;
+    else if (MEM_req_fire)               MEM_rsp_fire_reg <= 1'b1;
+    else                                 MEM_rsp_fire_reg <= MEM_rsp_fire_reg;
 end
 
-assign MEM_req_fire = MEM_req_fire_reg | MEM_req_fire_wire;
+assign MEM_rsp_fire = MEM_rsp_fire_reg | MEM_rsp_fire_wire;
 
-assign fake_MEM_req_ready = MEM_req_valid;
+assign fake_MEM_rsp_ready = MEM_rsp_valid;
 
 
 assign seq_pc       = pc[IF] + 32'h4;
@@ -283,7 +279,7 @@ assign stall[ID] = load_use_hit;
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire;
-assign stall[MEM] = ~ MEM_rsp_fire;
+assign stall[MEM] = ~ MEM_rsp_fire || ~ valid[MEM];
 
 // generate forwarding bits
 assign forwarding_hit1[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr1 == dest[EX]);
@@ -490,9 +486,12 @@ alu u_alu(
     .alu_result (alu_result)
     );
 
-assign final_result = res_from_mem[MEM] ? mem_result : alu_result;
+always @(posedge clk) begin
+    if (receive_new_inst[MEM]) alu_result_mem <= alu_result;
+end
 
-// MEM -> WB: select write-back data at MEM (mem data or alu result), latch at WB
+assign final_result = res_from_mem[MEM] ? mem_result : alu_result_mem;
+
 always @(posedge clk) begin
     if (receive_new_inst[WB]) final_result_wb <= final_result;
 end
