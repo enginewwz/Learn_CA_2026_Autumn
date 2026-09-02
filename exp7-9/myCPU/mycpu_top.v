@@ -57,22 +57,21 @@ reg  [31:0] pc [WB:IF];
 reg  [31:0] inst [ID:IF];
 
 // control signals for EX stage
-reg  [11:0] alu_op [EX:ID];
-
-reg  [31:0] alu_src1    [EX:ID]; // operands latched at ID, used at EX
-reg  [31:0] alu_src2    [EX:ID];
+reg  [11:0] alu_op;
+reg  [31:0] alu_src1;
+reg  [31:0] alu_src2;
 
 // control signals for MEM stage
-reg         res_from_mem [MEM:ID];
-reg         mem_we [MEM:ID];
-reg         mem_en [MEM:ID];
-reg  [31:0] mem_wdata [MEM:ID]; // store data: latch at ID, write RAM at MEM
+reg         res_from_mem [MEM:EX];
+reg         mem_we [MEM:EX];
+reg         mem_en [MEM:EX];
+reg  [31:0] mem_wdata [MEM:EX]; // store data: latch at ID, write RAM at MEM
 
 wire        load_op;    // not used
 
 // control signals for WB stage
-reg         gr_we [WB:ID];
-reg  [4: 0] dest [WB:ID];
+reg         gr_we [WB:EX];
+reg  [4: 0] dest [WB:EX];
 
 // EX -> MEM
 wire [31:0] alu_result;      // ALU combinational output (EX stage)
@@ -217,7 +216,7 @@ end
 
 assign MEM_req_fire = MEM_req_valid && fake_MEM_req_ready;
 
-assign fake_IF_req_ready = IF_req_valid;
+assign fake_MEM_req_ready = MEM_req_valid;
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_fire_reg <= 1'b0;
@@ -292,8 +291,8 @@ assign load_use_hit =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_radd
 assign stall[ID] = load_use_hit;
 
 // stall for IF & MEM
-assign stall[IF]  = ~ IF_rsp_fire;
-assign stall[MEM] = ~ MEM_rsp_fire || ~ valid[MEM];
+assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
+assign stall[MEM] = ~ MEM_rsp_fire && valid[MEM];
 
 // generate forwarding bits
 assign forwarding_hit1[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr1 == dest[EX]);
@@ -316,7 +315,10 @@ assign inst_sram_wdata = 32'b0;
 assign inst_rd         = inst_sram_rdata;
 
 always @(posedge clk) begin
-    if (receive_new_inst[ID] && IF_rsp_fire_wire) inst[ID] <= inst_rd;
+    if (receive_new_inst[ID]) begin
+        if (IF_rsp_fire_wire)   inst[ID] <= inst_rd;
+        else                    inst[ID] <= inst[IF];
+    end
 end
 
 always @(posedge clk) begin
@@ -364,49 +366,38 @@ assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w= op_31_26_d[6'h05] & ~inst[ID][25];
 
 always @(posedge clk) begin
-    if (receive_new_inst[ID]) begin
-        alu_op[ID][ 0] <= inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
+    if (receive_new_inst[EX]) begin
+        alu_op[ 0] <= inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl;
-        alu_op[ID][ 1] <= inst_sub_w;
-        alu_op[ID][ 2] <= inst_slt;
-        alu_op[ID][ 3] <= inst_sltu;
-        alu_op[ID][ 4] <= inst_and;
-        alu_op[ID][ 5] <= inst_nor;
-        alu_op[ID][ 6] <= inst_or;
-        alu_op[ID][ 7] <= inst_xor;
-        alu_op[ID][ 8] <= inst_slli_w;
-        alu_op[ID][ 9] <= inst_srli_w;
-        alu_op[ID][10] <= inst_srai_w;
-        alu_op[ID][11] <= inst_lu12i_w;
+        alu_op[ 1] <= inst_sub_w;
+        alu_op[ 2] <= inst_slt;
+        alu_op[ 3] <= inst_sltu;
+        alu_op[ 4] <= inst_and;
+        alu_op[ 5] <= inst_nor;
+        alu_op[ 6] <= inst_or;
+        alu_op[ 7] <= inst_xor;
+        alu_op[ 8] <= inst_slli_w;
+        alu_op[ 9] <= inst_srli_w;
+        alu_op[10] <= inst_srai_w;
+        alu_op[11] <= inst_lu12i_w;
     end
-    if (receive_new_inst[EX]) alu_op[EX] <= alu_op[ID];
 end
 
 // EX stage: operands selected at ID, latched to EX
 always @(posedge clk) begin
-    if (receive_new_inst[ID]) begin
-        alu_src1[ID] <= forwarding_data1;
-        alu_src2[ID] <= forwarding_data2;
-    end
     if (receive_new_inst[EX]) begin
-        alu_src1[EX] <= alu_src1[ID];
-        alu_src2[EX] <= alu_src2[ID];
+        alu_src1 <= forwarding_data1;
+        alu_src2 <= forwarding_data2;
     end
 end
 
 // MEM stage: mem control and store data latched at ID, shifted to MEM
 always @(posedge clk) begin
-    if (receive_new_inst[ID]) begin
-        res_from_mem[ID] <= inst_ld_w;
-        mem_we[ID]       <= inst_st_w;
-        mem_en[ID]       <= inst_st_w | inst_ld_w;
-        mem_wdata[ID]    <= rkd_value;
-    end
     if (receive_new_inst[EX]) begin
-        res_from_mem[EX] <= res_from_mem[ID];
-        mem_we[EX]       <= mem_we[ID];
-        mem_en[EX]       <= mem_en[ID];
-        mem_wdata[EX]    <= mem_wdata[ID];
+        res_from_mem[EX] <= inst_ld_w;
+        mem_we[EX]       <= inst_st_w;
+        mem_en[EX]       <= inst_st_w | inst_ld_w;
+        mem_wdata[EX]    <= rkd_value;
     end
     if (receive_new_inst[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
@@ -418,13 +409,9 @@ end
 
 // WB stage: write-back control latched at ID, shifted to WB
 always @(posedge clk) begin
-    if (receive_new_inst[ID]) begin
-        gr_we[ID] <= ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
-        dest[ID]  <= inst_bl ? 5'd1 : rd;
-    end
     if (receive_new_inst[EX]) begin
-        gr_we[EX] <= gr_we[ID];
-        dest[EX]  <= dest[ID];
+        gr_we[EX] <= ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
+        dest[EX]  <= inst_bl ? 5'd1 : rd;
     end
     if (receive_new_inst[MEM]) begin
         gr_we[MEM] <= gr_we[EX];
@@ -494,9 +481,9 @@ assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_of
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
 alu u_alu(
-    .alu_op     (alu_op    [EX]),
-    .alu_src1   (alu_src1  [EX]),
-    .alu_src2   (alu_src2  [EX]),
+    .alu_op     (alu_op        ),
+    .alu_src1   (alu_src1      ),
+    .alu_src2   (alu_src2      ),
     .alu_result (alu_result)
     );
 
