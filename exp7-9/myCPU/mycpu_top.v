@@ -152,7 +152,56 @@ wire [31:0] forwarding_data1;
 wire [MEM:EX] forwarding_hit2;  // stage that hit forwarding addr
 wire [31:0] forwarding_data2;
 
-// no axi support yet
+// fake axi path
+reg  IF_req_valid;
+wire fake_IF_req_ready;
+wire IF_req_fire_wire;
+reg  IF_req_fire_reg;
+wire IF_req_fire;
+
+wire fake_IF_rsp_valid;
+reg  IF_rsp_ready;
+wire IF_rsp_fire_wire;
+reg  IF_rsp_fire_reg;
+wire IF_rsp_fire;
+
+reg  MEM_req_valid;
+wire fake_MEM_req_ready;
+wire MEM_req_fire_wire;
+reg  MEM_req_fire_reg;
+wire MEM_req_fire;
+
+wire fake_MEM_rsp_valid;
+reg  MEM_rsp_ready;
+wire MEM_rsp_fire_wire;
+reg  MEM_rsp_fire_reg;
+wire MEM_rsp_fire;
+
+always @(posedge clk) begin
+    if (reset) begin
+        IF_req_valid <= 1'b0;
+    end
+    else if (receive_new_inst[IF])  IF_req_valid <= 1'b1;
+    else if (fake_IF_req_ready)     IF_req_valid <= 1'b0;
+    else                            IF_req_valid <= IF_req_valid; 
+end
+
+assign IF_req_fire_wire = IF_req_valid && fake_IF_req_ready;
+
+always @(posedge clk) begin
+    if (reset) begin
+        IF_req_fire_reg <= 1'b0;
+    end
+    else if (receive_new_inst[IF])              IF_req_fire_reg <= 1'b0;
+    else if (IF_req_valid && fake_IF_req_ready) IF_req_fire_reg <= 1'b1;
+    else                                        IF_req_fire_reg <= IF_req_fire_reg;
+end
+
+assign IF_req_fire = IF_req_fire_reg | IF_req_fire_wire;
+
+assign fake_IF_req_ready = IF_req_valid;
+
+// waiting for mem part !!!
 
 assign seq_pc       = pc[IF] + 32'h4;
 assign nextpc       = br_taken ? br_target : seq_pc;
@@ -194,11 +243,21 @@ assign allow[EX]  = ~ stall[EX] && allow[MEM];
 assign allow[ID]  = ~ stall[ID] && allow[EX];
 assign allow[IF]  = ~ stall[IF] && allow[ID];
 
+// not used stall bits
+
+assign stall[IF] = 1'b0;
+assign stall[EX] = 1'b0;
+assign stall[WB] = 1'b0;
+
 // stall for load use hazard
 assign load_use_hit =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  || (rf_raddr2 == dest[EX])))  |
-                    (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) || (rf_raddr2 == dest[MEM]))) ;
+                        (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) || (rf_raddr2 == dest[MEM]))) ;
 
-assign stall = load_use_hit ? 5'b00010 : 5'b00000;
+assign stall[ID] = load_use_hit;
+
+// stall for IF & MEM
+assign stall[IF]  = ~ IF_rsp_fire;
+assign stall[MEM] = ~ MEM_rsp_fire;
 
 // generate forwarding bits
 assign forwarding_hit1[EX] = valid[EX] && ~ mem_en[EX] && gr_we[EX] && (rf_raddr1 == dest[EX]);
@@ -283,10 +342,10 @@ end
 always @(posedge clk) begin
     if (receive_new_inst[ID]) begin
         alu_src1[ID] <= forwarding_data1;
-        alu_src2[ID] <= src2_is_imm ? imm : rkd_value;
+        alu_src2[ID] <= forwarding_data2;
     end
     if (receive_new_inst[EX]) begin
-        alu_src1[EX] <= forwarding_data2;
+        alu_src1[EX] <= alu_src1[ID];
         alu_src2[EX] <= alu_src2[ID];
     end
 end
@@ -423,7 +482,7 @@ assign final_result = res_from_mem[WB] ? mem_result : alu_result_reg[WB];
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM];     // should add in axi handshake logic
 assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
-assign data_sram_addr  = alu_result_reg[WB];
+assign data_sram_addr  = alu_result_reg[MEM];
 assign data_sram_wdata = mem_wdata[MEM];
 
 assign mem_result = data_sram_rdata;
