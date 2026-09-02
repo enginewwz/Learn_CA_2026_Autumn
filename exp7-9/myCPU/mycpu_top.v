@@ -41,35 +41,45 @@ localparam TOTAL_STAGE_WIDTH = 5;
 
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
-wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // the last stage (WB) would never stall it self; reset as 0
-wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // the last stage (WB) would always allow; reset as 1
+wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
+wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is empty for new inst; the last stage (WB) would always allow; reset as 1
 wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
+wire [TOTAL_STAGE_WIDTH - 1: 0] receive_new_inst;
 wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
 
 // only process in one stage
-wire [31:0] seq_pc;
-wire [31:0] nextpc;
-wire        br_taken;
-wire [31:0] inst;
+wire [31:0] nextpc;     // generate at IF stage
+wire [31:0] seq_pc;     // generate at IF stage
+wire        br_taken;   // generate at ID stage
+wire [31:0] br_target;  // generate at ID stage
+wire [31:0] inst;       // receive in ID stage
 
 // should be stored between stages
-reg  [31:0] br_target [EX: ID];
-reg  [31:0] pc [WB: IF];
 
+reg  [31:0] pc [EX: IF];
 
-// code review process !!!
-
-
+// control signals for EX stage
 wire [11:0] alu_op;
-wire        load_op;
 wire        src1_is_pc;
 wire        src2_is_imm;
+wire [31:0] alu_src1   ;
+wire [31:0] alu_src2   ;
+
+// control signals for MEM stage
 wire        res_from_mem;
+wire        mem_we;
+wire        mem_en;
+
+wire        load_op;    // not used
+
+// control signals for WB stage
+reg  [31:0] seq_pc_reg [WB: ID];
 wire        dst_is_r1;
 wire        gr_we;
-wire        mem_we;
-wire        src_reg_is_rd;
 wire [4: 0] dest;
+
+// mid signals for ID stage
+wire        src_reg_is_rd;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
 wire        rj_eq_rd;
@@ -130,36 +140,39 @@ wire        rf_we   ;
 wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
 
-wire [31:0] alu_src1   ;
-wire [31:0] alu_src2   ;
-wire [31:0] alu_result ;
-
 wire [31:0] mem_result;
 
-/* answer
- * bug：final_result未定义
- */
+// EX -> MEM
+wire [31:0] alu_result ;
+
+// MEM -> WB
 wire [31:0] final_result;
 
 assign seq_pc       = pc[IF] + 32'h4;
-assign nextpc       = br_taken ? br_target[EX] : seq_pc;
+assign nextpc       = br_taken ? br_target : seq_pc;
 
 always @(posedge clk) begin
     if (reset) begin
-        pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset 
-                                    // no need to reset others for not valid
+        pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset
     end
     else begin
-        pc[IF]  <= nextpc;
-        pc[ID]  <= pc[IF];
-        pc[EX]  <= pc[ID];
-        pc[MEM] <= pc[EX];
-        pc[WB]  <= pc[MEM];
+        if (receive_new_inst[IF]) pc[IF]  <= nextpc;
+        if (receive_new_inst[ID]) pc[ID]  <= pc[IF];
+        if (receive_new_inst[EX]) pc[EX]  <= pc[ID];
     end
 end
 
-                        // forward shift for valid sign     current stall sign      backward shift for allow sign
-assign next_valid = {valid[TOTAL_STAGE_WIDTH - 2: 0], 1'b1} & ~ stall & {1'b0, allow[TOTAL_STAGE_WIDTH - 1: 1]};
+always @(posedge clk) begin
+    if (receive_new_inst[ID] ) seq_pc_reg[ID]  <= seq_pc;
+    if (receive_new_inst[EX] ) seq_pc_reg[EX]  <= seq_pc_reg[ID];
+    if (receive_new_inst[MEM]) seq_pc_reg[MEM] <= seq_pc_reg[EX];
+    if (receive_new_inst[WB] ) seq_pc_reg[WB]  <= seq_pc_reg[MEM];
+end
+
+// first cycle for new stage
+                        // right shift for valid signal           current stall signal      left shift for allow signal
+assign receive_new_inst = {valid[TOTAL_STAGE_WIDTH - 2: 0], 1'b1} & ~ stall & {1'b1, allow[TOTAL_STAGE_WIDTH - 1: 1]} & ~ flush;
+assign next_valid = receive_new_inst | ( ~ receive_new_inst & valid & flush);
 
 always @(posedge clk) begin
     if (reset) begin
@@ -267,6 +280,7 @@ assign dst_is_r1     = inst_bl;
  */
 assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
 assign mem_we        = inst_st_w;
+assign mem_en        = inst_st_w | inst_ld_w;
 assign dest          = dst_is_r1 ? 5'd1 : rd;
 
 assign rf_raddr1 = rj;
@@ -292,20 +306,11 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_bl
                    || inst_b
                   ) && valid[EX];
-// 分支目标：ID 级计算存入级间寄存器，EX 级判跳转时取用
-always @(posedge clk) begin
-    if (reset) begin
-        br_target[ID] <= 32'b0;
-        br_target[EX] <= 32'b0;
-    end
-    else begin
-        br_target[ID] <= (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[IF] + br_offs) :
-                                                       /*inst_jirl*/ (rj_value + jirl_offs);
-        br_target[EX] <= br_target[ID];
-    end
-end
 
-assign alu_src1 = src1_is_pc  ? pc[IF] : rj_value;
+assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
+                                                /*inst_jirl*/ (rj_value + jirl_offs);
+
+assign alu_src1 = src1_is_pc  ? pc[ID] : rj_value;
 assign alu_src2 = src2_is_imm ? imm : rkd_value;
 
 /* answer
@@ -318,7 +323,11 @@ alu u_alu(
     .alu_result (alu_result)
     );
 
-assign data_sram_en    = 1'b1;                 // 数据 RAM 片选：单周期下始终有效（流水化时可改为访存级有效信号）
+
+// not finish yet !!!
+
+
+assign data_sram_en    = mem_en && valid[MEM];  // need support from handshake logic
 assign data_sram_we    = {4{mem_we && valid[MEM]}}; // only support word write
 assign data_sram_addr  = alu_result;
 assign data_sram_wdata = rkd_value;
