@@ -39,6 +39,7 @@ localparam TOTAL_STAGE_WIDTH = 5;
 // fill in stall allow flush logic later !!!
 
 
+
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
 wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
@@ -55,28 +56,33 @@ wire [31:0] br_target;  // generate at ID stage
 wire [31:0] inst;       // receive in ID stage
 
 // should be stored between stages
-
-reg  [31:0] pc [EX: IF];
+reg  [31:0] pc [WB:IF];
 
 // control signals for EX stage
-wire [11:0] alu_op;
-wire        src1_is_pc;
-wire        src2_is_imm;
-wire [31:0] alu_src1   ;
-wire [31:0] alu_src2   ;
+reg  [11:0] alu_op [EX:ID];
+
+reg  [31:0] alu_src1    [EX:ID]; // operands latched at ID, used at EX
+reg  [31:0] alu_src2    [EX:ID];
 
 // control signals for MEM stage
-wire        res_from_mem;
-wire        mem_we;
-wire        mem_en;
+reg         res_from_mem [MEM:ID];
+reg         mem_we [MEM:ID];
+reg         mem_en [MEM:ID];
+reg  [31:0] mem_wdata [MEM:ID]; // store data: latch at ID, write RAM at MEM
 
 wire        load_op;    // not used
 
 // control signals for WB stage
-reg  [31:0] seq_pc_reg [WB: ID];
-wire        dst_is_r1;
-wire        gr_we;
-wire [4: 0] dest;
+reg         gr_we [WB:ID];
+reg  [4: 0] dest [WB:ID];
+
+// EX -> MEM
+wire [31:0] alu_result;      // ALU combinational output (EX stage)
+reg  [31:0] alu_result_mem;  // latched at MEM boundary (iverilog: module out must be wire)
+
+// MEM -> WB
+wire [31:0] final_result;
+reg  [31:0] final_result_wb;
 
 // mid signals for ID stage
 wire        src_reg_is_rd;
@@ -86,6 +92,8 @@ wire        rj_eq_rd;
 wire [31:0] imm;
 wire [31:0] br_offs;
 wire [31:0] jirl_offs;
+wire        src1_is_pc;
+wire        src2_is_imm;
 
 wire [ 5:0] op_31_26;
 wire [ 3:0] op_25_22;
@@ -142,12 +150,6 @@ wire [31:0] rf_wdata;
 
 wire [31:0] mem_result;
 
-// EX -> MEM
-wire [31:0] alu_result ;
-
-// MEM -> WB
-wire [31:0] final_result;
-
 assign seq_pc       = pc[IF] + 32'h4;
 assign nextpc       = br_taken ? br_target : seq_pc;
 
@@ -156,17 +158,12 @@ always @(posedge clk) begin
         pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset
     end
     else begin
-        if (receive_new_inst[IF]) pc[IF]  <= nextpc;
-        if (receive_new_inst[ID]) pc[ID]  <= pc[IF];
-        if (receive_new_inst[EX]) pc[EX]  <= pc[ID];
+        if (receive_new_inst[IF] ) pc[IF]  <= nextpc;
+        if (receive_new_inst[ID] ) pc[ID]  <= pc[IF];
+        if (receive_new_inst[EX] ) pc[EX]  <= pc[ID];
+        if (receive_new_inst[MEM]) pc[MEM] <= pc[EX];
+        if (receive_new_inst[WB] ) pc[WB]  <= pc[MEM];
     end
-end
-
-always @(posedge clk) begin
-    if (receive_new_inst[ID] ) seq_pc_reg[ID]  <= seq_pc;
-    if (receive_new_inst[EX] ) seq_pc_reg[EX]  <= seq_pc_reg[ID];
-    if (receive_new_inst[MEM]) seq_pc_reg[MEM] <= seq_pc_reg[EX];
-    if (receive_new_inst[WB] ) seq_pc_reg[WB]  <= seq_pc_reg[MEM];
 end
 
 // first cycle for new stage
@@ -229,19 +226,78 @@ assign inst_beq    = op_31_26_d[6'h16];
 assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w= op_31_26_d[6'h05] & ~inst[25];
 
-assign alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
+always @(posedge clk) begin
+    if (receive_new_inst[ID]) begin
+        alu_op[ID][ 0] <= inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                     | inst_jirl | inst_bl;
-assign alu_op[ 1] = inst_sub_w;
-assign alu_op[ 2] = inst_slt;
-assign alu_op[ 3] = inst_sltu;
-assign alu_op[ 4] = inst_and;
-assign alu_op[ 5] = inst_nor;
-assign alu_op[ 6] = inst_or;
-assign alu_op[ 7] = inst_xor;
-assign alu_op[ 8] = inst_slli_w;
-assign alu_op[ 9] = inst_srli_w;
-assign alu_op[10] = inst_srai_w;
-assign alu_op[11] = inst_lu12i_w;
+        alu_op[ID][ 1] <= inst_sub_w;
+        alu_op[ID][ 2] <= inst_slt;
+        alu_op[ID][ 3] <= inst_sltu;
+        alu_op[ID][ 4] <= inst_and;
+        alu_op[ID][ 5] <= inst_nor;
+        alu_op[ID][ 6] <= inst_or;
+        alu_op[ID][ 7] <= inst_xor;
+        alu_op[ID][ 8] <= inst_slli_w;
+        alu_op[ID][ 9] <= inst_srli_w;
+        alu_op[ID][10] <= inst_srai_w;
+        alu_op[ID][11] <= inst_lu12i_w;
+    end
+    if (receive_new_inst[EX]) alu_op[EX] <= alu_op[ID];
+end
+
+// EX stage: operands selected at ID, latched to EX
+always @(posedge clk) begin
+    if (receive_new_inst[ID]) begin
+        alu_src1[ID] <= src1_is_pc ? pc[IF] : rj_value; // pc[IF]: pc of the inst entering ID
+        alu_src2[ID] <= src2_is_imm ? imm : rkd_value;
+    end
+    if (receive_new_inst[EX]) begin
+        alu_src1[EX] <= alu_src1[ID];
+        alu_src2[EX] <= alu_src2[ID];
+    end
+end
+
+// MEM stage: mem control and store data latched at ID, shifted to MEM
+always @(posedge clk) begin
+    if (receive_new_inst[ID]) begin
+        res_from_mem[ID] <= inst_ld_w;
+        mem_we[ID]       <= inst_st_w;
+        mem_en[ID]       <= inst_st_w | inst_ld_w;
+        mem_wdata[ID]    <= rkd_value;
+    end
+    if (receive_new_inst[EX]) begin
+        res_from_mem[EX] <= res_from_mem[ID];
+        mem_we[EX]       <= mem_we[ID];
+        mem_en[EX]       <= mem_en[ID];
+        mem_wdata[EX]    <= mem_wdata[ID];
+    end
+    if (receive_new_inst[MEM]) begin
+        res_from_mem[MEM] <= res_from_mem[EX];
+        mem_we[MEM]       <= mem_we[EX];
+        mem_en[MEM]       <= mem_en[EX];
+        mem_wdata[MEM]    <= mem_wdata[EX];
+    end
+end
+
+// WB stage: write-back control latched at ID, shifted to WB
+always @(posedge clk) begin
+    if (receive_new_inst[ID]) begin
+        gr_we[ID] <= ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
+        dest[ID]  <= inst_bl ? 5'd1 : rd;
+    end
+    if (receive_new_inst[EX]) begin
+        gr_we[EX] <= gr_we[ID];
+        dest[EX]  <= dest[ID];
+    end
+    if (receive_new_inst[MEM]) begin
+        gr_we[MEM] <= gr_we[EX];
+        dest[MEM]  <= dest[EX];
+    end
+    if (receive_new_inst[WB]) begin
+        gr_we[WB] <= gr_we[MEM];
+        dest[WB]  <= dest[MEM];
+    end
+end
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w;
@@ -273,16 +329,6 @@ assign src2_is_imm   = inst_slli_w |
                        inst_jirl   |
                        inst_bl     ;
 
-assign res_from_mem  = inst_ld_w;
-assign dst_is_r1     = inst_bl;
-/* answer
- * bug：inst_bl需要写回通用寄存器堆
- */
-assign gr_we         = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
-assign mem_we        = inst_st_w;
-assign mem_en        = inst_st_w | inst_ld_w;
-assign dest          = dst_is_r1 ? 5'd1 : rd;
-
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd :rk;
 regfile u_regfile(
@@ -310,42 +356,45 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
-assign alu_src1 = src1_is_pc  ? pc[ID] : rj_value;
-assign alu_src2 = src2_is_imm ? imm : rkd_value;
-
-/* answer
- * bug：alu_src1连接错误
- */
 alu u_alu(
-    .alu_op     (alu_op    ),
-    .alu_src1   (alu_src1  ),
-    .alu_src2   (alu_src2  ),
+    .alu_op     (alu_op    [EX]),
+    .alu_src1   (alu_src1  [EX]),
+    .alu_src2   (alu_src2  [EX]),
     .alu_result (alu_result)
     );
 
+// EX -> MEM: latch alu result at MEM boundary
+always @(posedge clk) begin
+    if (receive_new_inst[MEM]) alu_result_mem <= alu_result;
+end
+
+assign final_result = res_from_mem[MEM] ? mem_result : alu_result_mem;
+
+// MEM -> WB: select write-back data at MEM (mem data or alu result), latch at WB
+always @(posedge clk) begin
+    if (receive_new_inst[WB]) final_result_wb <= final_result;
+end
+
 
 // not finish yet !!!
+// TODO: AXI req/rsp handshake with inst/data RAM later
 
 
-assign data_sram_en    = mem_en && valid[MEM];  // need support from handshake logic
-assign data_sram_we    = {4{mem_we && valid[MEM]}}; // only support word write
-assign data_sram_addr  = alu_result;
-assign data_sram_wdata = rkd_value;
+assign data_sram_en    = mem_en[MEM] && valid[MEM];     // should add in axi handshake logic
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
+assign data_sram_addr  = alu_result_mem;
+assign data_sram_wdata = mem_wdata[MEM];
 
-assign mem_result   = data_sram_rdata;
-assign final_result = res_from_mem ? mem_result : alu_result;
+assign mem_result = data_sram_rdata;
 
-assign rf_we    = gr_we && valid[WB];
-assign rf_waddr = dest;
-assign rf_wdata = final_result;
+// WB stage: write back to regfile
+assign rf_we    = gr_we[WB] && valid[WB];
+assign rf_waddr = dest[WB];
+assign rf_wdata = final_result_wb;
 
-// debug info generate
-/* answer
- * bug：debug_wb_rf_we拼写错误
- */
 assign debug_wb_pc       = pc[WB];
 assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
-assign debug_wb_rf_wnum  = dest;
-assign debug_wb_rf_wdata = final_result;
+assign debug_wb_rf_wnum  = dest[WB];
+assign debug_wb_rf_wdata = final_result_wb;
 
 endmodule
