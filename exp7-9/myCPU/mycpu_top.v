@@ -168,24 +168,31 @@ reg  IF_rsp_fire_reg;
 wire IF_rsp_fire;
 
 always @(posedge clk) begin
-    if (reset) begin
-        IF_req_valid <= 1'b0;
-    end
-    else if (receive_new_inst[IF])  IF_req_valid <= 1'b1;
-    else if (fake_IF_req_ready)     IF_req_valid <= 1'b0;
-    else                            IF_req_valid <= IF_req_valid; 
+    if (reset)                          IF_req_valid <= 1'b0;
+    else if (receive_new_inst[IF])      IF_req_valid <= 1'b1;
+    else if (fake_IF_req_ready)         IF_req_valid <= 1'b0;
+    else                                IF_req_valid <= IF_req_valid; 
 end
 
 assign IF_req_fire = IF_req_valid && fake_IF_req_ready;
 
+assign fake_IF_req_ready = IF_req_valid;
+
 always @(posedge clk) begin
-    if (reset) begin
-        IF_rsp_fire_reg <= 1'b0;
-    end
-    else if (receive_new_inst[IF])   IF_rsp_fire_reg <= 1'b0;
-    else if (IF_req_fire)            IF_rsp_fire_reg <= 1'b1;
-    else                             IF_rsp_fire_reg <= IF_rsp_fire_reg;
+    if (reset)                          IF_rsp_fire_reg <= 1'b0;
+    else if (receive_new_inst[IF])      IF_rsp_fire_reg <= 1'b0;
+    else if (IF_rsp_fire_wire)          IF_rsp_fire_reg <= 1'b1;
+    else                                IF_rsp_fire_reg <= IF_rsp_fire_reg;
 end
+
+always @(posedge clk) begin
+    if (reset)                          IF_rsp_ready    <= 1'b0;
+    else if (receive_new_inst[IF])      IF_rsp_ready    <= 1'b0;
+    else if (IF_req_fire)               IF_rsp_ready    <= 1'b1;
+    else                                IF_rsp_ready    <= IF_rsp_ready;
+end
+
+assign IF_rsp_fire_wire = IF_rsp_ready && fake_IF_rsp_valid;
 
 assign IF_rsp_fire = IF_rsp_fire_reg | IF_rsp_fire_wire;
 
@@ -202,9 +209,7 @@ reg  MEM_rsp_fire_reg;
 wire MEM_rsp_fire;
 
 always @(posedge clk) begin
-    if (reset) begin
-        MEM_req_valid <= 1'b0;
-    end
+    if (reset)                          MEM_req_valid <= 1'b0;
     else if (receive_new_inst[MEM])     MEM_req_valid <= valid[EX];
     else if (fake_MEM_req_ready)        MEM_req_valid <= 1'b0;
     else                                MEM_req_valid <= MEM_req_valid; 
@@ -212,14 +217,23 @@ end
 
 assign MEM_req_fire = MEM_req_valid && fake_MEM_req_ready;
 
+assign fake_IF_req_ready = IF_req_valid;
+
 always @(posedge clk) begin
-    if (reset) begin
-        MEM_rsp_fire_reg <= 1'b0;
-    end
-    else if (receive_new_inst[MEM])      MEM_rsp_fire_reg <= 1'b0;
-    else if (MEM_req_fire)               MEM_rsp_fire_reg <= 1'b1;
-    else                                 MEM_rsp_fire_reg <= MEM_rsp_fire_reg;
+    if (reset)                          MEM_rsp_fire_reg <= 1'b0;
+    else if (receive_new_inst[MEM])     MEM_rsp_fire_reg <= 1'b0;
+    else if (MEM_req_fire)              MEM_rsp_fire_reg <= 1'b1;
+    else                                MEM_rsp_fire_reg <= MEM_rsp_fire_reg;
 end
+
+always @(posedge clk) begin
+    if (reset)                          MEM_rsp_ready    <= 1'b0;
+    else if (receive_new_inst[MEM])     MEM_rsp_ready    <= 1'b0;
+    else if (MEM_req_fire)              MEM_rsp_ready    <= 1'b1;
+    else                                MEM_rsp_ready    <= MEM_rsp_ready;
+end
+
+assign MEM_rsp_fire_wire = MEM_rsp_ready && fake_MEM_rsp_valid;
 
 assign MEM_rsp_fire = MEM_rsp_fire_reg | MEM_rsp_fire_wire;
 
