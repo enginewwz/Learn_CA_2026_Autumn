@@ -223,7 +223,7 @@ end
 
 assign MEM_rsp_fire = MEM_rsp_fire_reg | MEM_rsp_fire_wire;
 
-assign fake_MEM_rsp_ready = MEM_rsp_valid;
+assign fake_MEM_rsp_valid = MEM_rsp_ready;
 
 
 assign seq_pc       = pc[IF] + 32'h4;
