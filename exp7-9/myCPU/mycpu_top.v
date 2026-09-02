@@ -34,17 +34,12 @@ localparam MEM  = 3;
 localparam WB   = 4;
 localparam TOTAL_STAGE_WIDTH = 5;
 
-
-
-// fill in stall allow flush logic later !!!
-
-
-
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
 wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
-wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is empty for new inst; the last stage (WB) would always allow; reset as 1
+wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is ready for new inst; the last stage (WB) would always allow; reset as 1
 wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
+wire [TOTAL_STAGE_WIDTH - 1: 0] cur_valid;
 wire [TOTAL_STAGE_WIDTH - 1: 0] receive_new_inst;
 wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
 
@@ -65,7 +60,7 @@ reg  [31:0] alu_src1    [EX:ID]; // operands latched at ID, used at EX
 reg  [31:0] alu_src2    [EX:ID];
 
 // control signals for MEM stage
-reg         res_from_mem [MEM:ID];
+reg         res_from_mem [WB:ID]; // need to shift back to MEM:ID if use axi
 reg         mem_we [MEM:ID];
 reg         mem_en [MEM:ID];
 reg  [31:0] mem_wdata [MEM:ID]; // store data: latch at ID, write RAM at MEM
@@ -76,13 +71,13 @@ wire        load_op;    // not used
 reg         gr_we [WB:ID];
 reg  [4: 0] dest [WB:ID];
 
-// EX -> MEM
+// EX -> WB
 wire [31:0] alu_result;      // ALU combinational output (EX stage)
-reg  [31:0] alu_result_mem;  // latched at MEM boundary (iverilog: module out must be wire)
+reg  [31:0] alu_result_reg [WB: MEM];
 
-// MEM -> WB
+// MEM -> WB(cur only in WB)
 wire [31:0] final_result;
-reg  [31:0] final_result_wb;
+// need to shift to reg if use axi
 
 // mid signals for ID stage
 wire        src_reg_is_rd;
@@ -149,6 +144,9 @@ wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
 
 wire [31:0] mem_result;
+wire        load_use;
+
+// no axi support yet
 
 assign seq_pc       = pc[IF] + 32'h4;
 assign nextpc       = br_taken ? br_target : seq_pc;
@@ -167,9 +165,9 @@ always @(posedge clk) begin
 end
 
 // first cycle for new stage
-                        // right shift for valid signal           current stall signal      left shift for allow signal
-assign receive_new_inst = {valid[TOTAL_STAGE_WIDTH - 2: 0], 1'b1} & ~ stall & {1'b1, allow[TOTAL_STAGE_WIDTH - 1: 1]} & ~ flush;
-assign next_valid = receive_new_inst | ( ~ receive_new_inst & valid & flush);
+assign cur_valid = valid & ~ flush;
+assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0], 1'b1} & allow;
+assign next_valid = receive_new_inst | (~ allow & cur_valid);
 
 always @(posedge clk) begin
     if (reset) begin
@@ -180,11 +178,29 @@ always @(posedge clk) begin
     end
 end
 
-assign inst_sram_en    = 1'b1;        // 指令 RAM 片选：单周期下始终有效
-assign inst_sram_we    = 4'b0;        // 指令 RAM 只读，4 位字节写使能全 0
-assign inst_sram_addr  = pc[IF];      // 取指地址用 IF 级 PC
+// flush logic --> only flushes at stage ID
+assign flush = br_taken ? 5'b00011 : 5'b00000;
+
+// allow logic --> generate with stall logic
+assign allow[WB]  = 1'b1;
+assign allow[MEM] = ~ stall[MEM];
+assign allow[EX]  = ~ stall[EX] && allow[MEM];
+assign allow[ID]  = ~ stall[ID] && allow[EX];
+assign allow[IF]  = ~ stall[IF] && allow[ID];
+
+// stall for load use hazard
+assign load_use =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  || (rf_raddr2 == dest[EX])))  |
+                    (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) || (rf_raddr2 == dest[MEM]))) ;
+
+assign stall = load_use ? 5'b00010 : 5'b00000;
+
+
+
+assign inst_sram_en    = 1'b1;
+assign inst_sram_we    = 4'b0;
+assign inst_sram_addr  = pc[IF];
 assign inst_sram_wdata = 32'b0;
-assign inst            = inst_sram_rdata;
+assign inst            = inst_sram_rdata;   // need to change if use axi
 
 assign op_31_26  = inst[31:26];
 assign op_25_22  = inst[25:22];
@@ -260,19 +276,19 @@ end
 // MEM stage: mem control and store data latched at ID, shifted to MEM
 always @(posedge clk) begin
     if (receive_new_inst[ID]) begin
-        res_from_mem[ID] <= inst_ld_w;
+
         mem_we[ID]       <= inst_st_w;
         mem_en[ID]       <= inst_st_w | inst_ld_w;
         mem_wdata[ID]    <= rkd_value;
     end
     if (receive_new_inst[EX]) begin
-        res_from_mem[EX] <= res_from_mem[ID];
+
         mem_we[EX]       <= mem_we[ID];
         mem_en[EX]       <= mem_en[ID];
         mem_wdata[EX]    <= mem_wdata[ID];
     end
     if (receive_new_inst[MEM]) begin
-        res_from_mem[MEM] <= res_from_mem[EX];
+
         mem_we[MEM]       <= mem_we[EX];
         mem_en[MEM]       <= mem_en[EX];
         mem_wdata[MEM]    <= mem_wdata[EX];
@@ -282,18 +298,26 @@ end
 // WB stage: write-back control latched at ID, shifted to WB
 always @(posedge clk) begin
     if (receive_new_inst[ID]) begin
+        res_from_mem[ID] <= inst_ld_w;
+
         gr_we[ID] <= ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
         dest[ID]  <= inst_bl ? 5'd1 : rd;
     end
     if (receive_new_inst[EX]) begin
+        res_from_mem[EX] <= res_from_mem[ID];
+        
         gr_we[EX] <= gr_we[ID];
         dest[EX]  <= dest[ID];
     end
     if (receive_new_inst[MEM]) begin
+        res_from_mem[MEM] <= res_from_mem[EX];
+
         gr_we[MEM] <= gr_we[EX];
         dest[MEM]  <= dest[EX];
     end
     if (receive_new_inst[WB]) begin
+        res_from_mem[WB] <= res_from_mem[MEM];
+
         gr_we[WB] <= gr_we[MEM];
         dest[WB]  <= dest[MEM];
     end
@@ -351,7 +375,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && valid[EX];
+                  ) && valid[ID];
 
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
@@ -365,24 +389,23 @@ alu u_alu(
 
 // EX -> MEM: latch alu result at MEM boundary
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) alu_result_mem <= alu_result;
+    if (receive_new_inst[MEM]) alu_result_reg[MEM] <= alu_result;
+    if (receive_new_inst[WB] ) alu_result_reg[WB]  <= alu_result_reg[MEM];
 end
 
-assign final_result = res_from_mem[MEM] ? mem_result : alu_result_mem;
+// with no axi handshake check at WB stage
+assign final_result = res_from_mem[WB] ? mem_result : alu_result_reg[WB];
 
-// MEM -> WB: select write-back data at MEM (mem data or alu result), latch at WB
-always @(posedge clk) begin
-    if (receive_new_inst[WB]) final_result_wb <= final_result;
-end
+// // MEM -> WB: select write-back data at MEM (mem data or alu result), latch at WB
+// always @(posedge clk) begin
+//     if (receive_new_inst[WB]) final_result_wb <= final_result;
+// end
 
-
-// not finish yet !!!
-// TODO: AXI req/rsp handshake with inst/data RAM later
-
+// cur no axi handshake yet
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM];     // should add in axi handshake logic
 assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
-assign data_sram_addr  = alu_result_mem;
+assign data_sram_addr  = alu_result_reg[WB];
 assign data_sram_wdata = mem_wdata[MEM];
 
 assign mem_result = data_sram_rdata;
@@ -390,11 +413,11 @@ assign mem_result = data_sram_rdata;
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
 assign rf_waddr = dest[WB];
-assign rf_wdata = final_result_wb;
+assign rf_wdata = final_result;
 
 assign debug_wb_pc       = pc[WB];
 assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
 assign debug_wb_rf_wnum  = dest[WB];
-assign debug_wb_rf_wdata = final_result_wb;
+assign debug_wb_rf_wdata = final_result;
 
 endmodule
