@@ -241,7 +241,7 @@ end
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_ready    <= 1'b0;
     else if (receive_new_inst[MEM])     MEM_rsp_ready    <= 1'b0;
-    else if (MEM_req_fire)              MEM_rsp_ready    <= mem_we[MEM];
+    else if (MEM_req_fire)              MEM_rsp_ready    <= ~ mem_we[MEM];
     else                                MEM_rsp_ready    <= MEM_rsp_ready;
 end
 
@@ -326,7 +326,7 @@ assign stall[ID] = load_use_hit;
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
-assign stall[MEM] = (((~ MEM_rsp_fire & mem_we[MEM]) || ~ MEM_req_fire) & mem_en[MEM]) && valid[MEM];
+assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
 
 // generate forwarding bits
 assign forwarding_hit1[EX] = valid[EX] && ~mem_en[EX] && gr_we[EX] && (dest[EX] != 5'd0) && (rf_raddr1 == dest[EX]);
