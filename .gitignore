@@ -60,3 +60,6 @@ project/
 
 # vscode settings
 .vscode/
+
+# new examples or base zip / folder
+/ex/
