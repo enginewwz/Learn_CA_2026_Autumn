@@ -63,3 +63,6 @@ project/
 
 # new examples or base zip / folder
 /ex/
+
+# rm .patch
+*.patch
