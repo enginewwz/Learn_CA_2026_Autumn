@@ -66,3 +66,6 @@ project/
 
 # rm .patch
 *.patch
+
+# rm patches file
+/patch/
