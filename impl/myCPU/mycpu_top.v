@@ -303,7 +303,7 @@ always @(posedge clk) begin
     end
 end
 
-// flush logic --> only flushes at stage ID
+// flush logic --> only dectected at stage ID
 assign flush = br_taken ? 5'b00001 : 5'b00000;
 
 // allow logic --> generate with stall logic
@@ -319,10 +319,10 @@ assign stall[EX] = 1'b0;
 assign stall[WB] = 1'b0;
 
 // stall for load use hazard
-assign load_use_hit =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  || (rf_raddr2 == dest[EX])))  |
-                        (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) || (rf_raddr2 == dest[MEM]))) ;
+assign load_use_hit =   (valid[EX]  && mem_en[EX]  && ~ mem_we[EX]  && ((rf_raddr1 == dest[EX])  && (rf_raddr1 != 5'b0) || (rf_raddr2 == dest[EX])  && (rf_raddr2 != 5'b0))) |
+                        (valid[MEM] && mem_en[MEM] && ~ mem_we[MEM] && ((rf_raddr1 == dest[MEM]) && (rf_raddr1 != 5'b0) || (rf_raddr2 == dest[MEM]) && (rf_raddr2 != 5'b0)));
 
-assign stall[ID] = load_use_hit;
+assign stall[ID] = load_use_hit && valid[ID];
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
@@ -334,12 +334,12 @@ assign forwarding_hit2[EX] = valid[EX] && ~mem_en[EX] && gr_we[EX] && (dest[EX] 
 assign forwarding_hit1[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && (dest[MEM] != 5'd0) && (rf_raddr1 == dest[MEM]);
 assign forwarding_hit2[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && (dest[MEM] != 5'd0) && (rf_raddr2 == dest[MEM]);
 
-assign forwarding_data1 = forwarding_hit1[MEM] ? alu_result_mem :
-                          forwarding_hit1[EX]  ? alu_result     :
+assign forwarding_data1 = forwarding_hit1[EX]  ? alu_result     :
+                          forwarding_hit1[MEM] ? alu_result_mem :                          
                           rf_rdata1;
 
-assign forwarding_data2 = forwarding_hit2[MEM] ? alu_result_mem :
-                          forwarding_hit2[EX]  ? alu_result     :
+assign forwarding_data2 = forwarding_hit2[EX]  ? alu_result     :
+                          forwarding_hit2[MEM] ? alu_result_mem :
                           rf_rdata2;
 
 assign inst_sram_en    = IF_req_valid;
@@ -509,7 +509,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && valid[ID];
+                  ) && receive_new_inst[EX];
 
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
