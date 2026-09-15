@@ -187,7 +187,7 @@ assign IF_req_fire = IF_req_valid && fake_IF_req_ready;
 assign fake_IF_req_ready = IF_req_valid;
 
 always @(posedge clk) begin
-    if (reset)                          IF_rsp_fire_reg <= 1'b0;
+    if (reset)                          IF_rsp_fire_reg <= 1'b1;    // to start without stalling IF
     else if (receive_new_inst[IF])      IF_rsp_fire_reg <= 1'b0;
     else if (IF_rsp_fire_wire)          IF_rsp_fire_reg <= 1'b1;
     else                                IF_rsp_fire_reg <= IF_rsp_fire_reg;
@@ -338,7 +338,7 @@ assign load_use_hit = (valid[EX]  && mem_en[EX]  && ~mem_we[EX]  && (src1_match[
 assign stall[ID] = load_use_hit && valid[ID];
 
 // stall for IF & MEM
-assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
+assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
 
 // generate forwarding bits
