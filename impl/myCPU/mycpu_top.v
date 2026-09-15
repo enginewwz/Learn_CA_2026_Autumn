@@ -60,24 +60,24 @@ reg  [31:0] inst [ID:IF];
 
 // source register usage: decode at ID, carry through EX and MEM
 // split_var lets Verilator distinguish independently driven stage elements
-reg  [MEM:ID] src1_used /* verilator split_var */;
-reg  [MEM:ID] src2_used /* verilator split_var */;
+reg  [MEM:ID] src1_used;
+reg  [MEM:ID] src2_used;
 
 // ID -> EX: combinational at ID, registered at EX
 reg  [11:0] alu_op [EX:ID];
-reg  [31:0] alu_src1 [EX:ID] /* verilator split_var */;
-reg  [31:0] alu_src2 [EX:ID] /* verilator split_var */;
+reg  [31:0] alu_src1 [EX:ID];
+reg  [31:0] alu_src2 [EX:ID];
 
 // ID -> MEM: combinational at ID, carried with the instruction
-reg  [MEM:ID] res_from_mem /* verilator split_var */;
-reg  [MEM:ID] mem_we /* verilator split_var */;
-reg  [MEM:ID] mem_en /* verilator split_var */;
+reg  [MEM:ID] res_from_mem;
+reg  [MEM:ID] mem_we;
+reg  [MEM:ID] mem_en;
 reg  [31:0] mem_wdata [MEM:ID]; // select at ID, latch to EX/MEM, write RAM at MEM
 
 wire        load_op;    // not used
 
 // ID -> WB: combinational at ID, carried with the instruction
-reg  [WB:ID] gr_we /* verilator split_var */;
+reg  [WB:ID] gr_we;
 reg  [4: 0] dest [WB:ID];
 
 // EX -> MEM: module output remains a wire in Verilog
