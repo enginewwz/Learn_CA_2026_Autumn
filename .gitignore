@@ -69,3 +69,6 @@ project/
 
 # rm patches file
 /patch/
+
+# rm reports
+report/

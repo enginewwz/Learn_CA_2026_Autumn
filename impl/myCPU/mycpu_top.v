@@ -60,24 +60,24 @@ reg  [31:0] inst [ID:IF];
 
 // source register usage: decode at ID, carry through EX and MEM
 // split_var lets Verilator distinguish independently driven stage elements
-reg  [MEM:ID] src1_used /* verilator split_var */;
-reg  [MEM:ID] src2_used /* verilator split_var */;
+reg  [MEM:ID] src1_used;
+reg  [MEM:ID] src2_used;
 
 // ID -> EX: combinational at ID, registered at EX
 reg  [11:0] alu_op [EX:ID];
-reg  [31:0] alu_src1 [EX:ID] /* verilator split_var */;
-reg  [31:0] alu_src2 [EX:ID] /* verilator split_var */;
+reg  [31:0] alu_src1 [EX:ID];
+reg  [31:0] alu_src2 [EX:ID];
 
 // ID -> MEM: combinational at ID, carried with the instruction
-reg  [MEM:ID] res_from_mem /* verilator split_var */;
-reg  [MEM:ID] mem_we /* verilator split_var */;
-reg  [MEM:ID] mem_en /* verilator split_var */;
+reg  [MEM:ID] res_from_mem;
+reg  [MEM:ID] mem_we;
+reg  [MEM:ID] mem_en;
 reg  [31:0] mem_wdata [MEM:ID]; // select at ID, latch to EX/MEM, write RAM at MEM
 
 wire        load_op;    // not used
 
 // ID -> WB: combinational at ID, carried with the instruction
-reg  [WB:ID] gr_we /* verilator split_var */;
+reg  [WB:ID] gr_we;
 reg  [4: 0] dest [WB:ID];
 
 // EX -> MEM: module output remains a wire in Verilog
@@ -187,7 +187,7 @@ assign IF_req_fire = IF_req_valid && fake_IF_req_ready;
 assign fake_IF_req_ready = IF_req_valid;
 
 always @(posedge clk) begin
-    if (reset)                          IF_rsp_fire_reg <= 1'b0;
+    if (reset)                          IF_rsp_fire_reg <= 1'b1;    // to start without stalling IF
     else if (receive_new_inst[IF])      IF_rsp_fire_reg <= 1'b0;
     else if (IF_rsp_fire_wire)          IF_rsp_fire_reg <= 1'b1;
     else                                IF_rsp_fire_reg <= IF_rsp_fire_reg;
@@ -338,7 +338,7 @@ assign load_use_hit = (valid[EX]  && mem_en[EX]  && ~mem_we[EX]  && (src1_match[
 assign stall[ID] = load_use_hit && valid[ID];
 
 // stall for IF & MEM
-assign stall[IF]  = ~ IF_rsp_fire && valid[IF];
+assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
 
 // generate forwarding bits
