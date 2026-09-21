@@ -64,6 +64,11 @@ reg  [31:0] alu_src2;
 reg  [31:0] alu_result  [2:0];
 reg  [31:0] final_result;
 
+// One-hot view of which EX stage drives the EX -> MEM interface this cycle.
+// Normally that is stage 3; an ALU result that is already the oldest
+// instruction in EX may leave from stage 2/1/0 instead (short-circuit).
+wire [3:0] out_sel;
+
 reg         src1_used   [3:0];
 reg         src2_used   [3:0];
 reg  [31:0] pc          [3:0];
@@ -112,9 +117,10 @@ always @(posedge clk) begin
         if (receive)         valid [0] <= 1'b1;
         else if (! stall_pipeline[1]) valid [0] <= 1'b0;  // stage 0 moves on when stage 1 takes it
 
-        if (! stall_pipeline[1]) valid [1] <= valid [0];
-        if (! stall_pipeline[2]) valid [2] <= valid [1];
-        if (! stall_pipeline[3]) valid [3] <= valid [2];
+        // a short-circuited stage hands its instruction to MEM, not to stage+1
+        if (! stall_pipeline[1]) valid [1] <= valid [0] & ~ alu_no_mul_shortcut[0];
+        if (! stall_pipeline[2]) valid [2] <= valid [1] & ~ alu_no_mul_shortcut[1];
+        if (! stall_pipeline[3]) valid [3] <= valid [2] & ~ alu_no_mul_shortcut[2];
     end
 end
 
@@ -214,17 +220,27 @@ assign alu_no_mul_shortcut[2] = (~ mul_pos[  3]) & alu_pos[2] & valid[2] & (~|(a
 assign alu_no_mul_shortcut[1] = (~|mul_pos[3:2]) & alu_pos[1] & valid[1] & (~|(alu_pos[3:2] & valid[3:2])) & allow_next;
 assign alu_no_mul_shortcut[0] = (~|mul_pos[3:1]) & alu_pos[0] & valid[0] & (~|(alu_pos[3:1] & valid[3:1])) & allow_next;
 
-assign pc_o           = pc          [3];
-assign valid_o        = valid       [3];
-assign src1_used_o    = src1_used   [3];
-assign src2_used_o    = src2_used   [3];
-assign res_from_mem_o = res_from_mem[3];
-assign mem_we_o       = mem_we      [3];
-assign mem_en_o       = mem_en      [3];
-assign mem_wdata_o    = mem_wdata   [3];
-assign gr_we_o        = gr_we       [3];
-assign dest_o         = dest        [3];
-assign ex_result      = final_result;
+// Stage 3 normally drives the outputs; when it is empty an ALU result that is
+// already the oldest instruction short-circuits straight out of its stage.
+// (valid[3] keeps priority so an older valid instruction is never overtaken.)
+assign out_sel[3]   = valid [3];
+assign out_sel[2:0] = alu_no_mul_shortcut & {3{~ valid[3]}};
+
+assign valid_o        = | out_sel;
+assign pc_o           = out_sel[0] ? pc          [0] : out_sel[1] ? pc          [1] : out_sel[2] ? pc          [2] : pc          [3];
+assign src1_used_o    = out_sel[0] ? src1_used   [0] : out_sel[1] ? src1_used   [1] : out_sel[2] ? src1_used   [2] : src1_used   [3];
+assign src2_used_o    = out_sel[0] ? src2_used   [0] : out_sel[1] ? src2_used   [1] : out_sel[2] ? src2_used   [2] : src2_used   [3];
+assign res_from_mem_o = out_sel[0] ? res_from_mem[0] : out_sel[1] ? res_from_mem[1] : out_sel[2] ? res_from_mem[2] : res_from_mem[3];
+assign mem_we_o       = out_sel[0] ? mem_we      [0] : out_sel[1] ? mem_we      [1] : out_sel[2] ? mem_we      [2] : mem_we      [3];
+assign mem_en_o       = out_sel[0] ? mem_en      [0] : out_sel[1] ? mem_en      [1] : out_sel[2] ? mem_en      [2] : mem_en      [3];
+assign mem_wdata_o    = out_sel[0] ? mem_wdata   [0] : out_sel[1] ? mem_wdata   [1] : out_sel[2] ? mem_wdata   [2] : mem_wdata   [3];
+assign gr_we_o        = out_sel[0] ? gr_we       [0] : out_sel[1] ? gr_we       [1] : out_sel[2] ? gr_we       [2] : gr_we       [3];
+assign dest_o         = out_sel[0] ? dest        [0] : out_sel[1] ? dest        [1] : out_sel[2] ? dest        [2] : dest        [3];
+
+// stage 3 already holds its value in final_result; a short-circuit takes the
+// ALU result on the spot (mul never short-circuits: it needs stage 3 to
+// register its combinational CPA output)
+assign ex_result      = out_sel[0] ? alu_result[0] : out_sel[1] ? alu_result[1] : out_sel[2] ? alu_result[2] : final_result;
 
 alu u_alu(
     .alu_op     (alu_op         ),
