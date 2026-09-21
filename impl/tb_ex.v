@@ -28,10 +28,12 @@ reg  [31:0] pc_i;
 reg  [ 6:0] md_op_i;
 reg         res_from_mem_i, mem_we_i, mem_en_i;
 reg  [31:0] mem_wdata_i;
+reg  [ 2:0] mem_size_i;
 reg         gr_we_i;
 reg  [ 4:0] dest_i;
 
 wire [31:0] pc_o, mem_wdata_o, ex_result;
+wire [ 2:0] mem_size_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
@@ -56,6 +58,7 @@ EX u_ex(
     .mem_we_i       (mem_we_i       ),
     .mem_en_i       (mem_en_i       ),
     .mem_wdata_i    (mem_wdata_i    ),
+    .mem_size_i     (mem_size_i     ),
     .gr_we_i        (gr_we_i        ),
     .dest_i         (dest_i         ),
     .pc_o           (pc_o           ),
@@ -65,6 +68,7 @@ EX u_ex(
     .mem_we_o       (mem_we_o       ),
     .mem_en_o       (mem_en_o       ),
     .mem_wdata_o    (mem_wdata_o    ),
+    .mem_size_o     (mem_size_o     ),
     .gr_we_o        (gr_we_o        ),
     .dest_o         (dest_o         ),
     .valid_o        (valid_o        ),
@@ -161,7 +165,7 @@ reg [31:0] A, B;
 initial begin
     receive = 0; allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
     src1_used_i = 0; src2_used_i = 0; pc_i = 0; md_op_i = 0;
-    res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; gr_we_i = 0; dest_i = 0;
+    res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; gr_we_i = 0; dest_i = 0;
     repeat (4) @(posedge clk);
     reset = 1'b0;
     repeat (2) @(posedge clk);

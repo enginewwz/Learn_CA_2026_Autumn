@@ -20,6 +20,7 @@ module EX(
     input  wire        mem_we_i,
     input  wire        mem_en_i,
     input  wire [31:0] mem_wdata_i,
+    input  wire [ 2:0] mem_size_i,
     input  wire        gr_we_i,
     input  wire [ 4:0] dest_i,
 
@@ -31,6 +32,7 @@ module EX(
     output wire        mem_we_o,
     output wire        mem_en_o,
     output wire [31:0] mem_wdata_o,
+    output wire [ 2:0] mem_size_o,
     output wire        gr_we_o,
     output wire [ 4:0] dest_o,
 
@@ -102,6 +104,7 @@ reg         res_from_mem[3:0];
 reg         mem_we      [3:0];
 reg         mem_en      [3:0];
 reg  [31:0] mem_wdata   [3:0];
+reg  [ 2:0] mem_size    [3:0];
 reg         gr_we       [3:0];
 reg  [ 4:0] dest        [3:0];
 
@@ -118,6 +121,8 @@ wire [31:0] div_quot, div_rem;
 reg         div_inflight;        // a div has been started and not yet left EX
 wire        div_wait3;           // stage-3 div whose result is not latched yet
 wire        div_latch;           // ...and the unit has its result ready
+wire        div_is_signed, div_is_mod;
+wire        div_start, div_leave;
 
 // While a div waits in stage 3 it must freeze everything behind it, and it must
 // not look valid to MEM yet: receive_new_inst[MEM] only checks ~stall[EX], and
@@ -242,6 +247,7 @@ always @(posedge clk) begin
         mem_we       [0] <= mem_we_i;
         mem_en       [0] <= mem_en_i;
         mem_wdata    [0] <= mem_wdata_i;
+        mem_size     [0] <= mem_size_i;
         gr_we        [0] <= gr_we_i;
         dest         [0] <= dest_i;
     end
@@ -256,6 +262,7 @@ always @(posedge clk) begin
         mem_we       [1] <= mem_we       [0];
         mem_en       [1] <= mem_en       [0];
         mem_wdata    [1] <= mem_wdata    [0];
+        mem_size     [1] <= mem_size     [0];
         gr_we        [1] <= gr_we        [0];
         dest         [1] <= dest         [0];
     end
@@ -269,6 +276,7 @@ always @(posedge clk) begin
         mem_we       [2] <= mem_we       [1];
         mem_en       [2] <= mem_en       [1];
         mem_wdata    [2] <= mem_wdata    [1];
+        mem_size     [2] <= mem_size     [1];
         gr_we        [2] <= gr_we        [1];
         dest         [2] <= dest         [1];
     end
@@ -282,6 +290,7 @@ always @(posedge clk) begin
         mem_we       [3] <= mem_we       [2];
         mem_en       [3] <= mem_en       [2];
         mem_wdata    [3] <= mem_wdata    [2];
+        mem_size     [3] <= mem_size     [2];
         gr_we        [3] <= gr_we        [2];
         dest         [3] <= dest         [2];
     end
@@ -306,6 +315,7 @@ assign res_from_mem_o = out_sel[0] ? res_from_mem[0] : out_sel[1] ? res_from_mem
 assign mem_we_o       = out_sel[0] ? mem_we      [0] : out_sel[1] ? mem_we      [1] : out_sel[2] ? mem_we      [2] : mem_we      [3];
 assign mem_en_o       = out_sel[0] ? mem_en      [0] : out_sel[1] ? mem_en      [1] : out_sel[2] ? mem_en      [2] : mem_en      [3];
 assign mem_wdata_o    = out_sel[0] ? mem_wdata   [0] : out_sel[1] ? mem_wdata   [1] : out_sel[2] ? mem_wdata   [2] : mem_wdata   [3];
+assign mem_size_o     = out_sel[0] ? mem_size    [0] : out_sel[1] ? mem_size    [1] : out_sel[2] ? mem_size    [2] : mem_size    [3];
 assign gr_we_o        = out_sel[0] ? gr_we       [0] : out_sel[1] ? gr_we       [1] : out_sel[2] ? gr_we       [2] : gr_we       [3];
 assign dest_o         = out_sel[0] ? dest        [0] : out_sel[1] ? dest        [1] : out_sel[2] ? dest        [2] : dest        [3];
 

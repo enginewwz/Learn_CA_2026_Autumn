@@ -83,6 +83,8 @@ reg         res_from_mem [MEM:ID] /* verilator split_var */;
 reg         mem_we [MEM:ID] /* verilator split_var */;
 reg         mem_en [MEM:ID] /* verilator split_var */;
 reg  [31:0] mem_wdata [MEM:ID] /* verilator split_var */;
+// [0]=byte access, [1]=halfword access, [2]=load zero-extends (ld.bu / ld.hu)
+reg  [ 2:0] mem_size [MEM:ID] /* verilator split_var */;
 reg         gr_we [WB:ID] /* verilator split_var */;
 reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
@@ -94,6 +96,7 @@ wire        res_from_mem_o;
 wire        mem_we_o;
 wire        mem_en_o;
 wire [31:0] mem_wdata_o;
+wire [ 2:0] mem_size_o;
 wire        gr_we_o;
 wire  [4:0] dest_o;
 wire        valid_o;
@@ -122,6 +125,7 @@ always @(*) begin
     mem_we[EX]       = mem_we_o;
     mem_en[EX]       = mem_en_o;
     mem_wdata[EX]    = mem_wdata_o;
+    mem_size[EX]     = mem_size_o;
     gr_we[EX]        = gr_we_o;
     dest[EX]         = dest_o;
     valid[EX]        = valid_o;
@@ -132,6 +136,8 @@ wire        src_reg_is_rd;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
 wire        rj_eq_rd;
+wire        rj_lt_rd;
+wire        rj_ltu_rd;
 wire [31:0] imm;
 wire [31:0] br_offs;
 wire [31:0] jirl_offs;
@@ -195,6 +201,18 @@ wire        inst_div_w;
 wire        inst_div_wu;
 wire        inst_mod_w;
 wire        inst_mod_wu;
+
+// exp11: compare branches and byte / halfword memory
+wire        inst_blt;
+wire        inst_bge;
+wire        inst_bltu;
+wire        inst_bgeu;
+wire        inst_ld_b;
+wire        inst_ld_h;
+wire        inst_ld_bu;
+wire        inst_ld_hu;
+wire        inst_st_b;
+wire        inst_st_h;
 
 wire        need_ui5;
 wire        need_ui12;
@@ -387,7 +405,7 @@ assign allow[EX]  = ~ stall[EX] && allow[MEM];
 assign allow[ID]  = ~ stall[ID] && allow[EX];
 assign allow[IF]  = ~ stall[IF] && allow[ID];
 
-// EX reports its own stall request (0 for now; mul/div will drive it)
+// EX reports its own stall request (div waiting, ALU/mul/div back-pressure)
 assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
@@ -519,6 +537,18 @@ assign inst_mod_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] &
 assign inst_div_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
 assign inst_mod_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
 
+// exp11 compare branches and byte / halfword memory
+assign inst_blt   = op_31_26_d[6'h18];
+assign inst_bge   = op_31_26_d[6'h19];
+assign inst_bltu  = op_31_26_d[6'h1a];
+assign inst_bgeu  = op_31_26_d[6'h1b];
+assign inst_ld_b  = op_31_26_d[6'h0a] & op_25_22_d[4'h0];
+assign inst_ld_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
+assign inst_st_b  = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
+assign inst_st_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
+assign inst_ld_bu = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
+assign inst_ld_hu = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+
 // ID source usage includes branch operands and store data, not only ALU inputs
 always @(*) begin
     src1_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
@@ -528,13 +558,18 @@ always @(*) begin
                   | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
                   | inst_sll_w | inst_srl_w | inst_sra_w
                   | inst_mul_w | inst_mulh_w | inst_mulh_wu
-                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
+                  | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                  | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                  | inst_st_b | inst_st_h;
     src2_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_st_w | inst_beq | inst_bne
                   | inst_sll_w | inst_srl_w | inst_sra_w
                   | inst_mul_w | inst_mulh_w | inst_mulh_wu
-                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
+                  | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                  | inst_st_b | inst_st_h;
 end
 
 always @(posedge clk) begin
@@ -547,7 +582,9 @@ end
 // ID generates the ALU operation; EX.v holds it while the pipeline is blocked
 always @(*) begin
     alu_op_id[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                  | inst_jirl | inst_bl | inst_pcaddu12i;
+                  | inst_jirl | inst_bl | inst_pcaddu12i
+                  | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                  | inst_st_b | inst_st_h;
     alu_op_id[ 1] = inst_sub_w;
     alu_op_id[ 2] = inst_slt | inst_slti;
     alu_op_id[ 3] = inst_sltu | inst_sltui;
@@ -580,10 +617,14 @@ end
 
 // ID generates memory control and store data; EX.v / MEM carry them together
 always @(*) begin
-    res_from_mem[ID] = inst_ld_w;
-    mem_we[ID]       = inst_st_w;
-    mem_en[ID]       = inst_st_w | inst_ld_w;
+    res_from_mem[ID] = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+    mem_we[ID]       = inst_st_w | inst_st_b | inst_st_h;
+    mem_en[ID]       = mem_we[ID] | res_from_mem[ID];
     mem_wdata[ID]    = forwarding_data2;
+    // access size: [0]=byte, [1]=halfword, [2]=load zero-extends (ld.bu / ld.hu)
+    mem_size[ID][0]  = inst_ld_b | inst_ld_bu | inst_st_b;
+    mem_size[ID][1]  = inst_ld_h | inst_ld_hu | inst_st_h;
+    mem_size[ID][2]  = inst_ld_bu | inst_ld_hu;
 end
 
 always @(posedge clk) begin
@@ -592,12 +633,15 @@ always @(posedge clk) begin
         mem_we[MEM]       <= mem_we[EX];
         mem_en[MEM]       <= mem_en[EX];
         mem_wdata[MEM]    <= mem_wdata[EX];
+        mem_size[MEM]     <= mem_size[EX];
     end
 end
 
 // ID generates write-back control; EX.v / MEM / WB carry it with the result
 always @(*) begin
-    gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
+    gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
+              & ~inst_st_b & ~inst_st_h
+              & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
     dest[ID]  = inst_bl ? 5'd1 : rd;
 end
 
@@ -614,7 +658,8 @@ end
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
 assign need_ui12  =  inst_andi | inst_ori | inst_xori;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui;
+assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui
+                  |  inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_st_b | inst_st_h;
 assign need_si16  =  inst_jirl | inst_beq | inst_bne;
 assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_si26  =  inst_b | inst_bl;
@@ -630,7 +675,8 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
-assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
+assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_st_b | inst_st_h
+                     | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
@@ -645,6 +691,12 @@ assign src2_is_imm   = inst_slli_w |
                        inst_xori   |
                        inst_ld_w   |
                        inst_st_w   |
+                       inst_ld_b   |
+                       inst_ld_h   |
+                       inst_ld_bu  |
+                       inst_ld_hu  |
+                       inst_st_b   |
+                       inst_st_h   |
                        inst_lu12i_w|
                        inst_pcaddu12i |
                        inst_jirl   |
@@ -666,15 +718,23 @@ regfile u_regfile(
 assign rj_value  = forwarding_data1;
 assign rkd_value = forwarding_data2;
 
-assign rj_eq_rd = (rj_value == rkd_value);
+assign rj_eq_rd  = (rj_value == rkd_value);
+assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
+assign rj_ltu_rd = (rj_value < rkd_value);
+
 assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_bne  && !rj_eq_rd
+                   || inst_blt  &&  rj_lt_rd
+                   || inst_bge  && !rj_lt_rd
+                   || inst_bltu &&  rj_ltu_rd
+                   || inst_bgeu && !rj_ltu_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
                   ) && receive_new_inst[EX];
 
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
+assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
+                 || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
 EX u_ex(
@@ -694,6 +754,7 @@ EX u_ex(
     .mem_we_i       (mem_we[ID]     ),
     .mem_en_i       (mem_en[ID]     ),
     .mem_wdata_i    (mem_wdata[ID]  ),
+    .mem_size_i     (mem_size[ID]   ),
     .gr_we_i        (gr_we[ID]      ),
     .dest_i         (dest[ID]       ),
 
@@ -704,6 +765,7 @@ EX u_ex(
     .mem_we_o       (mem_we_o       ),
     .mem_en_o       (mem_en_o       ),
     .mem_wdata_o    (mem_wdata_o    ),
+    .mem_size_o     (mem_size_o     ),
     .gr_we_o        (gr_we_o        ),
     .dest_o         (dest_o         ),
 
@@ -742,11 +804,33 @@ always @(posedge clk) begin
 end
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
 assign data_sram_addr  = ex_result_mem;
-assign data_sram_wdata = mem_wdata[MEM];
 
-assign mem_result = data_sram_rdata;
+// byte / halfword / word store: broadcast the stored data to every byte lane
+// and let the write-enable mask pick the addressed lane(s)
+wire mem_byte = mem_size[MEM][0];
+wire mem_half = mem_size[MEM][1];
+
+wire [3:0] st_we_byte = 4'b0001 << ex_result_mem[1:0];
+wire [3:0] st_we_half = ex_result_mem[1] ? 4'b1100 : 4'b0011;
+wire [3:0] st_we_word = 4'b1111;
+
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}
+                       & (mem_byte ? st_we_byte : mem_half ? st_we_half : st_we_word);
+assign data_sram_wdata = mem_byte ? {4{mem_wdata[MEM][ 7: 0]}} :
+                         mem_half ? {2{mem_wdata[MEM][15: 0]}} :
+                                    mem_wdata[MEM];
+
+// byte / halfword / word load: take the addressed lane and extend it
+wire [ 7:0] ld_byte = (ex_result_mem[1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
+                      (ex_result_mem[1:0] == 2'd1) ? data_sram_rdata[15: 8] :
+                      (ex_result_mem[1:0] == 2'd2) ? data_sram_rdata[23:16] :
+                                                     data_sram_rdata[31:24];
+wire [15:0] ld_half = ex_result_mem[1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
+
+assign mem_result = mem_byte ? (mem_size[MEM][2] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte}) :
+                    mem_half ? (mem_size[MEM][2] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half}) :
+                                 data_sram_rdata;
 
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
