@@ -38,9 +38,9 @@ wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
 wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
-wire        fwd2_valid, fwd2_pending, fwd3_valid, fwd3_pending;
-wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest, fwd3_dest;
-wire [31:0] fwd0_data, fwd1_data, fwd2_data, fwd3_data;
+wire        fwd2_valid, fwd2_pending;
+wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest;
+wire [31:0] fwd0_data, fwd1_data, fwd2_data;
 
 EX u_ex(
     .clk            (clk            ),
@@ -85,11 +85,7 @@ EX u_ex(
     .fwd2_valid     (fwd2_valid     ),
     .fwd2_pending   (fwd2_pending   ),
     .fwd2_dest      (fwd2_dest      ),
-    .fwd2_data      (fwd2_data      ),
-    .fwd3_valid     (fwd3_valid     ),
-    .fwd3_pending   (fwd3_pending   ),
-    .fwd3_dest      (fwd3_dest      ),
-    .fwd3_data      (fwd3_data      )
+    .fwd2_data      (fwd2_data      )
 );
 
 localparam MUL_W   = 0;
@@ -190,44 +186,42 @@ initial begin
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd9);
     chk(!valid_o, "mul.w not ready at stage 0");
     step; chk(!valid_o, "mul.w not ready at stage 1");
-    step; chk(!valid_o, "mul.w not ready at stage 2");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd9),
-              "mul.w low word at stage 3");
+              "mul.w low word at stage 2 (comb to MEM)");
     repeat (2) step;
 
     // --------------------------------------------------------------- mulh.w
     A = 32'hdead_beef; B = 32'h8000_0001;
     send(12'b0, 7'b1 << MULH_W, A, B, 5'd11);
-    step; step; step;
+    step; step;
     chk(valid_o && (ex_result === mhi(A, B)), "mulh.w signed high word");
     repeat (2) step;
 
     // -------------------------------------------------------------- mulh.wu
     send(12'b0, 7'b1 << MULH_WU, A, B, 5'd11);
-    step; step; step;
+    step; step;
     chk(valid_o && (ex_result === mhiu(A, B)), "mulh.wu unsigned high word");
     repeat (2) step;
 
     // ------------------------------------------- mul frozen by allow_next=0
     A = 32'h7fff_ffff; B = 32'h7fff_ffff;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd4);
-    step; step;                 // -> stage 1
+    step; step;                 // -> stage 1, stage 2
     allow_next = 1'b0;
-    step;                       // -> stage 2
-    step;                       // -> stage 3, now frozen
-    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 3 under back-pressure");
+    step;                       // held at stage 2
+    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 2 under back-pressure");
     step;                       // still frozen, value must survive
     chk(valid_o && (ex_result === mlo(A, B)), "mul value stable while stalled");
     allow_next = 1'b1;
-    step; step;
+    step;
     chk(!valid_o, "mul left after allow_next");
 
     // ------------------------------------- an ALU behind a mul must not pass
     A = 32'h0000_ffff; B = 32'h0001_0000;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd6);          // mul, stage 0 next cycle
     send(12'b1 << 6, 7'b0, 32'hf0f0_f0f0, 32'h0f0f_0f0f, 5'd8); // ALU right behind
-    // after the two sends: mul@1, alu@0 -> 2 steps put the mul at stage 3
-    step; step;
+    // after the two sends: mul@1, alu@0 -> 1 step puts the mul at stage 2
+    step;
     chk(valid_o && (dest_o === 5'd6) && (ex_result === mlo(A, B)),
         "mul in front drives the output, not the younger ALU");
     step;
@@ -272,19 +266,17 @@ initial begin
     chk(fwd1_valid && (fwd1_dest === 5'd21) && (fwd1_data === (A & B)), "ALU stage 1 supplies");
     step;
     chk(fwd2_valid && (fwd2_dest === 5'd21) && (fwd2_data === (A & B)), "ALU stage 2 supplies");
-    step;
-    chk(fwd3_valid && (fwd3_dest === 5'd21) && (fwd3_data === (A & B)), "ALU stage 3 supplies");
     allow_next = 1'b1;
     repeat (2) step;
 
-    // mul is only forwardable from the last stage
+    // mul never forwards from EX: it stays "pending" until it reaches MEM
     A = 32'h0000_0003; B = 32'h0000_0005;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
     chk(!fwd0_valid && fwd0_pending, "mul stage 0 pending");
     step; chk(!fwd1_valid && fwd1_pending, "mul stage 1 pending");
     step; chk(!fwd2_valid && fwd2_pending, "mul stage 2 pending");
-    step; chk(fwd3_valid && (fwd3_dest === 5'd22) && (fwd3_data === mlo(A, B)), "mul stage 3 supplies");
+    step; chk(fwd2_pending, "mul still pending while handing to MEM");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -296,10 +288,10 @@ initial begin
         held = 1'b0;
         for (i = 0; i < 40 && !valid_o; i = i + 1) begin
             step;
-            if (fwd3_pending) held = 1'b1;
+            if (fwd2_pending) held = 1'b1;
         end
-        chk(held && fwd3_valid && (fwd3_dest === 5'd23) && (fwd3_data === 32'd14),
-            "div pending, then supplies");
+        chk(held && valid_o && (ex_result === 32'd14) && (dest_o === 5'd23),
+            "div pending in EX, result goes out to MEM");
     end
     repeat (2) step;
 

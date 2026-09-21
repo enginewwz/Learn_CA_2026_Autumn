@@ -55,9 +55,13 @@ wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
 
 // only process in one stage
 wire [31:0] nextpc;     // generate at IF stage
-wire [31:0] seq_pc;     // generate at IF stage
+// seq_pc / br_target are the two candidate PCs. They are kept as separate nets
+// so the synthesizer computes both adders in parallel with the branch compare
+// and only muxes at the end; otherwise it folds the mux into the adder inputs
+// and the compare ends up in series with the 32-bit carry chain.
+(* keep = "true" *) wire [31:0] seq_pc;     // generate at IF stage
 wire        br_taken;   // generate at ID stage
-wire [31:0] br_target;  // generate at ID stage
+(* keep = "true" *) wire [31:0] br_target;  // generate at ID stage
 wire [31:0] inst_rd;    // receive in ID stage
 
 // should be stored between stages.
@@ -107,9 +111,9 @@ reg  [31:0] ex_result_mem;
 
 // EX.v forwarding, one group per stage (stage 0 is the youngest)
 wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
-wire        fwd2_valid, fwd2_pending, fwd3_valid, fwd3_pending;
-wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest, fwd3_dest;
-wire [31:0] fwd0_data, fwd1_data, fwd2_data, fwd3_data;
+wire        fwd2_valid, fwd2_pending;
+wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest;
+wire [31:0] fwd0_data, fwd1_data, fwd2_data;
 
 // MEM -> WB: combinational at MEM, registered at WB
 reg  [31:0] final_result [WB:MEM];
@@ -339,7 +343,16 @@ assign fake_MEM_rsp_valid = MEM_rsp_ready;
 
 
 assign seq_pc       = pc[IF] + 32'h4;
-assign nextpc       = br_reg ? br_pc_reg : br_taken ? br_target : seq_pc;
+
+// A taken branch is muxed in on br_go instead of br_taken.  pc[IF] is written
+// on receive_new_inst[IF] = ~stall[IF] && ~stall[ID] && allow[EX], so on those
+// cycles br_taken == br_go (br_taken's extra ~stall[ID] && allow[EX] is already
+// implied); on every other cycle the mux output is not consumed.  The redirect
+// therefore no longer waits for the allow[EX]/stall[EX] chain (EX back-pressure
+// and the MEM handshake) to settle.  Parking a redirect with br_reg is
+// unchanged, and there br_taken == 1 implies br_go == 1, so br_pc_reg still
+// gets exactly br_target.
+assign nextpc       = br_reg ? br_pc_reg : br_go ? br_target : seq_pc;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -414,41 +427,55 @@ assign stall[WB] = 1'b0;
 // hit wins (stage 0 first). A hit that is only "pending" (a load, or a mul/div
 // before the last stage) makes ID wait instead of forwarding. MEM is older
 // than every EX stage, so it is only used when EX has no hit at all.
-wire [3:0] fwd1_hit, fwd2_hit;
+wire [2:0] fwd1_hit, fwd2_hit;
 
 assign fwd1_hit = {
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd3_dest) && (fwd3_valid | fwd3_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd0_dest) && (fwd0_valid | fwd0_pending)
 };
 
 assign fwd2_hit = {
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd3_dest) && (fwd3_valid | fwd3_pending),
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd2_dest) && (fwd2_valid | fwd2_pending),
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd1_dest) && (fwd1_valid | fwd1_pending),
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd0_dest) && (fwd0_valid | fwd0_pending)
 };
 
-wire        fwd1_go   = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_valid   : fwd1_hit[1] ? fwd1_valid   : fwd1_hit[2] ? fwd2_valid   : fwd3_valid);
-wire        fwd2_go   = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_valid   : fwd2_hit[1] ? fwd1_valid   : fwd2_hit[2] ? fwd2_valid   : fwd3_valid);
-wire        fwd1_wait = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_pending : fwd1_hit[1] ? fwd1_pending : fwd1_hit[2] ? fwd2_pending : fwd3_pending);
-wire        fwd2_wait = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_pending : fwd2_hit[1] ? fwd1_pending : fwd2_hit[2] ? fwd2_pending : fwd3_pending);
-wire [31:0] fwd1_result = fwd1_hit[0] ? fwd0_data : fwd1_hit[1] ? fwd1_data : fwd1_hit[2] ? fwd2_data : fwd3_data;
-wire [31:0] fwd2_result = fwd2_hit[0] ? fwd0_data : fwd2_hit[1] ? fwd1_data : fwd2_hit[2] ? fwd2_data : fwd3_data;
+// several stages can hit at once, so resolve the youngest hit into a one-hot
+// select first; the 32-bit value is then a flat masked-OR instead of a chain
+wire [2:0] fwd1_sel = fwd1_hit[0] ? 3'b001 : fwd1_hit[1] ? 3'b010 : fwd1_hit[2] ? 3'b100 : 3'b000;
+wire [2:0] fwd2_sel = fwd2_hit[0] ? 3'b001 : fwd2_hit[1] ? 3'b010 : fwd2_hit[2] ? 3'b100 : 3'b000;
+
+wire        fwd1_go   = (fwd1_sel[0] & fwd0_valid)   | (fwd1_sel[1] & fwd1_valid)   | (fwd1_sel[2] & fwd2_valid);
+wire        fwd2_go   = (fwd2_sel[0] & fwd0_valid)   | (fwd2_sel[1] & fwd1_valid)   | (fwd2_sel[2] & fwd2_valid);
+// A hit on a stage whose result is not ready yet has to make ID wait. Using the
+// raw hit bits instead of the youngest-hit select is conservative (it can only
+// wait when two in-flight producers write the same register) but keeps the
+// 3-way priority select off the stall path.
+wire        fwd1_wait = (fwd1_hit[0] & fwd0_pending) | (fwd1_hit[1] & fwd1_pending) | (fwd1_hit[2] & fwd2_pending);
+wire        fwd2_wait = (fwd2_hit[0] & fwd0_pending) | (fwd2_hit[1] & fwd1_pending) | (fwd2_hit[2] & fwd2_pending);
+wire [31:0] fwd1_result = ({32{fwd1_sel[0]}} & fwd0_data) | ({32{fwd1_sel[1]}} & fwd1_data) | ({32{fwd1_sel[2]}} & fwd2_data);
+wire [31:0] fwd2_result = ({32{fwd2_sel[0]}} & fwd0_data) | ({32{fwd2_sel[1]}} & fwd1_data) | ({32{fwd2_sel[2]}} & fwd2_data);
 
 assign src1_match_mem      = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
 assign src2_match_mem      = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
 assign forwarding_hit1_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match_mem;
 assign forwarding_hit2_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match_mem;
 
-assign forwarding_data1 = fwd1_go            ? fwd1_result  :
-                          forwarding_hit1_mem ? ex_result_mem :
-                          rf_rdata1;
+// EX is younger than MEM, so it only needs to knock MEM out; the three sources
+// are then exclusive and the data path is one flat masked-OR
+wire fwd1_mem = ~ fwd1_go &   forwarding_hit1_mem;
+wire fwd1_rf  = ~ fwd1_go & ~ forwarding_hit1_mem;
+wire fwd2_mem = ~ fwd2_go &   forwarding_hit2_mem;
+wire fwd2_rf  = ~ fwd2_go & ~ forwarding_hit2_mem;
 
-assign forwarding_data2 = fwd2_go            ? fwd2_result  :
-                          forwarding_hit2_mem ? ex_result_mem :
-                          rf_rdata2;
+assign forwarding_data1 = ({32{fwd1_go}}  & fwd1_result)   |
+                          ({32{fwd1_mem}} & ex_result_mem) |
+                          ({32{fwd1_rf}}  & rf_rdata1);
+
+assign forwarding_data2 = ({32{fwd2_go}}  & fwd2_result)   |
+                          ({32{fwd2_mem}} & ex_result_mem) |
+                          ({32{fwd2_rf}}  & rf_rdata2);
 
 // stall for load use / not-ready producer hazards
 assign load_use_hit = fwd1_wait | fwd2_wait |
@@ -718,20 +745,42 @@ regfile u_regfile(
 assign rj_value  = forwarding_data1;
 assign rkd_value = forwarding_data2;
 
+// Plain operators here on purpose.  An explicit balanced tree was tried (31
+// bits in 5 levels, one shared low-bit tree for eq/lt/ltu, only the sign vote
+// differing) and it made the synthesized timing worse: a 7-series CARRY4 stage
+// costs only ~0.11 ns, while the tree trades those 8 carry stages for 5 LUT
+// levels plus inter-LUT routing, and the routing ate the depth advantage.  See
+// docs/exp11_current_cpu_analysis.md 5.2.
 assign rj_eq_rd  = (rj_value == rkd_value);
 assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
 assign rj_ltu_rd = (rj_value < rkd_value);
 
-assign br_taken = (   inst_beq  &&  rj_eq_rd
-                   || inst_bne  && !rj_eq_rd
-                   || inst_blt  &&  rj_lt_rd
-                   || inst_bge  && !rj_lt_rd
-                   || inst_bltu &&  rj_ltu_rd
-                   || inst_bgeu && !rj_ltu_rd
-                   || inst_jirl
-                   || inst_bl
-                   || inst_b
-                  ) && receive_new_inst[EX];
+// ---------------------------------------------------------------------------
+// branch redirect
+// ---------------------------------------------------------------------------
+// br_cond only looks at the operands; whether EX can actually take the branch
+// (allow[EX], which carries the MEM handshake and the div wait) is a separate
+// term applied to flush only.  Splitting them keeps the compare out of the
+// stall/allow chain that reaches the redirect.
+wire br_cond = (   inst_beq  &&  rj_eq_rd
+                || inst_bne  && !rj_eq_rd
+                || inst_blt  &&  rj_lt_rd
+                || inst_bge  && !rj_lt_rd
+                || inst_bltu &&  rj_ltu_rd
+                || inst_bgeu && !rj_ltu_rd
+                || inst_jirl
+                || inst_bl
+                || inst_b
+               );
+
+// the branch is in ID with final operands and nothing in front of it.  flush
+// only ever clears IF, so cur_valid[ID] == valid[ID] here; plain valid is used
+// to keep this out of the flush -> cur_valid -> receive combinational loop.
+wire br_go = br_cond && valid[ID] && ~ stall[ID];
+
+// the branch really leaves ID this cycle: flush only ever clears IF, so
+// cur_valid[ID] == valid[ID] and this is receive_new_inst[EX] && br_cond
+assign br_taken = br_go && allow[EX];
 
 assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
                  || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
@@ -784,11 +833,7 @@ EX u_ex(
     .fwd2_valid     (fwd2_valid     ),
     .fwd2_pending   (fwd2_pending   ),
     .fwd2_dest      (fwd2_dest      ),
-    .fwd2_data      (fwd2_data      ),
-    .fwd3_valid     (fwd3_valid     ),
-    .fwd3_pending   (fwd3_pending   ),
-    .fwd3_dest      (fwd3_dest      ),
-    .fwd3_data      (fwd3_data      )
+    .fwd2_data      (fwd2_data      )
     );
 
 always @(posedge clk) begin
@@ -807,19 +852,23 @@ assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
 assign data_sram_addr  = ex_result_mem;
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
-// and let the write-enable mask pick the addressed lane(s)
+// and let the write-enable mask pick the addressed lane(s).
+// mem_byte / mem_half / mem_word are exclusive, so every select below is a flat
+// masked-OR instead of a priority chain.
 wire mem_byte = mem_size[MEM][0];
 wire mem_half = mem_size[MEM][1];
+wire mem_word = ~ mem_byte & ~ mem_half;
 
 wire [3:0] st_we_byte = 4'b0001 << ex_result_mem[1:0];
 wire [3:0] st_we_half = ex_result_mem[1] ? 4'b1100 : 4'b0011;
 wire [3:0] st_we_word = 4'b1111;
 
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}
-                       & (mem_byte ? st_we_byte : mem_half ? st_we_half : st_we_word);
-assign data_sram_wdata = mem_byte ? {4{mem_wdata[MEM][ 7: 0]}} :
-                         mem_half ? {2{mem_wdata[MEM][15: 0]}} :
-                                    mem_wdata[MEM];
+wire [3:0] st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
+
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}} & st_we;
+assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
+                         ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
+                         ({32{mem_word}} &    mem_wdata[MEM]);
 
 // byte / halfword / word load: take the addressed lane and extend it
 wire [ 7:0] ld_byte = (ex_result_mem[1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
@@ -828,9 +877,12 @@ wire [ 7:0] ld_byte = (ex_result_mem[1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
                                                      data_sram_rdata[31:24];
 wire [15:0] ld_half = ex_result_mem[1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
 
-assign mem_result = mem_byte ? (mem_size[MEM][2] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte}) :
-                    mem_half ? (mem_size[MEM][2] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half}) :
-                                 data_sram_rdata;
+wire [31:0] ld_byte_ext = mem_size[MEM][2] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte};
+wire [31:0] ld_half_ext = mem_size[MEM][2] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half};
+
+assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
+                    ({32{mem_half}} & ld_half_ext)  |
+                    ({32{mem_word}} & data_sram_rdata);
 
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
