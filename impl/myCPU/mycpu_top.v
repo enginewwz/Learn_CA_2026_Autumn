@@ -59,46 +59,64 @@ wire        br_taken;   // generate at ID stage
 wire [31:0] br_target;  // generate at ID stage
 wire [31:0] inst_rd;    // receive in ID stage
 
-// should be stored between stages
-reg  [31:0] pc [WB:IF];
+// should be stored between stages.
+// The [EX] elements are combinational aliases of the EX.v outputs (see the
+// always @(*) block below); the other elements are real stage registers.
+reg  [31:0] pc [WB:IF] /* verilator split_var */;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
 
 // IF -> ID
 reg  [31:0] inst [ID:IF];
 
-// source register usage: decode at ID, carry through EX and MEM
-// split_var lets Verilator distinguish independently driven stage elements
-reg  [MEM:ID] src1_used;
-reg  [MEM:ID] src2_used;
+// ID: combinational, generated from inst[ID]; these only exist at ID
+reg  [11:0] alu_op_id;
+reg  [31:0] alu_src1_id;
+reg  [31:0] alu_src2_id;
+reg  [MOD_WU:0] md_op_id;
 
-// ID -> EX: combinational at ID, registered at EX
-reg  [11:0] alu_op [EX:ID];
-reg  [31:0] alu_src1 [EX:ID];
-reg  [31:0] alu_src2 [EX:ID];
+// stage fields: [ID] combinational, [EX] aliases EX.v, [MEM]/[WB] registered
+reg         src1_used [MEM:ID] /* verilator split_var */;
+reg         src2_used [MEM:ID] /* verilator split_var */;
+reg         res_from_mem [MEM:ID] /* verilator split_var */;
+reg         mem_we [MEM:ID] /* verilator split_var */;
+reg         mem_en [MEM:ID] /* verilator split_var */;
+reg  [31:0] mem_wdata [MEM:ID] /* verilator split_var */;
+reg         gr_we [WB:ID] /* verilator split_var */;
+reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
-// ID -> EX: mul/div operation select, one-hot (see MUL_W..MOD_W above);
-// combinational at ID, registered at EX
-reg  [MOD_W:0] md_op [EX:ID];
+// EX.v outputs, aliased into the [EX] elements of the stage fields above
+wire [31:0] pc_o;
+wire        src1_used_o;
+wire        src2_used_o;
+wire        res_from_mem_o;
+wire        mem_we_o;
+wire        mem_en_o;
+wire [31:0] mem_wdata_o;
+wire        gr_we_o;
+wire  [4:0] dest_o;
+wire        ex_stall;
 
-// ID -> MEM: combinational at ID, carried with the instruction
-reg  [MEM:ID] res_from_mem;
-reg  [MEM:ID] mem_we;
-reg  [MEM:ID] mem_en;
-reg  [31:0] mem_wdata [MEM:ID]; // select at ID, latch to EX/MEM, write RAM at MEM
-
-wire        load_op;    // not used
-
-// ID -> WB: combinational at ID, carried with the instruction
-reg  [WB:ID] gr_we;
-reg  [4: 0] dest [WB:ID];
-
-// EX -> MEM: module output remains a wire in Verilog
-wire [31:0] alu_result;      // ALU combinational output (EX stage)
+wire [31:0] alu_result;      // ALU combinational output (EX.v)
 reg  [31:0] alu_result_mem;
 
 // MEM -> WB: combinational at MEM, registered at WB
 reg  [31:0] final_result [WB:MEM];
+
+wire        load_op;    // not used
+
+// [EX] stage view comes straight from EX.v
+always @(*) begin
+    pc[EX]           = pc_o;
+    src1_used[EX]    = src1_used_o;
+    src2_used[EX]    = src2_used_o;
+    res_from_mem[EX] = res_from_mem_o;
+    mem_we[EX]       = mem_we_o;
+    mem_en[EX]       = mem_en_o;
+    mem_wdata[EX]    = mem_wdata_o;
+    gr_we[EX]        = gr_we_o;
+    dest[EX]         = dest_o;
+end
 
 // mid signals for ID stage
 wire        src_reg_is_rd;
@@ -317,14 +335,12 @@ always @(posedge clk) begin
     if (reset) begin
         pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset
         pc[ID] <= 32'h0;
-        pc[EX] <= 32'h0;
         pc[MEM] <= 32'h0;
         pc[WB] <= 32'h0;
     end
     else begin
         if (receive_new_inst[IF] ) pc[IF]  <= nextpc;
         if (receive_new_inst[ID] ) pc[ID]  <= pc[IF];
-        if (receive_new_inst[EX] ) pc[EX]  <= pc[ID];
         if (receive_new_inst[MEM]) pc[MEM] <= pc[EX];
         if (receive_new_inst[WB] ) pc[WB]  <= pc[MEM];
     end
@@ -354,9 +370,8 @@ assign allow[EX]  = ~ stall[EX] && allow[MEM];
 assign allow[ID]  = ~ stall[ID] && allow[EX];
 assign allow[IF]  = ~ stall[IF] && allow[ID];
 
-// not used stall bits
-
-assign stall[EX] = 1'b0;
+// EX reports its own stall request (0 for now; mul/div will drive it)
+assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
 // source matching shared by load-use detection and forwarding
@@ -485,66 +500,47 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        src1_used[EX] <= src1_used[ID];
-        src2_used[EX] <= src2_used[ID];
-    end
     if (receive_new_inst[MEM]) begin
         src1_used[MEM] <= src1_used[EX];
         src2_used[MEM] <= src2_used[EX];
     end
 end
 
-// ID generates the ALU operation; EX holds it while the pipeline is blocked
+// ID generates the ALU operation; EX.v holds it while the pipeline is blocked
 always @(*) begin
-    alu_op[ID][ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                   | inst_jirl | inst_bl | inst_pcaddu12i;
-    alu_op[ID][ 1] = inst_sub_w;
-    alu_op[ID][ 2] = inst_slt | inst_slti;
-    alu_op[ID][ 3] = inst_sltu | inst_sltui;
-    alu_op[ID][ 4] = inst_and | inst_andi;
-    alu_op[ID][ 5] = inst_nor;
-    alu_op[ID][ 6] = inst_or | inst_ori;
-    alu_op[ID][ 7] = inst_xor | inst_xori;
-    alu_op[ID][ 8] = inst_slli_w | inst_sll_w;
-    alu_op[ID][ 9] = inst_srli_w | inst_srl_w;
-    alu_op[ID][10] = inst_srai_w | inst_sra_w;
-    alu_op[ID][11] = inst_lu12i_w;
+    alu_op_id[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
+                  | inst_jirl | inst_bl | inst_pcaddu12i;
+    alu_op_id[ 1] = inst_sub_w;
+    alu_op_id[ 2] = inst_slt | inst_slti;
+    alu_op_id[ 3] = inst_sltu | inst_sltui;
+    alu_op_id[ 4] = inst_and | inst_andi;
+    alu_op_id[ 5] = inst_nor;
+    alu_op_id[ 6] = inst_or | inst_ori;
+    alu_op_id[ 7] = inst_xor | inst_xori;
+    alu_op_id[ 8] = inst_slli_w | inst_sll_w;
+    alu_op_id[ 9] = inst_srli_w | inst_srl_w;
+    alu_op_id[10] = inst_srai_w | inst_sra_w;
+    alu_op_id[11] = inst_lu12i_w;
 end
 
-always @(posedge clk) begin
-    if (receive_new_inst[EX]) alu_op[EX] <= alu_op[ID];
-end
-
-// ID generates the mul/div operation select; EX holds it
+// ID generates the mul/div operation select; EX.v holds it
 always @(*) begin
-    md_op[ID][MUL_W]   = inst_mul_w;
-    md_op[ID][MULH_W]  = inst_mulh_w;
-    md_op[ID][MULH_WU] = inst_mulh_wu;
-    md_op[ID][DIV_W]   = inst_div_w;
-    md_op[ID][MOD_W]   = inst_mod_w;
-    md_op[ID][DIV_WU]  = inst_div_wu;
-    md_op[ID][MOD_WU]  = inst_mod_wu;
+    md_op_id[MUL_W]   = inst_mul_w;
+    md_op_id[MULH_W]  = inst_mulh_w;
+    md_op_id[MULH_WU] = inst_mulh_wu;
+    md_op_id[DIV_W]   = inst_div_w;
+    md_op_id[MOD_W]   = inst_mod_w;
+    md_op_id[DIV_WU]  = inst_div_wu;
+    md_op_id[MOD_WU]  = inst_mod_wu;
 end
 
-always @(posedge clk) begin
-    if (receive_new_inst[EX]) md_op[EX] <= md_op[ID];
-end
-
-// ID selects the operands; EX consumes the registered values
+// ID selects the operands; EX.v consumes its registered copies
 always @(*) begin
-    alu_src1[ID] = src1_is_pc  ? pc[ID] : forwarding_data1;
-    alu_src2[ID] = src2_is_imm ? imm    : forwarding_data2;
+    alu_src1_id = src1_is_pc  ? pc[ID] : forwarding_data1;
+    alu_src2_id = src2_is_imm ? imm    : forwarding_data2;
 end
 
-always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        alu_src1[EX] <= alu_src1[ID];
-        alu_src2[EX] <= alu_src2[ID];
-    end
-end
-
-// ID generates memory control and store data; EX/MEM carry them together
+// ID generates memory control and store data; EX.v / MEM carry them together
 always @(*) begin
     res_from_mem[ID] = inst_ld_w;
     mem_we[ID]       = inst_st_w;
@@ -553,12 +549,6 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        res_from_mem[EX] <= res_from_mem[ID];
-        mem_we[EX]       <= mem_we[ID];
-        mem_en[EX]       <= mem_en[ID];
-        mem_wdata[EX]    <= mem_wdata[ID];
-    end
     if (receive_new_inst[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
         mem_we[MEM]       <= mem_we[EX];
@@ -567,17 +557,13 @@ always @(posedge clk) begin
     end
 end
 
-// ID generates write-back control; EX/MEM/WB carry it with the result
+// ID generates write-back control; EX.v / MEM / WB carry it with the result
 always @(*) begin
     gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
     dest[ID]  = inst_bl ? 5'd1 : rd;
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        gr_we[EX] <= gr_we[ID];
-        dest[EX]  <= dest[ID];
-    end
     if (receive_new_inst[MEM]) begin
         gr_we[MEM] <= gr_we[EX];
         dest[MEM]  <= dest[EX];
@@ -653,11 +639,37 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
 assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
-alu u_alu(
-    .alu_op     (alu_op   [EX]),
-    .alu_src1   (alu_src1 [EX]),
-    .alu_src2   (alu_src2 [EX]),
-    .alu_result (alu_result   )
+EX u_ex(
+    .clk            (clk            ),
+    .reset          (reset          ),
+    .receive        (receive_new_inst[EX]),
+
+    .pc_i           (pc[ID]         ),
+    .src1_used_i    (src1_used[ID]  ),
+    .src2_used_i    (src2_used[ID]  ),
+    .alu_op_i       (alu_op_id      ),
+    .alu_src1_i     (alu_src1_id    ),
+    .alu_src2_i     (alu_src2_id    ),
+    .md_op_i        (md_op_id       ),
+    .res_from_mem_i (res_from_mem[ID]),
+    .mem_we_i       (mem_we[ID]     ),
+    .mem_en_i       (mem_en[ID]     ),
+    .mem_wdata_i    (mem_wdata[ID]  ),
+    .gr_we_i        (gr_we[ID]      ),
+    .dest_i         (dest[ID]       ),
+
+    .pc_o           (pc_o           ),
+    .src1_used_o    (src1_used_o    ),
+    .src2_used_o    (src2_used_o    ),
+    .res_from_mem_o (res_from_mem_o ),
+    .mem_we_o       (mem_we_o       ),
+    .mem_en_o       (mem_en_o       ),
+    .mem_wdata_o    (mem_wdata_o    ),
+    .gr_we_o        (gr_we_o        ),
+    .dest_o         (dest_o         ),
+
+    .alu_result     (alu_result     ),
+    .stall_o        (ex_stall       )
     );
 
 always @(posedge clk) begin
