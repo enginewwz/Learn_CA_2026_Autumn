@@ -343,16 +343,7 @@ assign fake_MEM_rsp_valid = MEM_rsp_ready;
 
 
 assign seq_pc       = pc[IF] + 32'h4;
-
-// A taken branch is muxed in on br_go instead of br_taken.  pc[IF] is written
-// on receive_new_inst[IF] = ~stall[IF] && ~stall[ID] && allow[EX], so on those
-// cycles br_taken == br_go (br_taken's extra ~stall[ID] && allow[EX] is already
-// implied); on every other cycle the mux output is not consumed.  The redirect
-// therefore no longer waits for the allow[EX]/stall[EX] chain (EX back-pressure
-// and the MEM handshake) to settle.  Parking a redirect with br_reg is
-// unchanged, and there br_taken == 1 implies br_go == 1, so br_pc_reg still
-// gets exactly br_target.
-assign nextpc       = br_reg ? br_pc_reg : br_go ? br_target : seq_pc;
+assign nextpc       = br_reg ? br_pc_reg : br_taken ? br_target : seq_pc;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -448,12 +439,8 @@ wire [2:0] fwd2_sel = fwd2_hit[0] ? 3'b001 : fwd2_hit[1] ? 3'b010 : fwd2_hit[2] 
 
 wire        fwd1_go   = (fwd1_sel[0] & fwd0_valid)   | (fwd1_sel[1] & fwd1_valid)   | (fwd1_sel[2] & fwd2_valid);
 wire        fwd2_go   = (fwd2_sel[0] & fwd0_valid)   | (fwd2_sel[1] & fwd1_valid)   | (fwd2_sel[2] & fwd2_valid);
-// A hit on a stage whose result is not ready yet has to make ID wait. Using the
-// raw hit bits instead of the youngest-hit select is conservative (it can only
-// wait when two in-flight producers write the same register) but keeps the
-// 3-way priority select off the stall path.
-wire        fwd1_wait = (fwd1_hit[0] & fwd0_pending) | (fwd1_hit[1] & fwd1_pending) | (fwd1_hit[2] & fwd2_pending);
-wire        fwd2_wait = (fwd2_hit[0] & fwd0_pending) | (fwd2_hit[1] & fwd1_pending) | (fwd2_hit[2] & fwd2_pending);
+wire        fwd1_wait = (fwd1_sel[0] & fwd0_pending) | (fwd1_sel[1] & fwd1_pending) | (fwd1_sel[2] & fwd2_pending);
+wire        fwd2_wait = (fwd2_sel[0] & fwd0_pending) | (fwd2_sel[1] & fwd1_pending) | (fwd2_sel[2] & fwd2_pending);
 wire [31:0] fwd1_result = ({32{fwd1_sel[0]}} & fwd0_data) | ({32{fwd1_sel[1]}} & fwd1_data) | ({32{fwd1_sel[2]}} & fwd2_data);
 wire [31:0] fwd2_result = ({32{fwd2_sel[0]}} & fwd0_data) | ({32{fwd2_sel[1]}} & fwd1_data) | ({32{fwd2_sel[2]}} & fwd2_data);
 
@@ -745,42 +732,20 @@ regfile u_regfile(
 assign rj_value  = forwarding_data1;
 assign rkd_value = forwarding_data2;
 
-// Plain operators here on purpose.  An explicit balanced tree was tried (31
-// bits in 5 levels, one shared low-bit tree for eq/lt/ltu, only the sign vote
-// differing) and it made the synthesized timing worse: a 7-series CARRY4 stage
-// costs only ~0.11 ns, while the tree trades those 8 carry stages for 5 LUT
-// levels plus inter-LUT routing, and the routing ate the depth advantage.  See
-// docs/exp11_current_cpu_analysis.md 5.2.
 assign rj_eq_rd  = (rj_value == rkd_value);
 assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
 assign rj_ltu_rd = (rj_value < rkd_value);
 
-// ---------------------------------------------------------------------------
-// branch redirect
-// ---------------------------------------------------------------------------
-// br_cond only looks at the operands; whether EX can actually take the branch
-// (allow[EX], which carries the MEM handshake and the div wait) is a separate
-// term applied to flush only.  Splitting them keeps the compare out of the
-// stall/allow chain that reaches the redirect.
-wire br_cond = (   inst_beq  &&  rj_eq_rd
-                || inst_bne  && !rj_eq_rd
-                || inst_blt  &&  rj_lt_rd
-                || inst_bge  && !rj_lt_rd
-                || inst_bltu &&  rj_ltu_rd
-                || inst_bgeu && !rj_ltu_rd
-                || inst_jirl
-                || inst_bl
-                || inst_b
-               );
-
-// the branch is in ID with final operands and nothing in front of it.  flush
-// only ever clears IF, so cur_valid[ID] == valid[ID] here; plain valid is used
-// to keep this out of the flush -> cur_valid -> receive combinational loop.
-wire br_go = br_cond && valid[ID] && ~ stall[ID];
-
-// the branch really leaves ID this cycle: flush only ever clears IF, so
-// cur_valid[ID] == valid[ID] and this is receive_new_inst[EX] && br_cond
-assign br_taken = br_go && allow[EX];
+assign br_taken = (   inst_beq  &&  rj_eq_rd
+                   || inst_bne  && !rj_eq_rd
+                   || inst_blt  &&  rj_lt_rd
+                   || inst_bge  && !rj_lt_rd
+                   || inst_bltu &&  rj_ltu_rd
+                   || inst_bgeu && !rj_ltu_rd
+                   || inst_jirl
+                   || inst_bl
+                   || inst_b
+                  ) && receive_new_inst[EX];
 
 assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
                  || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
