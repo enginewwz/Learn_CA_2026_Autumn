@@ -102,6 +102,12 @@ wire        ex_stall;
 wire [31:0] ex_result;      // ALU combinational output (EX.v)
 reg  [31:0] ex_result_mem;
 
+// EX.v forwarding, one group per stage (stage 0 is the youngest)
+wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
+wire        fwd2_valid, fwd2_pending, fwd3_valid, fwd3_pending;
+wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest, fwd3_dest;
+wire [31:0] fwd0_data, fwd1_data, fwd2_data, fwd3_data;
+
 // MEM -> WB: combinational at MEM, registered at WB
 reg  [31:0] final_result [WB:MEM];
 
@@ -209,13 +215,13 @@ wire [31:0] rf_wdata;
 wire [31:0] mem_result;
 wire        load_use_hit;
 
-wire [MEM:EX] src1_match;       // ID source matches a nonzero destination
-wire [MEM:EX] src2_match;
+wire        src1_match_mem;      // ID source matches a nonzero destination
+wire        src2_match_mem;
 
-wire [MEM:EX] forwarding_hit1;  // stage that hit forwarding addr
+wire        forwarding_hit1_mem; // stage that hit forwarding addr
 wire [31:0] forwarding_data1;
 
-wire [MEM:EX] forwarding_hit2;  // stage that hit forwarding addr
+wire        forwarding_hit2_mem;
 wire [31:0] forwarding_data2;
 
 
@@ -385,35 +391,56 @@ assign allow[IF]  = ~ stall[IF] && allow[ID];
 assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
-// source matching shared by load-use detection and forwarding
-assign src1_match[EX]  = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[EX]);
-assign src2_match[EX]  = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[EX]);
-assign src1_match[MEM] = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
-assign src2_match[MEM] = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
+// ---------------------------------------------------------------------------
+// forwarding: each EX stage exports {valid, pending, dest, data}. The youngest
+// hit wins (stage 0 first). A hit that is only "pending" (a load, or a mul/div
+// before the last stage) makes ID wait instead of forwarding. MEM is older
+// than every EX stage, so it is only used when EX has no hit at all.
+wire [3:0] fwd1_hit, fwd2_hit;
 
-// stall for load use hazard
-assign load_use_hit = (valid[EX]  && mem_en[EX]  && ~mem_we[EX]  && (src1_match[EX]  || src2_match[EX])) |
-                      (valid[MEM] && mem_en[MEM] && ~mem_we[MEM] && (src1_match[MEM] || src2_match[MEM]));
+assign fwd1_hit = {
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd3_dest) && (fwd3_valid | fwd3_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+};
+
+assign fwd2_hit = {
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd3_dest) && (fwd3_valid | fwd3_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd2_dest) && (fwd2_valid | fwd2_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd1_dest) && (fwd1_valid | fwd1_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+};
+
+wire        fwd1_go   = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_valid   : fwd1_hit[1] ? fwd1_valid   : fwd1_hit[2] ? fwd2_valid   : fwd3_valid);
+wire        fwd2_go   = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_valid   : fwd2_hit[1] ? fwd1_valid   : fwd2_hit[2] ? fwd2_valid   : fwd3_valid);
+wire        fwd1_wait = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_pending : fwd1_hit[1] ? fwd1_pending : fwd1_hit[2] ? fwd2_pending : fwd3_pending);
+wire        fwd2_wait = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_pending : fwd2_hit[1] ? fwd1_pending : fwd2_hit[2] ? fwd2_pending : fwd3_pending);
+wire [31:0] fwd1_result = fwd1_hit[0] ? fwd0_data : fwd1_hit[1] ? fwd1_data : fwd1_hit[2] ? fwd2_data : fwd3_data;
+wire [31:0] fwd2_result = fwd2_hit[0] ? fwd0_data : fwd2_hit[1] ? fwd1_data : fwd2_hit[2] ? fwd2_data : fwd3_data;
+
+assign src1_match_mem      = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
+assign src2_match_mem      = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
+assign forwarding_hit1_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match_mem;
+assign forwarding_hit2_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match_mem;
+
+assign forwarding_data1 = fwd1_go            ? fwd1_result  :
+                          forwarding_hit1_mem ? ex_result_mem :
+                          rf_rdata1;
+
+assign forwarding_data2 = fwd2_go            ? fwd2_result  :
+                          forwarding_hit2_mem ? ex_result_mem :
+                          rf_rdata2;
+
+// stall for load use / not-ready producer hazards
+assign load_use_hit = fwd1_wait | fwd2_wait |
+                      (valid[MEM] && mem_en[MEM] && ~mem_we[MEM] && (src1_match_mem || src2_match_mem));
 
 assign stall[ID] = load_use_hit && valid[ID];
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
-
-// generate forwarding bits
-assign forwarding_hit1[EX]  = valid[EX]  && ~mem_en[EX]  && gr_we[EX]  && src1_match[EX];
-assign forwarding_hit2[EX]  = valid[EX]  && ~mem_en[EX]  && gr_we[EX]  && src2_match[EX];
-assign forwarding_hit1[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match[MEM];
-assign forwarding_hit2[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match[MEM];
-
-assign forwarding_data1 = forwarding_hit1[EX]  ? ex_result     :
-                          forwarding_hit1[MEM] ? ex_result_mem :
-                          rf_rdata1;
-
-assign forwarding_data2 = forwarding_hit2[EX]  ? ex_result     :
-                          forwarding_hit2[MEM] ? ex_result_mem :
-                          rf_rdata2;
 
 assign inst_sram_en    = IF_req_valid;
 assign inst_sram_we    = 4'b0;
@@ -682,7 +709,24 @@ EX u_ex(
 
     .ex_result     (ex_result     ),
     .valid_o        (valid_o        ),
-    .stall_o        (ex_stall       )
+    .stall_o        (ex_stall       ),
+
+    .fwd0_valid     (fwd0_valid     ),
+    .fwd0_pending   (fwd0_pending   ),
+    .fwd0_dest      (fwd0_dest      ),
+    .fwd0_data      (fwd0_data      ),
+    .fwd1_valid     (fwd1_valid     ),
+    .fwd1_pending   (fwd1_pending   ),
+    .fwd1_dest      (fwd1_dest      ),
+    .fwd1_data      (fwd1_data      ),
+    .fwd2_valid     (fwd2_valid     ),
+    .fwd2_pending   (fwd2_pending   ),
+    .fwd2_dest      (fwd2_dest      ),
+    .fwd2_data      (fwd2_data      ),
+    .fwd3_valid     (fwd3_valid     ),
+    .fwd3_pending   (fwd3_pending   ),
+    .fwd3_dest      (fwd3_dest      ),
+    .fwd3_data      (fwd3_data      )
     );
 
 always @(posedge clk) begin

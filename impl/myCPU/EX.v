@@ -37,7 +37,30 @@ module EX(
     // execute result, valid and handshake
     output wire        valid_o,
     output wire [31:0] ex_result,
-    output wire        stall_o
+    output wire        stall_o,
+
+    // forwarding, one group per EX stage (stage 0 is the youngest):
+    //   valid   : this stage can supply the operand right now
+    //   pending : this stage writes that register but its value is not ready
+    //             here, so ID has to wait for it
+    //   dest    : destination register of the instruction in that stage
+    //   data    : its result (only meaningful together with valid)
+    output wire        fwd0_valid,
+    output wire        fwd0_pending,
+    output wire [ 4:0] fwd0_dest,
+    output wire [31:0] fwd0_data,
+    output wire        fwd1_valid,
+    output wire        fwd1_pending,
+    output wire [ 4:0] fwd1_dest,
+    output wire [31:0] fwd1_data,
+    output wire        fwd2_valid,
+    output wire        fwd2_pending,
+    output wire [ 4:0] fwd2_dest,
+    output wire [31:0] fwd2_data,
+    output wire        fwd3_valid,
+    output wire        fwd3_pending,
+    output wire [ 4:0] fwd3_dest,
+    output wire [31:0] fwd3_data
 );
 
 // md_op bit positions: one-hot mul/div operation select
@@ -290,6 +313,47 @@ assign dest_o         = out_sel[0] ? dest        [0] : out_sel[1] ? dest        
 // ALU result on the spot (mul never short-circuits: it needs stage 3 to
 // register its combinational CPA output)
 assign ex_result      = out_sel[0] ? alu_result[0] : out_sel[1] ? alu_result[1] : out_sel[2] ? alu_result[2] : final_result;
+
+// ---------------------------------------------------------------------------
+// EX -> ID forwarding, one group per stage.
+// A stage can supply the operand when it holds an instruction that writes a
+// register and whose result already exists at that stage:
+//   stage 0..2 : only the ALU (its result is alu_result[k])
+//   stage 3    : any of ALU / mul / div (final_result holds all of them; a div
+//                still waiting is not valid yet, hence ~div_wait3)
+// A load never supplies a value from EX (its EX result is the address), so it
+// only shows up as "pending", which makes ID wait for the regfile bypass.
+wire [3:0] will_write, can_supply;
+
+assign will_write[0] = valid[0] & gr_we[0];
+assign will_write[1] = valid[1] & gr_we[1];
+assign will_write[2] = valid[2] & gr_we[2];
+assign will_write[3] = valid[3] & gr_we[3];
+
+assign can_supply[0] = will_write[0] & ~ mem_en[0] & alu_pos[0];
+assign can_supply[1] = will_write[1] & ~ mem_en[1] & alu_pos[1];
+assign can_supply[2] = will_write[2] & ~ mem_en[2] & alu_pos[2];
+assign can_supply[3] = will_write[3] & ~ mem_en[3] & ~ div_wait3;
+
+assign fwd0_valid   = can_supply[0];
+assign fwd0_pending = will_write[0] & ~ can_supply[0];
+assign fwd0_dest    = dest[0];
+assign fwd0_data    = alu_result[0];
+
+assign fwd1_valid   = can_supply[1];
+assign fwd1_pending = will_write[1] & ~ can_supply[1];
+assign fwd1_dest    = dest[1];
+assign fwd1_data    = alu_result[1];
+
+assign fwd2_valid   = can_supply[2];
+assign fwd2_pending = will_write[2] & ~ can_supply[2];
+assign fwd2_dest    = dest[2];
+assign fwd2_data    = alu_result[2];
+
+assign fwd3_valid   = can_supply[3];
+assign fwd3_pending = will_write[3] & ~ can_supply[3];
+assign fwd3_dest    = dest[3];
+assign fwd3_data    = final_result;
 
 alu u_alu(
     .alu_op     (alu_op         ),

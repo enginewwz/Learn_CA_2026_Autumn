@@ -35,6 +35,10 @@ wire [31:0] pc_o, mem_wdata_o, ex_result;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
+wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
+wire        fwd2_valid, fwd2_pending, fwd3_valid, fwd3_pending;
+wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest, fwd3_dest;
+wire [31:0] fwd0_data, fwd1_data, fwd2_data, fwd3_data;
 
 EX u_ex(
     .clk            (clk            ),
@@ -65,7 +69,23 @@ EX u_ex(
     .dest_o         (dest_o         ),
     .valid_o        (valid_o        ),
     .ex_result      (ex_result      ),
-    .stall_o        (stall_o        )
+    .stall_o        (stall_o        ),
+    .fwd0_valid     (fwd0_valid     ),
+    .fwd0_pending   (fwd0_pending   ),
+    .fwd0_dest      (fwd0_dest      ),
+    .fwd0_data      (fwd0_data      ),
+    .fwd1_valid     (fwd1_valid     ),
+    .fwd1_pending   (fwd1_pending   ),
+    .fwd1_dest      (fwd1_dest      ),
+    .fwd1_data      (fwd1_data      ),
+    .fwd2_valid     (fwd2_valid     ),
+    .fwd2_pending   (fwd2_pending   ),
+    .fwd2_dest      (fwd2_dest      ),
+    .fwd2_data      (fwd2_data      ),
+    .fwd3_valid     (fwd3_valid     ),
+    .fwd3_pending   (fwd3_pending   ),
+    .fwd3_dest      (fwd3_dest      ),
+    .fwd3_data      (fwd3_data      )
 );
 
 localparam MUL_W   = 0;
@@ -236,6 +256,48 @@ initial begin
             "ALU leaves only after the div");
         repeat (2) step;
     end
+
+    // ------------------------------------------------- forwarding groups
+    // ALU is forwardable from every stage, so hold allow_next low to make it
+    // walk through the stages instead of short-circuiting out of stage 0
+    A = 32'h1234_5678; B = 32'h0000_00ff;
+    allow_next = 1'b0;
+    send(12'b1 << 4, 7'b0, A, B, 5'd21);   // and
+    chk(fwd0_valid && (fwd0_dest === 5'd21) && (fwd0_data === (A & B)), "ALU stage 0 supplies");
+    step;
+    chk(fwd1_valid && (fwd1_dest === 5'd21) && (fwd1_data === (A & B)), "ALU stage 1 supplies");
+    step;
+    chk(fwd2_valid && (fwd2_dest === 5'd21) && (fwd2_data === (A & B)), "ALU stage 2 supplies");
+    step;
+    chk(fwd3_valid && (fwd3_dest === 5'd21) && (fwd3_data === (A & B)), "ALU stage 3 supplies");
+    allow_next = 1'b1;
+    repeat (2) step;
+
+    // mul is only forwardable from the last stage
+    A = 32'h0000_0003; B = 32'h0000_0005;
+    allow_next = 1'b0;
+    send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
+    chk(!fwd0_valid && fwd0_pending, "mul stage 0 pending");
+    step; chk(!fwd1_valid && fwd1_pending, "mul stage 1 pending");
+    step; chk(!fwd2_valid && fwd2_pending, "mul stage 2 pending");
+    step; chk(fwd3_valid && (fwd3_dest === 5'd22) && (fwd3_data === mlo(A, B)), "mul stage 3 supplies");
+    allow_next = 1'b1;
+    repeat (2) step;
+
+    // div is only forwardable once the unit is done
+    send(12'b0, 7'b1 << DIV_W, 32'd100, 32'd7, 5'd23);
+    begin : div_fwd
+        integer i;
+        reg     held;
+        held = 1'b0;
+        for (i = 0; i < 40 && !valid_o; i = i + 1) begin
+            step;
+            if (fwd3_pending) held = 1'b1;
+        end
+        chk(held && fwd3_valid && (fwd3_dest === 5'd23) && (fwd3_data === 32'd14),
+            "div pending, then supplies");
+    end
+    repeat (2) step;
 
     $display("==========================================");
     if (errors == 0) $display("PASS: %0d checks, 0 errors", checks);
