@@ -43,8 +43,9 @@ localparam MOD_W    = 4;
 localparam DIV_WU   = 5;
 localparam MOD_WU   = 6;
 
-reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
+reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
+
 wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
 wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is ready for new inst; the last stage (WB) would always allow; reset as 1
 wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
@@ -95,10 +96,11 @@ wire        mem_en_o;
 wire [31:0] mem_wdata_o;
 wire        gr_we_o;
 wire  [4:0] dest_o;
+wire        valid_o;
 wire        ex_stall;
 
-wire [31:0] alu_result;      // ALU combinational output (EX.v)
-reg  [31:0] alu_result_mem;
+wire [31:0] ex_result;      // ALU combinational output (EX.v)
+reg  [31:0] ex_result_mem;
 
 // MEM -> WB: combinational at MEM, registered at WB
 reg  [31:0] final_result [WB:MEM];
@@ -116,6 +118,7 @@ always @(*) begin
     mem_wdata[EX]    = mem_wdata_o;
     gr_we[EX]        = gr_we_o;
     dest[EX]         = dest_o;
+    valid[EX]        = valid_o;
 end
 
 // mid signals for ID stage
@@ -351,12 +354,20 @@ assign cur_valid = valid & ~ flush;
 assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow;
 assign next_valid = receive_new_inst | (~ allow & cur_valid);
 
+// valid[EX] is registered inside EX.v (see the [EX] alias block), so only the
+// other four stages are updated here
 always @(posedge clk) begin
     if (reset) begin
-        valid <= 5'b0;
+        valid[IF]  <= 1'b0;
+        valid[ID]  <= 1'b0;
+        valid[MEM] <= 1'b0;
+        valid[WB]  <= 1'b0;
     end
     else begin
-        valid <= next_valid;
+        valid[IF]  <= next_valid[IF];
+        valid[ID]  <= next_valid[ID];
+        valid[MEM] <= next_valid[MEM];
+        valid[WB]  <= next_valid[WB];
     end
 end
 
@@ -396,12 +407,12 @@ assign forwarding_hit2[EX]  = valid[EX]  && ~mem_en[EX]  && gr_we[EX]  && src2_m
 assign forwarding_hit1[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match[MEM];
 assign forwarding_hit2[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match[MEM];
 
-assign forwarding_data1 = forwarding_hit1[EX]  ? alu_result     :
-                          forwarding_hit1[MEM] ? alu_result_mem :
+assign forwarding_data1 = forwarding_hit1[EX]  ? ex_result     :
+                          forwarding_hit1[MEM] ? ex_result_mem :
                           rf_rdata1;
 
-assign forwarding_data2 = forwarding_hit2[EX]  ? alu_result     :
-                          forwarding_hit2[MEM] ? alu_result_mem :
+assign forwarding_data2 = forwarding_hit2[EX]  ? ex_result     :
+                          forwarding_hit2[MEM] ? ex_result_mem :
                           rf_rdata2;
 
 assign inst_sram_en    = IF_req_valid;
@@ -643,6 +654,7 @@ EX u_ex(
     .clk            (clk            ),
     .reset          (reset          ),
     .receive        (receive_new_inst[EX]),
+    .allow_next     (allow[MEM]     ),
 
     .pc_i           (pc[ID]         ),
     .src1_used_i    (src1_used[ID]  ),
@@ -668,16 +680,17 @@ EX u_ex(
     .gr_we_o        (gr_we_o        ),
     .dest_o         (dest_o         ),
 
-    .alu_result     (alu_result     ),
+    .ex_result     (ex_result     ),
+    .valid_o        (valid_o        ),
     .stall_o        (ex_stall       )
     );
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) alu_result_mem <= alu_result;
+    if (receive_new_inst[MEM]) ex_result_mem <= ex_result;
 end
 
 always @(*) begin
-    final_result[MEM] = res_from_mem[MEM] ? mem_result : alu_result_mem;
+    final_result[MEM] = res_from_mem[MEM] ? mem_result : ex_result_mem;
 end
 
 always @(posedge clk) begin
@@ -686,7 +699,7 @@ end
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
 assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
-assign data_sram_addr  = alu_result_mem;
+assign data_sram_addr  = ex_result_mem;
 assign data_sram_wdata = mem_wdata[MEM];
 
 assign mem_result = data_sram_rdata;
