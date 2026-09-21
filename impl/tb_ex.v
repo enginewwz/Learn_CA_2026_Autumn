@@ -71,6 +71,10 @@ EX u_ex(
 localparam MUL_W   = 0;
 localparam MULH_W  = 1;
 localparam MULH_WU = 2;
+localparam DIV_W   = 3;
+localparam MOD_W   = 4;
+localparam DIV_WU  = 5;
+localparam MOD_WU  = 6;
 
 integer errors = 0;
 integer checks = 0;
@@ -105,6 +109,26 @@ task chk;
             $display("EX ERROR: %0s (t=%0t valid=%b ex=%h dest=%0d stall=%b)",
                      name, $time, valid_o, ex_result, dest_o, stall_o);
         end
+    end
+endtask
+
+// launch one div/mod and wait (with a bound) for its result at the EX output
+task do_div;
+    input [ 6:0] md;
+    input [31:0] a, b;
+    input [ 4:0] d;
+    input [31:0] exp;
+    integer i;
+    reg     got;
+    begin
+        send(12'b0, md, a, b, d);
+        got = 1'b0;
+        for (i = 0; i < 40 && !got; i = i + 1) begin
+            step;
+            if (valid_o) got = 1'b1;
+        end
+        chk(got && (ex_result === exp) && (dest_o === d), "div/mod result");
+        repeat (2) step;   // let it hand off
     end
 endtask
 
@@ -186,6 +210,32 @@ initial begin
     chk(valid_o && (dest_o === 5'd8) && (ex_result === (32'hf0f0_f0f0 | 32'h0f0f_0f0f)),
         "ALU leaves only after the mul");
     repeat (2) step;
+
+    // ------------------------------------------------------------------ div
+    do_div(7'b1 << DIV_W,  32'h0000_0007, 32'h0000_0002, 5'd12, 32'h0000_0003);
+    do_div(7'b1 << DIV_W,  32'hffff_fff9, 32'h0000_0002, 5'd12, 32'hffff_fffd); // -7/2
+    do_div(7'b1 << DIV_WU, 32'hffff_fff9, 32'h0000_0002, 5'd12, 32'h7fff_fffc);
+    do_div(7'b1 << MOD_W,  32'hffff_fff9, 32'h0000_0002, 5'd12, 32'hffff_ffff); // -7%2
+    do_div(7'b1 << MOD_WU, 32'h0000_0007, 32'h0000_0002, 5'd12, 32'h0000_0001);
+    do_div(7'b1 << DIV_W,  32'h8000_0000, 32'hffff_ffff, 5'd12, 32'h8000_0000); // -2^31/-1
+
+    // a div blocks the pipeline: the ALU right behind it must not come out first
+    send(12'b0, 7'b1 << DIV_W, 32'h0000_0064, 32'h0000_0007, 5'd13); // 100/7 = 14
+    send(12'b1 << 6, 7'b0, 32'hf0f0_f0f0, 32'h0f0f_0f0f, 5'd14);
+    begin : div_order
+        integer i;
+        reg     got;
+        got = 1'b0;
+        for (i = 0; i < 40 && !got; i = i + 1) begin
+            step;
+            if (valid_o) got = 1'b1;
+        end
+        chk(got && (dest_o === 5'd13) && (ex_result === 32'd14), "div in front drives the output");
+        step;
+        chk(valid_o && (dest_o === 5'd14) && (ex_result === (32'hf0f0_f0f0 | 32'h0f0f_0f0f)),
+            "ALU leaves only after the div");
+        repeat (2) step;
+    end
 
     $display("==========================================");
     if (errors == 0) $display("PASS: %0d checks, 0 errors", checks);
