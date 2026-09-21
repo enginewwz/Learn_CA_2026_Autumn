@@ -34,8 +34,18 @@ localparam MEM  = 3;
 localparam WB   = 4;
 localparam TOTAL_STAGE_WIDTH = 5;
 
-reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
+// md_op bit positions: one-hot mul/div operation select
+localparam MUL_W    = 0;
+localparam MULH_W   = 1;
+localparam MULH_WU  = 2;
+localparam DIV_W    = 3;
+localparam MOD_W    = 4;
+localparam DIV_WU   = 5;
+localparam MOD_WU   = 6;
+
+reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
+
 wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
 wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is ready for new inst; the last stage (WB) would always allow; reset as 1
 wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
@@ -50,48 +60,84 @@ wire        br_taken;   // generate at ID stage
 wire [31:0] br_target;  // generate at ID stage
 wire [31:0] inst_rd;    // receive in ID stage
 
-// should be stored between stages
-reg  [31:0] pc [WB:IF];
+// should be stored between stages.
+// The [EX] elements are combinational aliases of the EX.v outputs (see the
+// always @(*) block below); the other elements are real stage registers.
+reg  [31:0] pc [WB:IF] /* verilator split_var */;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
 
 // IF -> ID
 reg  [31:0] inst [ID:IF];
 
-// source register usage: decode at ID, carry through EX and MEM
-// split_var lets Verilator distinguish independently driven stage elements
-reg  [MEM:ID] src1_used;
-reg  [MEM:ID] src2_used;
+// ID: combinational, generated from inst[ID]; these only exist at ID
+reg  [11:0] alu_op_id;
+reg  [31:0] alu_src1_id;
+reg  [31:0] alu_src2_id;
+reg  [MOD_WU:0] md_op_id;
 
-// ID -> EX: combinational at ID, registered at EX
-reg  [11:0] alu_op [EX:ID];
-reg  [31:0] alu_src1 [EX:ID];
-reg  [31:0] alu_src2 [EX:ID];
+// stage fields: [ID] combinational, [EX] aliases EX.v, [MEM]/[WB] registered
+reg         src1_used [MEM:ID] /* verilator split_var */;
+reg         src2_used [MEM:ID] /* verilator split_var */;
+reg         res_from_mem [MEM:ID] /* verilator split_var */;
+reg         mem_we [MEM:ID] /* verilator split_var */;
+reg         mem_en [MEM:ID] /* verilator split_var */;
+reg  [31:0] mem_wdata [MEM:ID] /* verilator split_var */;
+// [0]=byte access, [1]=halfword access, [2]=load zero-extends (ld.bu / ld.hu)
+reg  [ 2:0] mem_size [MEM:ID] /* verilator split_var */;
+reg         gr_we [WB:ID] /* verilator split_var */;
+reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
-// ID -> MEM: combinational at ID, carried with the instruction
-reg  [MEM:ID] res_from_mem;
-reg  [MEM:ID] mem_we;
-reg  [MEM:ID] mem_en;
-reg  [31:0] mem_wdata [MEM:ID]; // select at ID, latch to EX/MEM, write RAM at MEM
+// EX.v outputs, aliased into the [EX] elements of the stage fields above
+wire [31:0] pc_o;
+wire        src1_used_o;
+wire        src2_used_o;
+wire        res_from_mem_o;
+wire        mem_we_o;
+wire        mem_en_o;
+wire [31:0] mem_wdata_o;
+wire [ 2:0] mem_size_o;
+wire        gr_we_o;
+wire  [4:0] dest_o;
+wire        valid_o;
+wire        ex_stall;
 
-wire        load_op;    // not used
+wire [31:0] ex_result;      // ALU combinational output (EX.v)
+reg  [31:0] ex_result_mem;
 
-// ID -> WB: combinational at ID, carried with the instruction
-reg  [WB:ID] gr_we;
-reg  [4: 0] dest [WB:ID];
-
-// EX -> MEM: module output remains a wire in Verilog
-wire [31:0] alu_result;      // ALU combinational output (EX stage)
-reg  [31:0] alu_result_mem;
+// EX.v forwarding, one group per stage (stage 0 is the youngest)
+wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
+wire        fwd2_valid, fwd2_pending, fwd3_valid, fwd3_pending;
+wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest, fwd3_dest;
+wire [31:0] fwd0_data, fwd1_data, fwd2_data, fwd3_data;
 
 // MEM -> WB: combinational at MEM, registered at WB
 reg  [31:0] final_result [WB:MEM];
+
+wire        load_op;    // not used
+
+// [EX] stage view comes straight from EX.v
+always @(*) begin
+    pc[EX]           = pc_o;
+    src1_used[EX]    = src1_used_o;
+    src2_used[EX]    = src2_used_o;
+    res_from_mem[EX] = res_from_mem_o;
+    mem_we[EX]       = mem_we_o;
+    mem_en[EX]       = mem_en_o;
+    mem_wdata[EX]    = mem_wdata_o;
+    mem_size[EX]     = mem_size_o;
+    gr_we[EX]        = gr_we_o;
+    dest[EX]         = dest_o;
+    valid[EX]        = valid_o;
+end
 
 // mid signals for ID stage
 wire        src_reg_is_rd;
 wire [31:0] rj_value;
 wire [31:0] rkd_value;
 wire        rj_eq_rd;
+wire        rj_lt_rd;
+wire        rj_ltu_rd;
 wire [31:0] imm;
 wire [31:0] br_offs;
 wire [31:0] jirl_offs;
@@ -136,7 +182,40 @@ wire        inst_beq;
 wire        inst_bne;
 wire        inst_lu12i_w;
 
+// exp10: arithmetic / logic
+wire        inst_slti;
+wire        inst_sltui;
+wire        inst_andi;
+wire        inst_ori;
+wire        inst_xori;
+wire        inst_sll_w;
+wire        inst_srl_w;
+wire        inst_sra_w;
+wire        inst_pcaddu12i;
+
+// exp10: mul / div
+wire        inst_mul_w;
+wire        inst_mulh_w;
+wire        inst_mulh_wu;
+wire        inst_div_w;
+wire        inst_div_wu;
+wire        inst_mod_w;
+wire        inst_mod_wu;
+
+// exp11: compare branches and byte / halfword memory
+wire        inst_blt;
+wire        inst_bge;
+wire        inst_bltu;
+wire        inst_bgeu;
+wire        inst_ld_b;
+wire        inst_ld_h;
+wire        inst_ld_bu;
+wire        inst_ld_hu;
+wire        inst_st_b;
+wire        inst_st_h;
+
 wire        need_ui5;
+wire        need_ui12;
 wire        need_si12;
 wire        need_si16;
 wire        need_si20;
@@ -154,13 +233,13 @@ wire [31:0] rf_wdata;
 wire [31:0] mem_result;
 wire        load_use_hit;
 
-wire [MEM:EX] src1_match;       // ID source matches a nonzero destination
-wire [MEM:EX] src2_match;
+wire        src1_match_mem;      // ID source matches a nonzero destination
+wire        src2_match_mem;
 
-wire [MEM:EX] forwarding_hit1;  // stage that hit forwarding addr
+wire        forwarding_hit1_mem; // stage that hit forwarding addr
 wire [31:0] forwarding_data1;
 
-wire [MEM:EX] forwarding_hit2;  // stage that hit forwarding addr
+wire        forwarding_hit2_mem;
 wire [31:0] forwarding_data2;
 
 
@@ -283,14 +362,12 @@ always @(posedge clk) begin
     if (reset) begin
         pc[IF] <= 32'h1bfffffc;     // trick: to make nextpc be 0x1c000000 during reset
         pc[ID] <= 32'h0;
-        pc[EX] <= 32'h0;
         pc[MEM] <= 32'h0;
         pc[WB] <= 32'h0;
     end
     else begin
         if (receive_new_inst[IF] ) pc[IF]  <= nextpc;
         if (receive_new_inst[ID] ) pc[ID]  <= pc[IF];
-        if (receive_new_inst[EX] ) pc[EX]  <= pc[ID];
         if (receive_new_inst[MEM]) pc[MEM] <= pc[EX];
         if (receive_new_inst[WB] ) pc[WB]  <= pc[MEM];
     end
@@ -301,12 +378,20 @@ assign cur_valid = valid & ~ flush;
 assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow;
 assign next_valid = receive_new_inst | (~ allow & cur_valid);
 
+// valid[EX] is registered inside EX.v (see the [EX] alias block), so only the
+// other four stages are updated here
 always @(posedge clk) begin
     if (reset) begin
-        valid <= 5'b0;
+        valid[IF]  <= 1'b0;
+        valid[ID]  <= 1'b0;
+        valid[MEM] <= 1'b0;
+        valid[WB]  <= 1'b0;
     end
     else begin
-        valid <= next_valid;
+        valid[IF]  <= next_valid[IF];
+        valid[ID]  <= next_valid[ID];
+        valid[MEM] <= next_valid[MEM];
+        valid[WB]  <= next_valid[WB];
     end
 end
 
@@ -320,40 +405,60 @@ assign allow[EX]  = ~ stall[EX] && allow[MEM];
 assign allow[ID]  = ~ stall[ID] && allow[EX];
 assign allow[IF]  = ~ stall[IF] && allow[ID];
 
-// not used stall bits
-
-assign stall[EX] = 1'b0;
+// EX reports its own stall request (div waiting, ALU/mul/div back-pressure)
+assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
-// source matching shared by load-use detection and forwarding
-assign src1_match[EX]  = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[EX]);
-assign src2_match[EX]  = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[EX]);
-assign src1_match[MEM] = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
-assign src2_match[MEM] = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
+// ---------------------------------------------------------------------------
+// forwarding: each EX stage exports {valid, pending, dest, data}. The youngest
+// hit wins (stage 0 first). A hit that is only "pending" (a load, or a mul/div
+// before the last stage) makes ID wait instead of forwarding. MEM is older
+// than every EX stage, so it is only used when EX has no hit at all.
+wire [3:0] fwd1_hit, fwd2_hit;
 
-// stall for load use hazard
-assign load_use_hit = (valid[EX]  && mem_en[EX]  && ~mem_we[EX]  && (src1_match[EX]  || src2_match[EX])) |
-                      (valid[MEM] && mem_en[MEM] && ~mem_we[MEM] && (src1_match[MEM] || src2_match[MEM]));
+assign fwd1_hit = {
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd3_dest) && (fwd3_valid | fwd3_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+};
+
+assign fwd2_hit = {
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd3_dest) && (fwd3_valid | fwd3_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd2_dest) && (fwd2_valid | fwd2_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd1_dest) && (fwd1_valid | fwd1_pending),
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+};
+
+wire        fwd1_go   = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_valid   : fwd1_hit[1] ? fwd1_valid   : fwd1_hit[2] ? fwd2_valid   : fwd3_valid);
+wire        fwd2_go   = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_valid   : fwd2_hit[1] ? fwd1_valid   : fwd2_hit[2] ? fwd2_valid   : fwd3_valid);
+wire        fwd1_wait = (| fwd1_hit) & (fwd1_hit[0] ? fwd0_pending : fwd1_hit[1] ? fwd1_pending : fwd1_hit[2] ? fwd2_pending : fwd3_pending);
+wire        fwd2_wait = (| fwd2_hit) & (fwd2_hit[0] ? fwd0_pending : fwd2_hit[1] ? fwd1_pending : fwd2_hit[2] ? fwd2_pending : fwd3_pending);
+wire [31:0] fwd1_result = fwd1_hit[0] ? fwd0_data : fwd1_hit[1] ? fwd1_data : fwd1_hit[2] ? fwd2_data : fwd3_data;
+wire [31:0] fwd2_result = fwd2_hit[0] ? fwd0_data : fwd2_hit[1] ? fwd1_data : fwd2_hit[2] ? fwd2_data : fwd3_data;
+
+assign src1_match_mem      = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
+assign src2_match_mem      = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
+assign forwarding_hit1_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match_mem;
+assign forwarding_hit2_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match_mem;
+
+assign forwarding_data1 = fwd1_go            ? fwd1_result  :
+                          forwarding_hit1_mem ? ex_result_mem :
+                          rf_rdata1;
+
+assign forwarding_data2 = fwd2_go            ? fwd2_result  :
+                          forwarding_hit2_mem ? ex_result_mem :
+                          rf_rdata2;
+
+// stall for load use / not-ready producer hazards
+assign load_use_hit = fwd1_wait | fwd2_wait |
+                      (valid[MEM] && mem_en[MEM] && ~mem_we[MEM] && (src1_match_mem || src2_match_mem));
 
 assign stall[ID] = load_use_hit && valid[ID];
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
-
-// generate forwarding bits
-assign forwarding_hit1[EX]  = valid[EX]  && ~mem_en[EX]  && gr_we[EX]  && src1_match[EX];
-assign forwarding_hit2[EX]  = valid[EX]  && ~mem_en[EX]  && gr_we[EX]  && src2_match[EX];
-assign forwarding_hit1[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match[MEM];
-assign forwarding_hit2[MEM] = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match[MEM];
-
-assign forwarding_data1 = forwarding_hit1[EX]  ? alu_result     :
-                          forwarding_hit1[MEM] ? alu_result_mem :
-                          rf_rdata1;
-
-assign forwarding_data2 = forwarding_hit2[EX]  ? alu_result     :
-                          forwarding_hit2[MEM] ? alu_result_mem :
-                          rf_rdata2;
 
 assign inst_sram_en    = IF_req_valid;
 assign inst_sram_we    = 4'b0;
@@ -412,96 +517,135 @@ assign inst_beq    = op_31_26_d[6'h16];
 assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w= op_31_26_d[6'h05] & ~inst[ID][25];
 
+// exp10 arithmetic / logic instructions
+assign inst_slti     = op_31_26_d[6'h00] & op_25_22_d[4'h8];
+assign inst_sltui    = op_31_26_d[6'h00] & op_25_22_d[4'h9];
+assign inst_andi     = op_31_26_d[6'h00] & op_25_22_d[4'hd];
+assign inst_ori      = op_31_26_d[6'h00] & op_25_22_d[4'he];
+assign inst_xori     = op_31_26_d[6'h00] & op_25_22_d[4'hf];
+assign inst_sll_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0e];
+assign inst_srl_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
+assign inst_sra_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
+assign inst_pcaddu12i= op_31_26_d[6'h07];
+
+// exp10 mul / div instructions
+assign inst_mul_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h18];
+assign inst_mulh_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h19];
+assign inst_mulh_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h1a];
+assign inst_div_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h00];
+assign inst_mod_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
+assign inst_div_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
+assign inst_mod_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
+
+// exp11 compare branches and byte / halfword memory
+assign inst_blt   = op_31_26_d[6'h18];
+assign inst_bge   = op_31_26_d[6'h19];
+assign inst_bltu  = op_31_26_d[6'h1a];
+assign inst_bgeu  = op_31_26_d[6'h1b];
+assign inst_ld_b  = op_31_26_d[6'h0a] & op_25_22_d[4'h0];
+assign inst_ld_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h1];
+assign inst_st_b  = op_31_26_d[6'h0a] & op_25_22_d[4'h4];
+assign inst_st_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
+assign inst_ld_bu = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
+assign inst_ld_hu = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
+
 // ID source usage includes branch operands and store data, not only ALU inputs
 always @(*) begin
     src1_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w
-                  | inst_ld_w | inst_st_w | inst_beq | inst_bne | inst_jirl;
+                  | inst_ld_w | inst_st_w | inst_beq | inst_bne | inst_jirl
+                  | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
+                  | inst_sll_w | inst_srl_w | inst_sra_w
+                  | inst_mul_w | inst_mulh_w | inst_mulh_wu
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
+                  | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                  | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                  | inst_st_b | inst_st_h;
     src2_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
-                  | inst_st_w | inst_beq | inst_bne;
+                  | inst_st_w | inst_beq | inst_bne
+                  | inst_sll_w | inst_srl_w | inst_sra_w
+                  | inst_mul_w | inst_mulh_w | inst_mulh_wu
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
+                  | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                  | inst_st_b | inst_st_h;
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        src1_used[EX] <= src1_used[ID];
-        src2_used[EX] <= src2_used[ID];
-    end
     if (receive_new_inst[MEM]) begin
         src1_used[MEM] <= src1_used[EX];
         src2_used[MEM] <= src2_used[EX];
     end
 end
 
-// ID generates the ALU operation; EX holds it while the pipeline is blocked
+// ID generates the ALU operation; EX.v holds it while the pipeline is blocked
 always @(*) begin
-    alu_op[ID][ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                   | inst_jirl | inst_bl;
-    alu_op[ID][ 1] = inst_sub_w;
-    alu_op[ID][ 2] = inst_slt;
-    alu_op[ID][ 3] = inst_sltu;
-    alu_op[ID][ 4] = inst_and;
-    alu_op[ID][ 5] = inst_nor;
-    alu_op[ID][ 6] = inst_or;
-    alu_op[ID][ 7] = inst_xor;
-    alu_op[ID][ 8] = inst_slli_w;
-    alu_op[ID][ 9] = inst_srli_w;
-    alu_op[ID][10] = inst_srai_w;
-    alu_op[ID][11] = inst_lu12i_w;
+    alu_op_id[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
+                  | inst_jirl | inst_bl | inst_pcaddu12i
+                  | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                  | inst_st_b | inst_st_h;
+    alu_op_id[ 1] = inst_sub_w;
+    alu_op_id[ 2] = inst_slt | inst_slti;
+    alu_op_id[ 3] = inst_sltu | inst_sltui;
+    alu_op_id[ 4] = inst_and | inst_andi;
+    alu_op_id[ 5] = inst_nor;
+    alu_op_id[ 6] = inst_or | inst_ori;
+    alu_op_id[ 7] = inst_xor | inst_xori;
+    alu_op_id[ 8] = inst_slli_w | inst_sll_w;
+    alu_op_id[ 9] = inst_srli_w | inst_srl_w;
+    alu_op_id[10] = inst_srai_w | inst_sra_w;
+    alu_op_id[11] = inst_lu12i_w;
 end
 
-always @(posedge clk) begin
-    if (receive_new_inst[EX]) alu_op[EX] <= alu_op[ID];
-end
-
-// ID selects the operands; EX consumes the registered values
+// ID generates the mul/div operation select; EX.v holds it
 always @(*) begin
-    alu_src1[ID] = src1_is_pc  ? pc[ID] : forwarding_data1;
-    alu_src2[ID] = src2_is_imm ? imm    : forwarding_data2;
+    md_op_id[MUL_W]   = inst_mul_w;
+    md_op_id[MULH_W]  = inst_mulh_w;
+    md_op_id[MULH_WU] = inst_mulh_wu;
+    md_op_id[DIV_W]   = inst_div_w;
+    md_op_id[MOD_W]   = inst_mod_w;
+    md_op_id[DIV_WU]  = inst_div_wu;
+    md_op_id[MOD_WU]  = inst_mod_wu;
 end
 
-always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        alu_src1[EX] <= alu_src1[ID];
-        alu_src2[EX] <= alu_src2[ID];
-    end
-end
-
-// ID generates memory control and store data; EX/MEM carry them together
+// ID selects the operands; EX.v consumes its registered copies
 always @(*) begin
-    res_from_mem[ID] = inst_ld_w;
-    mem_we[ID]       = inst_st_w;
-    mem_en[ID]       = inst_st_w | inst_ld_w;
+    alu_src1_id = src1_is_pc  ? pc[ID] : forwarding_data1;
+    alu_src2_id = src2_is_imm ? imm    : forwarding_data2;
+end
+
+// ID generates memory control and store data; EX.v / MEM carry them together
+always @(*) begin
+    res_from_mem[ID] = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
+    mem_we[ID]       = inst_st_w | inst_st_b | inst_st_h;
+    mem_en[ID]       = mem_we[ID] | res_from_mem[ID];
     mem_wdata[ID]    = forwarding_data2;
+    // access size: [0]=byte, [1]=halfword, [2]=load zero-extends (ld.bu / ld.hu)
+    mem_size[ID][0]  = inst_ld_b | inst_ld_bu | inst_st_b;
+    mem_size[ID][1]  = inst_ld_h | inst_ld_hu | inst_st_h;
+    mem_size[ID][2]  = inst_ld_bu | inst_ld_hu;
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        res_from_mem[EX] <= res_from_mem[ID];
-        mem_we[EX]       <= mem_we[ID];
-        mem_en[EX]       <= mem_en[ID];
-        mem_wdata[EX]    <= mem_wdata[ID];
-    end
     if (receive_new_inst[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
         mem_we[MEM]       <= mem_we[EX];
         mem_en[MEM]       <= mem_en[EX];
         mem_wdata[MEM]    <= mem_wdata[EX];
+        mem_size[MEM]     <= mem_size[EX];
     end
 end
 
-// ID generates write-back control; EX/MEM/WB carry it with the result
+// ID generates write-back control; EX.v / MEM / WB carry it with the result
 always @(*) begin
-    gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b;
+    gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
+              & ~inst_st_b & ~inst_st_h
+              & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
     dest[ID]  = inst_bl ? 5'd1 : rd;
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[EX]) begin
-        gr_we[EX] <= gr_we[ID];
-        dest[EX]  <= dest[ID];
-    end
     if (receive_new_inst[MEM]) begin
         gr_we[MEM] <= gr_we[EX];
         dest[MEM]  <= dest[EX];
@@ -513,14 +657,17 @@ always @(posedge clk) begin
 end
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w;
+assign need_ui12  =  inst_andi | inst_ori | inst_xori;
+assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui
+                  |  inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu | inst_st_b | inst_st_h;
 assign need_si16  =  inst_jirl | inst_beq | inst_bne;
-assign need_si20  =  inst_lu12i_w;
+assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_si26  =  inst_b | inst_bl;
 assign src2_is_4  =  inst_jirl | inst_bl;
 
 assign imm = src2_is_4 ? 32'h4                      :
              need_si20 ? {i20[19:0], 12'b0}         :
+             need_ui12 ? {20'b0, i12[11:0]}         :
 /*need_ui5 || need_si12*/{{20{i12[11]}}, i12[11:0]} ;
 
 assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
@@ -528,17 +675,30 @@ assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
 
 assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
-assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
+assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_st_b | inst_st_h
+                     | inst_blt | inst_bge | inst_bltu | inst_bgeu;
 
-assign src1_is_pc    = inst_jirl | inst_bl;
+assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
 assign src2_is_imm   = inst_slli_w |
                        inst_srli_w |
                        inst_srai_w |
                        inst_addi_w |
+                       inst_slti   |
+                       inst_sltui  |
+                       inst_andi   |
+                       inst_ori    |
+                       inst_xori   |
                        inst_ld_w   |
                        inst_st_w   |
+                       inst_ld_b   |
+                       inst_ld_h   |
+                       inst_ld_bu  |
+                       inst_ld_hu  |
+                       inst_st_b   |
+                       inst_st_h   |
                        inst_lu12i_w|
+                       inst_pcaddu12i |
                        inst_jirl   |
                        inst_bl     ;
 
@@ -558,30 +718,85 @@ regfile u_regfile(
 assign rj_value  = forwarding_data1;
 assign rkd_value = forwarding_data2;
 
-assign rj_eq_rd = (rj_value == rkd_value);
+assign rj_eq_rd  = (rj_value == rkd_value);
+assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
+assign rj_ltu_rd = (rj_value < rkd_value);
+
 assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_bne  && !rj_eq_rd
+                   || inst_blt  &&  rj_lt_rd
+                   || inst_bge  && !rj_lt_rd
+                   || inst_bltu &&  rj_ltu_rd
+                   || inst_bgeu && !rj_ltu_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
                   ) && receive_new_inst[EX];
 
-assign br_target = (inst_beq || inst_bne || inst_bl || inst_b) ? (pc[ID] + br_offs) :
+assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
+                 || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
-alu u_alu(
-    .alu_op     (alu_op   [EX]),
-    .alu_src1   (alu_src1 [EX]),
-    .alu_src2   (alu_src2 [EX]),
-    .alu_result (alu_result   )
+EX u_ex(
+    .clk            (clk            ),
+    .reset          (reset          ),
+    .receive        (receive_new_inst[EX]),
+    .allow_next     (allow[MEM]     ),
+
+    .pc_i           (pc[ID]         ),
+    .src1_used_i    (src1_used[ID]  ),
+    .src2_used_i    (src2_used[ID]  ),
+    .alu_op_i       (alu_op_id      ),
+    .alu_src1_i     (alu_src1_id    ),
+    .alu_src2_i     (alu_src2_id    ),
+    .md_op_i        (md_op_id       ),
+    .res_from_mem_i (res_from_mem[ID]),
+    .mem_we_i       (mem_we[ID]     ),
+    .mem_en_i       (mem_en[ID]     ),
+    .mem_wdata_i    (mem_wdata[ID]  ),
+    .mem_size_i     (mem_size[ID]   ),
+    .gr_we_i        (gr_we[ID]      ),
+    .dest_i         (dest[ID]       ),
+
+    .pc_o           (pc_o           ),
+    .src1_used_o    (src1_used_o    ),
+    .src2_used_o    (src2_used_o    ),
+    .res_from_mem_o (res_from_mem_o ),
+    .mem_we_o       (mem_we_o       ),
+    .mem_en_o       (mem_en_o       ),
+    .mem_wdata_o    (mem_wdata_o    ),
+    .mem_size_o     (mem_size_o     ),
+    .gr_we_o        (gr_we_o        ),
+    .dest_o         (dest_o         ),
+
+    .ex_result     (ex_result     ),
+    .valid_o        (valid_o        ),
+    .stall_o        (ex_stall       ),
+
+    .fwd0_valid     (fwd0_valid     ),
+    .fwd0_pending   (fwd0_pending   ),
+    .fwd0_dest      (fwd0_dest      ),
+    .fwd0_data      (fwd0_data      ),
+    .fwd1_valid     (fwd1_valid     ),
+    .fwd1_pending   (fwd1_pending   ),
+    .fwd1_dest      (fwd1_dest      ),
+    .fwd1_data      (fwd1_data      ),
+    .fwd2_valid     (fwd2_valid     ),
+    .fwd2_pending   (fwd2_pending   ),
+    .fwd2_dest      (fwd2_dest      ),
+    .fwd2_data      (fwd2_data      ),
+    .fwd3_valid     (fwd3_valid     ),
+    .fwd3_pending   (fwd3_pending   ),
+    .fwd3_dest      (fwd3_dest      ),
+    .fwd3_data      (fwd3_data      )
     );
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) alu_result_mem <= alu_result;
+    if (receive_new_inst[MEM]) ex_result_mem <= ex_result;
 end
 
 always @(*) begin
-    final_result[MEM] = res_from_mem[MEM] ? mem_result : alu_result_mem;
+    final_result[MEM] = res_from_mem[MEM] ? mem_result : ex_result_mem;
 end
 
 always @(posedge clk) begin
@@ -589,11 +804,33 @@ always @(posedge clk) begin
 end
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}; // only support word write
-assign data_sram_addr  = alu_result_mem;
-assign data_sram_wdata = mem_wdata[MEM];
+assign data_sram_addr  = ex_result_mem;
 
-assign mem_result = data_sram_rdata;
+// byte / halfword / word store: broadcast the stored data to every byte lane
+// and let the write-enable mask pick the addressed lane(s)
+wire mem_byte = mem_size[MEM][0];
+wire mem_half = mem_size[MEM][1];
+
+wire [3:0] st_we_byte = 4'b0001 << ex_result_mem[1:0];
+wire [3:0] st_we_half = ex_result_mem[1] ? 4'b1100 : 4'b0011;
+wire [3:0] st_we_word = 4'b1111;
+
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}}
+                       & (mem_byte ? st_we_byte : mem_half ? st_we_half : st_we_word);
+assign data_sram_wdata = mem_byte ? {4{mem_wdata[MEM][ 7: 0]}} :
+                         mem_half ? {2{mem_wdata[MEM][15: 0]}} :
+                                    mem_wdata[MEM];
+
+// byte / halfword / word load: take the addressed lane and extend it
+wire [ 7:0] ld_byte = (ex_result_mem[1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
+                      (ex_result_mem[1:0] == 2'd1) ? data_sram_rdata[15: 8] :
+                      (ex_result_mem[1:0] == 2'd2) ? data_sram_rdata[23:16] :
+                                                     data_sram_rdata[31:24];
+wire [15:0] ld_half = ex_result_mem[1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
+
+assign mem_result = mem_byte ? (mem_size[MEM][2] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte}) :
+                    mem_half ? (mem_size[MEM][2] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half}) :
+                                 data_sram_rdata;
 
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
