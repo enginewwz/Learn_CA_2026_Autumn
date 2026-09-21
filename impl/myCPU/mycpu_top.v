@@ -34,6 +34,15 @@ localparam MEM  = 3;
 localparam WB   = 4;
 localparam TOTAL_STAGE_WIDTH = 5;
 
+// md_op bit positions: one-hot mul/div operation select
+localparam MUL_W    = 0;
+localparam MULH_W   = 1;
+localparam MULH_WU  = 2;
+localparam DIV_W    = 3;
+localparam MOD_W    = 4;
+localparam DIV_WU   = 5;
+localparam MOD_WU   = 6;
+
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
 wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) would never stall it self; reset as 0
@@ -67,6 +76,10 @@ reg  [MEM:ID] src2_used;
 reg  [11:0] alu_op [EX:ID];
 reg  [31:0] alu_src1 [EX:ID];
 reg  [31:0] alu_src2 [EX:ID];
+
+// ID -> EX: mul/div operation select, one-hot (see MUL_W..MOD_W above);
+// combinational at ID, registered at EX
+reg  [MOD_W:0] md_op [EX:ID];
 
 // ID -> MEM: combinational at ID, carried with the instruction
 reg  [MEM:ID] res_from_mem;
@@ -136,7 +149,28 @@ wire        inst_beq;
 wire        inst_bne;
 wire        inst_lu12i_w;
 
+// exp10: arithmetic / logic
+wire        inst_slti;
+wire        inst_sltui;
+wire        inst_andi;
+wire        inst_ori;
+wire        inst_xori;
+wire        inst_sll_w;
+wire        inst_srl_w;
+wire        inst_sra_w;
+wire        inst_pcaddu12i;
+
+// exp10: mul / div
+wire        inst_mul_w;
+wire        inst_mulh_w;
+wire        inst_mulh_wu;
+wire        inst_div_w;
+wire        inst_div_wu;
+wire        inst_mod_w;
+wire        inst_mod_wu;
+
 wire        need_ui5;
+wire        need_ui12;
 wire        need_si12;
 wire        need_si16;
 wire        need_si20;
@@ -412,15 +446,42 @@ assign inst_beq    = op_31_26_d[6'h16];
 assign inst_bne    = op_31_26_d[6'h17];
 assign inst_lu12i_w= op_31_26_d[6'h05] & ~inst[ID][25];
 
+// exp10 arithmetic / logic instructions
+assign inst_slti     = op_31_26_d[6'h00] & op_25_22_d[4'h8];
+assign inst_sltui    = op_31_26_d[6'h00] & op_25_22_d[4'h9];
+assign inst_andi     = op_31_26_d[6'h00] & op_25_22_d[4'hd];
+assign inst_ori      = op_31_26_d[6'h00] & op_25_22_d[4'he];
+assign inst_xori     = op_31_26_d[6'h00] & op_25_22_d[4'hf];
+assign inst_sll_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0e];
+assign inst_srl_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h0f];
+assign inst_sra_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h10];
+assign inst_pcaddu12i= op_31_26_d[6'h07];
+
+// exp10 mul / div instructions
+assign inst_mul_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h18];
+assign inst_mulh_w   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h19];
+assign inst_mulh_wu  = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h1] & op_19_15_d[5'h1a];
+assign inst_div_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h00];
+assign inst_mod_w    = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h01];
+assign inst_div_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h02];
+assign inst_mod_wu   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h03];
+
 // ID source usage includes branch operands and store data, not only ALU inputs
 always @(*) begin
     src1_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_slli_w | inst_srli_w | inst_srai_w | inst_addi_w
-                  | inst_ld_w | inst_st_w | inst_beq | inst_bne | inst_jirl;
+                  | inst_ld_w | inst_st_w | inst_beq | inst_bne | inst_jirl
+                  | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
+                  | inst_sll_w | inst_srl_w | inst_sra_w
+                  | inst_mul_w | inst_mulh_w | inst_mulh_wu
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
     src2_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
-                  | inst_st_w | inst_beq | inst_bne;
+                  | inst_st_w | inst_beq | inst_bne
+                  | inst_sll_w | inst_srl_w | inst_sra_w
+                  | inst_mul_w | inst_mulh_w | inst_mulh_wu
+                  | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu;
 end
 
 always @(posedge clk) begin
@@ -437,22 +498,37 @@ end
 // ID generates the ALU operation; EX holds it while the pipeline is blocked
 always @(*) begin
     alu_op[ID][ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
-                   | inst_jirl | inst_bl;
+                   | inst_jirl | inst_bl | inst_pcaddu12i;
     alu_op[ID][ 1] = inst_sub_w;
-    alu_op[ID][ 2] = inst_slt;
-    alu_op[ID][ 3] = inst_sltu;
-    alu_op[ID][ 4] = inst_and;
+    alu_op[ID][ 2] = inst_slt | inst_slti;
+    alu_op[ID][ 3] = inst_sltu | inst_sltui;
+    alu_op[ID][ 4] = inst_and | inst_andi;
     alu_op[ID][ 5] = inst_nor;
-    alu_op[ID][ 6] = inst_or;
-    alu_op[ID][ 7] = inst_xor;
-    alu_op[ID][ 8] = inst_slli_w;
-    alu_op[ID][ 9] = inst_srli_w;
-    alu_op[ID][10] = inst_srai_w;
+    alu_op[ID][ 6] = inst_or | inst_ori;
+    alu_op[ID][ 7] = inst_xor | inst_xori;
+    alu_op[ID][ 8] = inst_slli_w | inst_sll_w;
+    alu_op[ID][ 9] = inst_srli_w | inst_srl_w;
+    alu_op[ID][10] = inst_srai_w | inst_sra_w;
     alu_op[ID][11] = inst_lu12i_w;
 end
 
 always @(posedge clk) begin
     if (receive_new_inst[EX]) alu_op[EX] <= alu_op[ID];
+end
+
+// ID generates the mul/div operation select; EX holds it
+always @(*) begin
+    md_op[ID][MUL_W]   = inst_mul_w;
+    md_op[ID][MULH_W]  = inst_mulh_w;
+    md_op[ID][MULH_WU] = inst_mulh_wu;
+    md_op[ID][DIV_W]   = inst_div_w;
+    md_op[ID][MOD_W]   = inst_mod_w;
+    md_op[ID][DIV_WU]  = inst_div_wu;
+    md_op[ID][MOD_WU]  = inst_mod_wu;
+end
+
+always @(posedge clk) begin
+    if (receive_new_inst[EX]) md_op[EX] <= md_op[ID];
 end
 
 // ID selects the operands; EX consumes the registered values
@@ -513,14 +589,16 @@ always @(posedge clk) begin
 end
 
 assign need_ui5   =  inst_slli_w | inst_srli_w | inst_srai_w;
-assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w;
+assign need_ui12  =  inst_andi | inst_ori | inst_xori;
+assign need_si12  =  inst_addi_w | inst_ld_w | inst_st_w | inst_slti | inst_sltui;
 assign need_si16  =  inst_jirl | inst_beq | inst_bne;
-assign need_si20  =  inst_lu12i_w;
+assign need_si20  =  inst_lu12i_w | inst_pcaddu12i;
 assign need_si26  =  inst_b | inst_bl;
 assign src2_is_4  =  inst_jirl | inst_bl;
 
 assign imm = src2_is_4 ? 32'h4                      :
              need_si20 ? {i20[19:0], 12'b0}         :
+             need_ui12 ? {20'b0, i12[11:0]}         :
 /*need_ui5 || need_si12*/{{20{i12[11]}}, i12[11:0]} ;
 
 assign br_offs = need_si26 ? {{ 4{i26[25]}}, i26[25:0], 2'b0} :
@@ -530,15 +608,21 @@ assign jirl_offs = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w;
 
-assign src1_is_pc    = inst_jirl | inst_bl;
+assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
 assign src2_is_imm   = inst_slli_w |
                        inst_srli_w |
                        inst_srai_w |
                        inst_addi_w |
+                       inst_slti   |
+                       inst_sltui  |
+                       inst_andi   |
+                       inst_ori    |
+                       inst_xori   |
                        inst_ld_w   |
                        inst_st_w   |
                        inst_lu12i_w|
+                       inst_pcaddu12i |
                        inst_jirl   |
                        inst_bl     ;
 
