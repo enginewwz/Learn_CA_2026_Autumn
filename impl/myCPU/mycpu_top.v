@@ -106,8 +106,7 @@ wire  [4:0] dest_o;
 wire        valid_o;
 wire        ex_stall;
 
-wire [31:0] ex_result;      // ALU combinational output (EX.v)
-reg  [31:0] ex_result_mem;
+wire [31:0] ex_result;      // EX.v combinational output (this is the [EX] result)
 
 // EX.v forwarding, one group per stage (stage 0 is the youngest)
 wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
@@ -115,8 +114,11 @@ wire        fwd2_valid, fwd2_pending;
 wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest;
 wire [31:0] fwd0_data, fwd1_data, fwd2_data;
 
-// MEM -> WB: combinational at MEM, registered at WB
-reg  [31:0] final_result [WB:MEM];
+// the instruction's result, one entry per stage it is still live in.  [MEM] is
+// the registered copy of EX.v's result: it doubles as the load/store address and
+// as the MEM forwarding tap.  [WB] is the value written back, with the data read
+// in MEM already folded in (a load only has a result from MEM onwards).
+reg  [31:0] result [WB:MEM];
 
 wire        load_op;    // not used
 
@@ -235,16 +237,31 @@ wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
 
 wire [31:0] mem_result;
-wire        load_use_hit;
+wire        src_wait;
 
-wire        src1_match_mem;      // ID source matches a nonzero destination
-wire        src2_match_mem;
-
-wire        forwarding_hit1_mem; // stage that hit forwarding addr
-wire [31:0] forwarding_data1;
-
-wire        forwarding_hit2_mem;
-wire [31:0] forwarding_data2;
+// forwarding, one datapath per ID source: fw1_* serves src1 (rf_raddr1 /
+// src1_used[ID]) and fw2_* serves src2 -- the two operands are the intuitive
+// axis.  A tap is the point where a stage's result is picked up, and the taps
+// are indexed by the stage that holds the operand: [EX] is the EX tap (resolved
+// from the three EX hits, youngest wins), [MEM] the MEM tap.  Same names for
+// both taps:
+//   *_hit[EX/MEM]      that tap will write the register this source reads
+//   *_valid[EX/MEM]    and it already holds the value, so it can supply it now
+//   *_pending[EX/MEM]  but the value is not there yet -> ID waits
+// The EX tap additionally needs the three per-stage hits, their select, and the
+// value, and the final mux picks between the taps and the register file:
+wire [ 2:0] fw1_ex_hit,   fw2_ex_hit;   // per EX stage, bit 0 = the youngest
+wire [ 2:0] fw1_ex_sel,   fw2_ex_sel;   // the youngest EX hit as a one-hot
+wire [31:0] fw1_ex_data,  fw2_ex_data;  // value held by the selected EX hit
+wire        fw1_hit       [MEM:EX];
+wire        fw2_hit       [MEM:EX];
+wire        fw1_valid     [MEM:EX];
+wire        fw2_valid     [MEM:EX];
+wire        fw1_pending   [MEM:EX];
+wire        fw2_pending   [MEM:EX];
+wire        fw1_mem_sel,  fw2_mem_sel;  // final mux: take the operand from MEM
+wire        fw1_rf_sel,   fw2_rf_sel;   // final mux: no tap hit, plain register file read
+wire [31:0] fw1_data,     fw2_data;     // final operand
 
 
 // fake axi path
@@ -414,61 +431,86 @@ assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
 // ---------------------------------------------------------------------------
-// forwarding: each EX stage exports {valid, pending, dest, data}. The youngest
-// hit wins (stage 0 first). A hit that is only "pending" (a load, or a mul/div
-// before the last stage) makes ID wait instead of forwarding. MEM is older
-// than every EX stage, so it is only used when EX has no hit at all.
-wire [2:0] fwd1_hit, fwd2_hit;
-
-assign fwd1_hit = {
+// forwarding.  EX exports one group per EX stage (fwd0/fwd1/fwd2, stage 0 is
+// the youngest); the nets here are per ID source instead (fw1 = for
+// src1_used/rf_raddr1, fw2 = for src2), so the two numbering schemes cannot be
+// mixed up.  A tap is where a stage's result is picked up; both taps carry the
+// same signals under the same names:
+//   *_ex_hit[k]   EX stage k will write the register this source reads
+//                 (address match & (fwdK_valid | fwdK_pending))
+//   *_ex_sel      the youngest such hit as a one-hot
+//   *_ex_data     the value that hit holds
+//   *_hit[EX/MEM]      that tap will write this source's register
+//   *_valid[EX/MEM]    and it already holds the value, so it can supply it now
+//   *_pending[EX/MEM]  but the value is not there yet -> ID waits
+//   *_mem_sel / *_rf_sel   which tap the final masked-OR picks
+//   *_data        the final operand
+// The youngest EX hit wins (stage 0 first); MEM is older than every EX stage,
+// so it is only picked when no EX tap is valid, and the register file is the
+// last resort.
+assign fw1_ex_hit = {
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd0_dest) && (fwd0_valid | fwd0_pending)
 };
 
-assign fwd2_hit = {
+assign fw2_ex_hit = {
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd2_dest) && (fwd2_valid | fwd2_pending),
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd1_dest) && (fwd1_valid | fwd1_pending),
     src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd0_dest) && (fwd0_valid | fwd0_pending)
 };
 
 // several stages can hit at once, so resolve the youngest hit into a one-hot
-// select first; the 32-bit value is then a flat masked-OR instead of a chain
-wire [2:0] fwd1_sel = fwd1_hit[0] ? 3'b001 : fwd1_hit[1] ? 3'b010 : fwd1_hit[2] ? 3'b100 : 3'b000;
-wire [2:0] fwd2_sel = fwd2_hit[0] ? 3'b001 : fwd2_hit[1] ? 3'b010 : fwd2_hit[2] ? 3'b100 : 3'b000;
+// select first; the 32-bit value is then a flat masked-OR instead of a chain.
+assign fw1_ex_sel = fw1_ex_hit[0] ? 3'b001 : fw1_ex_hit[1] ? 3'b010 : fw1_ex_hit[2] ? 3'b100 : 3'b000;
+assign fw2_ex_sel = fw2_ex_hit[0] ? 3'b001 : fw2_ex_hit[1] ? 3'b010 : fw2_ex_hit[2] ? 3'b100 : 3'b000;
 
-wire        fwd1_go   = (fwd1_sel[0] & fwd0_valid)   | (fwd1_sel[1] & fwd1_valid)   | (fwd1_sel[2] & fwd2_valid);
-wire        fwd2_go   = (fwd2_sel[0] & fwd0_valid)   | (fwd2_sel[1] & fwd1_valid)   | (fwd2_sel[2] & fwd2_valid);
-wire        fwd1_wait = (fwd1_sel[0] & fwd0_pending) | (fwd1_sel[1] & fwd1_pending) | (fwd1_sel[2] & fwd2_pending);
-wire        fwd2_wait = (fwd2_sel[0] & fwd0_pending) | (fwd2_sel[1] & fwd1_pending) | (fwd2_sel[2] & fwd2_pending);
-wire [31:0] fwd1_result = ({32{fwd1_sel[0]}} & fwd0_data) | ({32{fwd1_sel[1]}} & fwd1_data) | ({32{fwd1_sel[2]}} & fwd2_data);
-wire [31:0] fwd2_result = ({32{fwd2_sel[0]}} & fwd0_data) | ({32{fwd2_sel[1]}} & fwd1_data) | ({32{fwd2_sel[2]}} & fwd2_data);
+assign fw1_hit[EX]   = | fw1_ex_hit;
+assign fw2_hit[EX]   = | fw2_ex_hit;
+assign fw1_valid[EX] = (fw1_ex_sel[0] & fwd0_valid) | (fw1_ex_sel[1] & fwd1_valid) | (fw1_ex_sel[2] & fwd2_valid);
+assign fw2_valid[EX] = (fw2_ex_sel[0] & fwd0_valid) | (fw2_ex_sel[1] & fwd1_valid) | (fw2_ex_sel[2] & fwd2_valid);
+assign fw1_ex_data  = ({32{fw1_ex_sel[0]}} & fwd0_data) | ({32{fw1_ex_sel[1]}} & fwd1_data) | ({32{fw1_ex_sel[2]}} & fwd2_data);
+assign fw2_ex_data  = ({32{fw2_ex_sel[0]}} & fwd0_data) | ({32{fw2_ex_sel[1]}} & fwd1_data) | ({32{fw2_ex_sel[2]}} & fwd2_data);
 
-assign src1_match_mem      = src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
-assign src2_match_mem      = src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
-assign forwarding_hit1_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src1_match_mem;
-assign forwarding_hit2_mem = valid[MEM] && ~mem_en[MEM] && gr_we[MEM] && src2_match_mem;
+// MEM tap, with the same three signals.  hit = the MEM instruction writes a GPR
+// and its destination is the register this source reads; valid = the value
+// sitting in MEM is the register result (for a load or a store it is the
+// address / store data instead); pending = it is a load, whose data only arrives
+// through the memory handshake.
+assign fw1_hit[MEM]   = valid[MEM] && gr_we[MEM] && src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
+assign fw2_hit[MEM]   = valid[MEM] && gr_we[MEM] && src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
+assign fw1_valid[MEM] = fw1_hit[MEM] && ~ mem_en[MEM];
+assign fw2_valid[MEM] = fw2_hit[MEM] && ~ mem_en[MEM];
 
-// EX is younger than MEM, so it only needs to knock MEM out; the three sources
-// are then exclusive and the data path is one flat masked-OR
-wire fwd1_mem = ~ fwd1_go &   forwarding_hit1_mem;
-wire fwd1_rf  = ~ fwd1_go & ~ forwarding_hit1_mem;
-wire fwd2_mem = ~ fwd2_go &   forwarding_hit2_mem;
-wire fwd2_rf  = ~ fwd2_go & ~ forwarding_hit2_mem;
+// a tap that hits but is not valid yet is exactly what makes ID wait
+assign fw1_pending[EX]  = fw1_hit[EX]  & ~ fw1_valid[EX];
+assign fw1_pending[MEM] = fw1_hit[MEM] & ~ fw1_valid[MEM];
+assign fw2_pending[EX]  = fw2_hit[EX]  & ~ fw2_valid[EX];
+assign fw2_pending[MEM] = fw2_hit[MEM] & ~ fw2_valid[MEM];
 
-assign forwarding_data1 = ({32{fwd1_go}}  & fwd1_result)   |
-                          ({32{fwd1_mem}} & ex_result_mem) |
-                          ({32{fwd1_rf}}  & rf_rdata1);
+// final operand: EX is younger than MEM, so the EX tap knocks the MEM tap out;
+// the three arms are exclusive, so it is one flat masked-OR.  With no tap at all
+// the operand is the register file read data -- that is the default arm of the
+// mux, not another forwarding path: the regfile is write-first, so a producer
+// that has reached WB is already visible on the read port.
+assign fw1_mem_sel = ~ fw1_valid[EX] &   fw1_valid[MEM];
+assign fw1_rf_sel  = ~ fw1_valid[EX] & ~ fw1_valid[MEM];
+assign fw2_mem_sel = ~ fw2_valid[EX] &   fw2_valid[MEM];
+assign fw2_rf_sel  = ~ fw2_valid[EX] & ~ fw2_valid[MEM];
 
-assign forwarding_data2 = ({32{fwd2_go}}  & fwd2_result)   |
-                          ({32{fwd2_mem}} & ex_result_mem) |
-                          ({32{fwd2_rf}}  & rf_rdata2);
+assign fw1_data = ({32{fw1_valid[EX]}} & fw1_ex_data) |
+                  ({32{fw1_mem_sel}} & result[MEM]) |
+                  ({32{fw1_rf_sel}}  & rf_rdata1);
 
-// stall for load use / not-ready producer hazards
-assign load_use_hit = fwd1_wait | fwd2_wait |
-                      (valid[MEM] && mem_en[MEM] && ~mem_we[MEM] && (src1_match_mem || src2_match_mem));
+assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data) |
+                  ({32{fw2_mem_sel}} & result[MEM]) |
+                  ({32{fw2_rf_sel}}  & rf_rdata2);
 
-assign stall[ID] = load_use_hit && valid[ID];
+// ID must wait when any tap of either source is still pending
+assign src_wait = fw1_pending[EX] | fw1_pending[MEM] |
+                  fw2_pending[EX] | fw2_pending[MEM];
+
+assign stall[ID] = src_wait && valid[ID];
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
@@ -625,8 +667,8 @@ end
 
 // ID selects the operands; EX.v consumes its registered copies
 always @(*) begin
-    alu_src1_id = src1_is_pc  ? pc[ID] : forwarding_data1;
-    alu_src2_id = src2_is_imm ? imm    : forwarding_data2;
+    alu_src1_id = src1_is_pc  ? pc[ID] : fw1_data;
+    alu_src2_id = src2_is_imm ? imm    : fw2_data;
 end
 
 // ID generates memory control and store data; EX.v / MEM carry them together
@@ -634,7 +676,7 @@ always @(*) begin
     res_from_mem[ID] = inst_ld_w | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu;
     mem_we[ID]       = inst_st_w | inst_st_b | inst_st_h;
     mem_en[ID]       = mem_we[ID] | res_from_mem[ID];
-    mem_wdata[ID]    = forwarding_data2;
+    mem_wdata[ID]    = fw2_data;
     // access size: [0]=byte, [1]=halfword, [2]=load zero-extends (ld.bu / ld.hu)
     mem_size[ID][0]  = inst_ld_b | inst_ld_bu | inst_st_b;
     mem_size[ID][1]  = inst_ld_h | inst_ld_hu | inst_st_h;
@@ -729,8 +771,8 @@ regfile u_regfile(
     .wdata  (rf_wdata )
     );
 
-assign rj_value  = forwarding_data1;
-assign rkd_value = forwarding_data2;
+assign rj_value  = fw1_data;
+assign rkd_value = fw2_data;
 
 assign rj_eq_rd  = (rj_value == rkd_value);
 assign rj_lt_rd  = ($signed(rj_value) < $signed(rkd_value));
@@ -802,19 +844,12 @@ EX u_ex(
     );
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) ex_result_mem <= ex_result;
-end
-
-always @(*) begin
-    final_result[MEM] = res_from_mem[MEM] ? mem_result : ex_result_mem;
-end
-
-always @(posedge clk) begin
-    if (receive_new_inst[WB]) final_result[WB] <= final_result[MEM];
+    if (receive_new_inst[MEM]) result[MEM] <= ex_result;
+    if (receive_new_inst[WB])  result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
-assign data_sram_addr  = ex_result_mem;
+assign data_sram_addr  = result[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
 // and let the write-enable mask pick the addressed lane(s).
@@ -824,8 +859,8 @@ wire mem_byte = mem_size[MEM][0];
 wire mem_half = mem_size[MEM][1];
 wire mem_word = ~ mem_byte & ~ mem_half;
 
-wire [3:0] st_we_byte = 4'b0001 << ex_result_mem[1:0];
-wire [3:0] st_we_half = ex_result_mem[1] ? 4'b1100 : 4'b0011;
+wire [3:0] st_we_byte = 4'b0001 << result[MEM][1:0];
+wire [3:0] st_we_half = result[MEM][1] ? 4'b1100 : 4'b0011;
 wire [3:0] st_we_word = 4'b1111;
 
 wire [3:0] st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
@@ -836,11 +871,11 @@ assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
                          ({32{mem_word}} &    mem_wdata[MEM]);
 
 // byte / halfword / word load: take the addressed lane and extend it
-wire [ 7:0] ld_byte = (ex_result_mem[1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
-                      (ex_result_mem[1:0] == 2'd1) ? data_sram_rdata[15: 8] :
-                      (ex_result_mem[1:0] == 2'd2) ? data_sram_rdata[23:16] :
+wire [ 7:0] ld_byte = (result[MEM][1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
+                      (result[MEM][1:0] == 2'd1) ? data_sram_rdata[15: 8] :
+                      (result[MEM][1:0] == 2'd2) ? data_sram_rdata[23:16] :
                                                      data_sram_rdata[31:24];
-wire [15:0] ld_half = ex_result_mem[1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
+wire [15:0] ld_half = result[MEM][1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
 
 wire [31:0] ld_byte_ext = mem_size[MEM][2] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte};
 wire [31:0] ld_half_ext = mem_size[MEM][2] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half};
@@ -852,11 +887,11 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
 // WB stage: write back to regfile
 assign rf_we    = gr_we[WB] && valid[WB];
 assign rf_waddr = dest[WB];
-assign rf_wdata = final_result[WB];
+assign rf_wdata = result[WB];
 
 assign debug_wb_pc       = pc[WB];
 assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
 assign debug_wb_rf_wnum  = dest[WB];
-assign debug_wb_rf_wdata = final_result[WB];
+assign debug_wb_rf_wdata = result[WB];
 
 endmodule
