@@ -1,11 +1,9 @@
 module EX(
     input  wire        clk,
     input  wire        reset,
-    input  wire        receive,         // receive_new_inst[EX]: ID -> EX transfer
-    input  wire        allow_next,      // allow[MEM]: the next stage can accept
-                                        // (using receive[MEM] here would close a
-                                        //  loop through stall_o -> allow[EX])
-
+    input  wire        receive,         // receive_new_inst[EX]
+    input  wire        allow_next,      // allow[MEM]
+                                        
     // ID -> EX: combinational at ID
     input  wire [11:0] alu_op_i,
     input  wire [31:0] alu_src1_i,
@@ -43,8 +41,7 @@ module EX(
 
     // forwarding, one group per EX stage (stage 0 is the youngest):
     //   valid   : this stage can supply the operand right now (ALU only)
-    //   pending : this stage writes that register but its value is not here
-    //             yet (mul / div / load), so ID has to wait for MEM
+    //   pending : this stage writes that register but its value is not here yet (mul / div / load), so ID has to wait for MEM
     //   dest    : destination register of the instruction in that stage
     //   data    : its result (only meaningful together with valid)
     output wire        fwd0_valid,
@@ -72,8 +69,8 @@ localparam MOD_WU   = 6;
 
 // EX is three stages (0..2). The multiplier has two internal register stages, so
 // with the stage-0 operand register its result is already combinational when the
-// instruction is in stage 2, and MEM registers it itself (ex_result_mem) - one
-// more EX register would only add latency and area, not throughput.
+// instruction is in stage 2, and MEM registers it itself (ex_result_mem)
+
 // mul / div results are therefore NOT forwarded inside EX: their consumers wait
 // until the value is in MEM.
 
@@ -88,24 +85,24 @@ reg  [11:0] alu_op;
 reg  [31:0] alu_src1;
 reg  [31:0] alu_src2;
 
-reg  [31:0] alu_result  [2:0];
+reg  [31:0] alu_result   [2:0];
 
 // One-hot view of which EX stage drives the EX -> MEM interface this cycle.
 // Normally that is stage 2; an ALU result that is already the oldest
 // instruction in EX may leave from stage 1/0 instead (short-circuit).
 wire [2:0] out_sel;
 
-reg         src1_used   [2:0];
-reg         src2_used   [2:0];
-reg  [31:0] pc          [2:0];
-reg  [ 6:0] md_op       [2:0];
-reg         res_from_mem[2:0];
-reg         mem_we      [2:0];
-reg         mem_en      [2:0];
-reg  [31:0] mem_wdata   [2:0];
-reg  [ 2:0] mem_size    [2:0];
-reg         gr_we       [2:0];
-reg  [ 4:0] dest        [2:0];
+reg         src1_used    [2:0];
+reg         src2_used    [2:0];
+reg  [31:0] pc           [2:0];
+reg  [ 6:0] md_op        [2:0];
+reg         res_from_mem [2:0];
+reg         mem_we       [2:0];
+reg         mem_en       [2:0];
+reg  [31:0] mem_wdata    [2:0];
+reg  [ 2:0] mem_size     [2:0];
+reg         gr_we        [2:0];
+reg  [ 4:0] dest         [2:0];
 
 wire [31:0] alu_result_wire;
 wire [31:0] mul_result_wire;
@@ -122,7 +119,7 @@ wire        div_wait2;           // stage-2 div that is still computing
 wire        div_is_signed, div_is_mod;
 wire        div_start, div_leave;
 
-// While a div waits in stage 2 it must freeze everything behind it, and it must
+// While a div waits in stage 2 it must stall itself, and it must
 // not look valid to MEM yet: receive_new_inst[MEM] only checks ~stall[EX], and
 // with bubbles behind the div that would be 0, so out_sel[2] is gated too.
 assign div_wait2 = valid[2] & div_pos[2] & div_busy;
@@ -289,7 +286,7 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0]) |
                         ({32{sel_mul2}}   & mul_result_wire) |
                         ({32{sel_div2}}   & div_result);
 
-// ---------------------------------------------------------------------------
+
 // EX -> ID forwarding, one group per stage.
 // Only the ALU can supply a value from EX (stage 0..2). mul / div / load all
 // show up as "pending" so ID waits until the value reaches MEM.

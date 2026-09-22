@@ -239,17 +239,7 @@ wire [31:0] rf_wdata;
 wire [31:0] mem_result;
 wire        src_wait;
 
-// forwarding, one datapath per ID source: fw1_* serves src1 (rf_raddr1 /
-// src1_used[ID]) and fw2_* serves src2 -- the two operands are the intuitive
-// axis.  A tap is the point where a stage's result is picked up, and the taps
-// are indexed by the stage that holds the operand: [EX] is the EX tap (resolved
-// from the three EX hits, youngest wins), [MEM] the MEM tap.  Same names for
-// both taps:
-//   *_hit[EX/MEM]      that tap will write the register this source reads
-//   *_valid[EX/MEM]    and it already holds the value, so it can supply it now
-//   *_pending[EX/MEM]  but the value is not there yet -> ID waits
-// The EX tap additionally needs the three per-stage hits, their select, and the
-// value, and the final mux picks between the taps and the register file:
+// forwarding
 wire [ 2:0] fw1_ex_hit,   fw2_ex_hit;   // per EX stage, bit 0 = the youngest
 wire [ 2:0] fw1_ex_sel,   fw2_ex_sel;   // the youngest EX hit as a one-hot
 wire [31:0] fw1_ex_data,  fw2_ex_data;  // value held by the selected EX hit
@@ -430,24 +420,7 @@ assign allow[IF]  = ~ stall[IF] && allow[ID];
 assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
-// ---------------------------------------------------------------------------
-// forwarding.  EX exports one group per EX stage (fwd0/fwd1/fwd2, stage 0 is
-// the youngest); the nets here are per ID source instead (fw1 = for
-// src1_used/rf_raddr1, fw2 = for src2), so the two numbering schemes cannot be
-// mixed up.  A tap is where a stage's result is picked up; both taps carry the
-// same signals under the same names:
-//   *_ex_hit[k]   EX stage k will write the register this source reads
-//                 (address match & (fwdK_valid | fwdK_pending))
-//   *_ex_sel      the youngest such hit as a one-hot
-//   *_ex_data     the value that hit holds
-//   *_hit[EX/MEM]      that tap will write this source's register
-//   *_valid[EX/MEM]    and it already holds the value, so it can supply it now
-//   *_pending[EX/MEM]  but the value is not there yet -> ID waits
-//   *_mem_sel / *_rf_sel   which tap the final masked-OR picks
-//   *_data        the final operand
-// The youngest EX hit wins (stage 0 first); MEM is older than every EX stage,
-// so it is only picked when no EX tap is valid, and the register file is the
-// last resort.
+// forwarding logic
 assign fw1_ex_hit = {
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
     src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
@@ -482,17 +455,12 @@ assign fw2_hit[MEM]   = valid[MEM] && gr_we[MEM] && src2_used[ID] && (rf_raddr2 
 assign fw1_valid[MEM] = fw1_hit[MEM] && ~ mem_en[MEM];
 assign fw2_valid[MEM] = fw2_hit[MEM] && ~ mem_en[MEM];
 
-// a tap that hits but is not valid yet is exactly what makes ID wait
+// a tap that hits but is not valid yet makes ID wait
 assign fw1_pending[EX]  = fw1_hit[EX]  & ~ fw1_valid[EX];
 assign fw1_pending[MEM] = fw1_hit[MEM] & ~ fw1_valid[MEM];
 assign fw2_pending[EX]  = fw2_hit[EX]  & ~ fw2_valid[EX];
 assign fw2_pending[MEM] = fw2_hit[MEM] & ~ fw2_valid[MEM];
 
-// final operand: EX is younger than MEM, so the EX tap knocks the MEM tap out;
-// the three arms are exclusive, so it is one flat masked-OR.  With no tap at all
-// the operand is the register file read data -- that is the default arm of the
-// mux, not another forwarding path: the regfile is write-first, so a producer
-// that has reached WB is already visible on the read port.
 assign fw1_mem_sel = ~ fw1_valid[EX] &   fw1_valid[MEM];
 assign fw1_rf_sel  = ~ fw1_valid[EX] & ~ fw1_valid[MEM];
 assign fw2_mem_sel = ~ fw2_valid[EX] &   fw2_valid[MEM];
