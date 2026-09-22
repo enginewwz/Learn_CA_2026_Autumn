@@ -749,7 +749,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && allow[EX] && next_valid[EX];
+                  ) && cur_valid[ID] && allow[ID];   // = receive[EX]: the ID branch really moves in
 
 assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
                  || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
