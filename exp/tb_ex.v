@@ -19,7 +19,8 @@ reg clk = 1'b0;
 always #5 clk = ~clk;
 
 reg         reset    = 1'b1;
-reg         receive  = 1'b0;
+reg         allow_cur = 1'b0;   // allow[ID]: the stage handing over may move
+reg         valid_i   = 1'b1;   // and it really has an instruction
 reg         allow_next = 1'b1;
 reg  [11:0] alu_op_i;
 reg  [31:0] alu_src1_i, alu_src2_i;
@@ -45,7 +46,8 @@ wire [31:0] fwd0_data, fwd1_data, fwd2_data;
 EX u_ex(
     .clk            (clk            ),
     .reset          (reset          ),
-    .receive        (receive        ),
+    .allow_cur      (allow_cur      ),
+    .valid_i        (valid_i        ),
     .allow_next     (allow_next     ),
     .alu_op_i       (alu_op_i       ),
     .alu_src1_i     (alu_src1_i     ),
@@ -109,13 +111,13 @@ task send;
     input [ 4:0] d;
     begin
         @(negedge clk);
-        receive = 1'b1; alu_op_i = op; md_op_i = md;
+        allow_cur = 1'b1; valid_i = 1'b1; alu_op_i = op; md_op_i = md;
         alu_src1_i = a; alu_src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         pc_i = 32'h1c001000; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; gr_we_i = 1'b1;
         step;
-        receive = 1'b0;
+        allow_cur = 1'b0;
     end
 endtask
 
@@ -159,7 +161,7 @@ function [31:0] mhiu; input [31:0] a, b; reg [63:0] p; begin p = {32'b0,a} * {32
 reg [31:0] A, B;
 
 initial begin
-    receive = 0; allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
+    allow_cur = 0; allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
     src1_used_i = 0; src2_used_i = 0; pc_i = 0; md_op_i = 0;
     res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; gr_we_i = 0; dest_i = 0;
     repeat (4) @(posedge clk);
@@ -180,6 +182,36 @@ initial begin
     chk(valid_o && (ex_result === 32'hffffffff) && (dest_o === 5'd2),
         "alu short-circuit addi -1");
     repeat (2) step;
+
+    // -------------------------------------- advancing a bubble (no instruction)
+    // allow_cur (the pipeline advances) is high but ID has nothing: valid_i = 0
+    // must leave EX empty instead of inventing an instruction from stale inputs
+    @(negedge clk);
+    allow_cur = 1'b1; valid_i = 1'b0;
+    alu_op_i = 12'b1 << 0; md_op_i = 7'b1 << MUL_W;
+    alu_src1_i = 32'hdead_beef; alu_src2_i = 32'h1234_5678; dest_i = 5'd31;
+    src1_used_i = 1'b1; src2_used_i = 1'b1; gr_we_i = 1'b1;
+    step;
+    allow_cur = 1'b0; valid_i = 1'b1;
+    chk(!valid_o, "a bubble (valid_i = 0) leaves EX empty");
+    repeat (2) step;
+
+    // ------------------- a blocked entry must not duplicate the instruction
+    // entry blocked (allow_cur = 0, what a busy MEM does) while stage 1/2 are
+    // free: the instruction must move on inside EX, not stay in stage 0 too
+    A = 32'h0000_ffff; B = 32'h0001_0000;
+    send(12'b0, 7'b1 << MUL_W, A, B, 5'd17);
+    chk(!valid_o, "mul not ready right after entry");
+    allow_cur = 1'b0; valid_i = 1'b1;
+    step; chk(!valid_o, "mul at stage 1 while the entry is blocked");
+    step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd17),
+              "mul reached stage 2 while the entry was blocked");
+    step; chk(!valid_o, "mul left EX for MEM (allow_next = 1)");
+    allow_cur = 1'b1; valid_i = 1'b0;
+    step; step; step;
+    chk(!valid_o, "nothing left in EX after the mul drained (no stage-0 copy)");
+    valid_i = 1'b1;
+
 
     // ----------------------------------------------------------------- mul.w
     A = 32'h1234_5678; B = 32'h9abc_def0;

@@ -50,23 +50,18 @@ wire [TOTAL_STAGE_WIDTH - 1: 0] stall; // stall itself; the last stage (WB) woul
 wire [TOTAL_STAGE_WIDTH - 1: 0] allow; // allow new inst; means that cur and later stage is ready for new inst; the last stage (WB) would always allow; reset as 1
 wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
 wire [TOTAL_STAGE_WIDTH - 1: 0] cur_valid;
-wire [TOTAL_STAGE_WIDTH - 1: 0] receive_new_inst;
 wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
 
 // only process in one stage
 wire [31:0] nextpc;     // generate at IF stage
-// seq_pc / br_target are the two candidate PCs. They are kept as separate nets
-// so the synthesizer computes both adders in parallel with the branch compare
-// and only muxes at the end; otherwise it folds the mux into the adder inputs
-// and the compare ends up in series with the 32-bit carry chain.
+
 (* keep = "true" *) wire [31:0] seq_pc;     // generate at IF stage
 wire        br_taken;   // generate at ID stage
 (* keep = "true" *) wire [31:0] br_target;  // generate at ID stage
 wire [31:0] inst_rd;    // receive in ID stage
 
 // should be stored between stages.
-// The [EX] elements are combinational aliases of the EX.v outputs (see the
-// always @(*) block below); the other elements are real stage registers.
+// The [EX] elements are combinational aliases of the EX.v outputs
 reg  [31:0] pc [WB:IF] /* verilator split_var */;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
@@ -267,7 +262,7 @@ wire IF_rsp_fire;
 
 always @(posedge clk) begin
     if (reset)                          IF_req_valid <= 1'b0;
-    else if (receive_new_inst[IF])      IF_req_valid <= 1'b1;
+    else if (allow[IF])                 IF_req_valid <= 1'b1;
     else if (fake_IF_req_ready)         IF_req_valid <= 1'b0;
     else                                IF_req_valid <= IF_req_valid; 
 end
@@ -278,14 +273,14 @@ assign fake_IF_req_ready = IF_req_valid;
 
 always @(posedge clk) begin
     if (reset)                          IF_rsp_fire_reg <= 1'b1;    // to start without stalling IF
-    else if (receive_new_inst[IF])      IF_rsp_fire_reg <= 1'b0;
+    else if (allow[IF])                 IF_rsp_fire_reg <= 1'b0;
     else if (IF_rsp_fire_wire)          IF_rsp_fire_reg <= 1'b1;
     else                                IF_rsp_fire_reg <= IF_rsp_fire_reg;
 end
 
 always @(posedge clk) begin
     if (reset)                          IF_rsp_ready    <= 1'b0;
-    else if (receive_new_inst[IF])      IF_rsp_ready    <= 1'b0;
+    else if (allow[IF])                 IF_rsp_ready    <= 1'b0;
     else if (IF_req_fire)               IF_rsp_ready    <= 1'b1;
     else                                IF_rsp_ready    <= IF_rsp_ready;
 end
@@ -310,14 +305,14 @@ wire MEM_rsp_fire;
 
 always @(posedge clk) begin
     if (reset)                          MEM_req_valid <= 1'b0;
-    else if (receive_new_inst[MEM])     MEM_req_valid <= valid[EX] && mem_en[EX];
+    else if (allow[MEM])                MEM_req_valid <= next_valid[MEM] && mem_en[EX];
     else if (fake_MEM_req_ready)        MEM_req_valid <= 1'b0;
     else                                MEM_req_valid <= MEM_req_valid; 
 end
 
 always @(posedge clk) begin
     if (reset)                          MEM_req_fire_reg <= 1'b0;
-    else if (receive_new_inst[MEM])     MEM_req_fire_reg <= 1'b0;
+    else if (allow[MEM])                MEM_req_fire_reg <= 1'b0;
     else if (MEM_req_fire_wire)         MEM_req_fire_reg <= 1'b1;
     else                                MEM_req_fire_reg <= MEM_req_fire_reg;
 end
@@ -330,14 +325,14 @@ assign fake_MEM_req_ready = MEM_req_valid;
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_fire_reg <= 1'b0;
-    else if (receive_new_inst[MEM])     MEM_rsp_fire_reg <= 1'b0;
+    else if (allow[MEM])                MEM_rsp_fire_reg <= 1'b0;
     else if (MEM_rsp_fire)              MEM_rsp_fire_reg <= 1'b1;
     else                                MEM_rsp_fire_reg <= MEM_rsp_fire_reg;
 end
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_ready    <= 1'b0;
-    else if (receive_new_inst[MEM])     MEM_rsp_ready    <= 1'b0;
+    else if (allow[MEM])                MEM_rsp_ready    <= 1'b0;
     else if (MEM_req_fire)              MEM_rsp_ready    <= ~ mem_we[MEM];
     else                                MEM_rsp_ready    <= MEM_rsp_ready;
 end
@@ -358,11 +353,11 @@ always @(posedge clk) begin
         br_pc_reg <= 32'b0;
     end
     else begin
-        if (receive_new_inst[IF]) begin
+        if (allow[IF]) begin
             br_reg <= 1'b0;
             br_pc_reg <= 32'b0;
         end
-        else if (br_taken && ~ receive_new_inst[IF]) begin
+        else if (br_taken && ~ allow[IF]) begin
             br_reg <= 1'b1;
             br_pc_reg <= nextpc;
         end
@@ -377,17 +372,16 @@ always @(posedge clk) begin
         pc[WB] <= 32'h0;
     end
     else begin
-        if (receive_new_inst[IF] ) pc[IF]  <= nextpc;
-        if (receive_new_inst[ID] ) pc[ID]  <= pc[IF];
-        if (receive_new_inst[MEM]) pc[MEM] <= pc[EX];
-        if (receive_new_inst[WB] ) pc[WB]  <= pc[MEM];
+        if (allow[IF] ) pc[IF]  <= nextpc;
+        if (allow[ID]) pc[ID]  <= pc[IF];
+        if (allow[MEM]) pc[MEM] <= pc[EX];
+        if (allow[WB]) pc[WB]  <= pc[MEM];
     end
 end
 
 // first cycle for new stage
 assign cur_valid = valid & ~ flush;
-assign receive_new_inst = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow;
-assign next_valid = receive_new_inst | (~ allow & cur_valid);
+assign next_valid = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow | (~ allow & cur_valid);
 
 // valid[EX] is registered inside EX.v (see the [EX] alias block), so only the
 // other four stages are updated here
@@ -491,7 +485,7 @@ assign inst_sram_wdata = 32'b0;
 assign inst_rd         = inst_sram_rdata;
 
 always @(posedge clk) begin
-    if (receive_new_inst[ID]) begin
+    if (allow[ID]) begin
         if (IF_rsp_fire_wire)   inst[ID] <= inst_rd;
         else                    inst[ID] <= inst[IF];
     end
@@ -597,7 +591,7 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) begin
+    if (allow[MEM]) begin
         src1_used[MEM] <= src1_used[EX];
         src2_used[MEM] <= src2_used[EX];
     end
@@ -652,7 +646,7 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) begin
+    if (allow[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
         mem_we[MEM]       <= mem_we[EX];
         mem_en[MEM]       <= mem_en[EX];
@@ -670,11 +664,11 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) begin
+    if (allow[MEM]) begin
         gr_we[MEM] <= gr_we[EX];
         dest[MEM]  <= dest[EX];
     end
-    if (receive_new_inst[WB]) begin
+    if (allow[WB]) begin
         gr_we[WB] <= gr_we[MEM];
         dest[WB]  <= dest[MEM];
     end
@@ -755,7 +749,7 @@ assign br_taken = (   inst_beq  &&  rj_eq_rd
                    || inst_jirl
                    || inst_bl
                    || inst_b
-                  ) && receive_new_inst[EX];
+                  ) && allow[EX] && next_valid[EX];
 
 assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
                  || inst_bltu || inst_bgeu || inst_bl || inst_b) ? (pc[ID] + br_offs) :
@@ -764,9 +758,10 @@ assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
 EX u_ex(
     .clk            (clk            ),
     .reset          (reset          ),
-    .receive        (receive_new_inst[EX]),
+    .allow_cur      (allow[EX]      ),
     .allow_next     (allow[MEM]     ),
 
+    .valid_i        (next_valid[EX] ),
     .pc_i           (pc[ID]         ),
     .src1_used_i    (src1_used[ID]  ),
     .src2_used_i    (src2_used[ID]  ),
@@ -812,8 +807,8 @@ EX u_ex(
     );
 
 always @(posedge clk) begin
-    if (receive_new_inst[MEM]) result[MEM] <= ex_result;
-    if (receive_new_inst[WB])  result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
+    if (allow[MEM]) result[MEM] <= ex_result;
+    if (allow[WB])  result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
 assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
