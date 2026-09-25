@@ -38,22 +38,27 @@ reg  [31:0] q_acc;             // quotient, shifted in 2 bits per iteration
 reg         q_sign, r_sign, zero_div;
 reg  [31:0] quot_r, rem_r_out;
 
+wire [33:0] b34, d2, d3, shifted, r3;
+wire [34:0] t1, t2, t3;
+wire        ge1, ge2, ge3;
+wire [ 1:0] dig;
+
 // radix-4 restoring digit selection.
 // t1/t2/t3 are computed by three PARALLEL subtractors (not cascaded); each is
 // 35 bits wide so bit[34] is the borrow, telling whether the digit is >= 1/2/3.
-wire [33:0] b34     = {2'b0, b_mag};
-wire [33:0] d2      = {b34[32:0], 1'b0};     // 2*divisor
-wire [33:0] d3      = d2 + b34;              // 3*divisor
-wire [33:0] shifted = {rem_r[31:0], dq[31:30]};
+assign b34     = {2'b0, b_mag};
+assign d2      = {b34[32:0], 1'b0};     // 2*divisor
+assign d3      = d2 + b34;              // 3*divisor
+assign shifted = {rem_r[31:0], dq[31:30]};
 
-wire [34:0] t1 = {1'b0, shifted} - {1'b0, b34};
-wire [34:0] t2 = {1'b0, shifted} - {1'b0, d2};
-wire [34:0] t3 = {1'b0, shifted} - {1'b0, d3};
-wire        ge1 = ~t1[34];
-wire        ge2 = ~t2[34];
-wire        ge3 = ~t3[34];
-wire [ 1:0] dig  = ge3 ? 2'd3 : ge2 ? 2'd2 : ge1 ? 2'd1 : 2'd0;
-wire [33:0] r3   = ge3 ? t3[33:0] : ge2 ? t2[33:0] : ge1 ? t1[33:0] : shifted;
+assign t1 = {1'b0, shifted} - {1'b0, b34};
+assign t2 = {1'b0, shifted} - {1'b0, d2};
+assign t3 = {1'b0, shifted} - {1'b0, d3};
+assign ge1 = ~t1[34];
+assign ge2 = ~t2[34];
+assign ge3 = ~t3[34];
+assign dig  = ge3 ? 2'd3 : ge2 ? 2'd2 : ge1 ? 2'd1 : 2'd0;
+assign r3   = ge3 ? t3[33:0] : ge2 ? t2[33:0] : ge1 ? t1[33:0] : shifted;
 
 always @(posedge clk) begin
     if (reset) begin

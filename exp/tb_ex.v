@@ -30,17 +30,23 @@ reg  [ 6:0] md_op_i;
 reg         res_from_mem_i, mem_we_i, mem_en_i;
 reg  [31:0] mem_wdata_i;
 reg  [ 2:0] mem_size_i;
+reg         mem_zext_i;
 reg         gr_we_i;
 reg  [ 4:0] dest_i;
 reg  [ 4:0] fw_raddr1_i = 5'd0, fw_raddr2_i = 5'd0;   // what the ID instruction behind reads
+reg  [ 6:0] br_op_i;
+reg  [31:0] br_base_i, br_offs_i;
 
 wire [31:0] pc_o, mem_wdata_o, ex_result;
 wire [ 2:0] mem_size_o;
+wire        mem_zext_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
 wire        fw1_hit_o, fw1_valid_o, fw2_hit_o, fw2_valid_o;
 wire [31:0] fw1_data_o, fw2_data_o;
+wire        br_taken_o;
+wire [31:0] br_target_o;
 
 EX u_ex(
     .clk            (clk            ),
@@ -51,6 +57,9 @@ EX u_ex(
     .alu_op_i       (alu_op_i       ),
     .alu_src1_i     (alu_src1_i     ),
     .alu_src2_i     (alu_src2_i     ),
+    .br_op_i        (br_op_i        ),
+    .br_base_i      (br_base_i      ),
+    .br_offs_i      (br_offs_i      ),
     .src1_used_i    (src1_used_i    ),
     .src2_used_i    (src2_used_i    ),
     .pc_i           (pc_i           ),
@@ -60,6 +69,7 @@ EX u_ex(
     .mem_en_i       (mem_en_i       ),
     .mem_wdata_i    (mem_wdata_i    ),
     .mem_size_i     (mem_size_i     ),
+    .mem_zext_i     (mem_zext_i     ),
     .gr_we_i        (gr_we_i        ),
     .dest_i         (dest_i         ),
     .pc_o           (pc_o           ),
@@ -70,11 +80,14 @@ EX u_ex(
     .mem_en_o       (mem_en_o       ),
     .mem_wdata_o    (mem_wdata_o    ),
     .mem_size_o     (mem_size_o     ),
+    .mem_zext_o     (mem_zext_o     ),
     .gr_we_o        (gr_we_o        ),
     .dest_o         (dest_o         ),
     .valid_o        (valid_o        ),
     .ex_result      (ex_result      ),
     .stall_o        (stall_o        ),
+    .br_taken_o     (br_taken_o     ),
+    .br_target_o    (br_target_o    ),
     .fw_raddr1_i    (fw_raddr1_i    ),
     .fw_raddr2_i    (fw_raddr2_i    ),
     .fw1_hit_o      (fw1_hit_o      ),
@@ -93,6 +106,15 @@ localparam MOD_W   = 4;
 localparam DIV_WU  = 5;
 localparam MOD_WU  = 6;
 
+// br_op bit positions (see br.v)
+localparam BEQ  = 0;
+localparam BNE  = 1;
+localparam BLT  = 2;
+localparam BGE  = 3;
+localparam BLTU = 4;
+localparam BGEU = 5;
+localparam JIRL = 6;
+
 integer errors = 0;
 integer checks = 0;
 
@@ -110,6 +132,7 @@ task send;
         alu_src1_i = a; alu_src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         fw_raddr1_i = d; fw_raddr2_i = d;   // the instruction behind it reads the same register
+        br_op_i = 7'b0; br_base_i = 32'b0; br_offs_i = 32'b0;
         pc_i = 32'h1c001000; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; gr_we_i = 1'b1;
         step;
@@ -127,6 +150,27 @@ task chk;
             $display("EX ERROR: %0s (t=%0t valid=%b ex=%h dest=%0d stall=%b)",
                      name, $time, valid_o, ex_result, dest_o, stall_o);
         end
+    end
+endtask
+
+// present a branch to the EX input for one cycle (a, b are the compare
+// operands, base/offs the target pieces)
+task send_br;
+    input [ 6:0] op;
+    input [31:0] a, b;
+    input [31:0] base, offs;
+    begin
+        @(negedge clk);
+        allow_cur = 1'b1; valid_i = 1'b1;
+        alu_op_i = 12'b0; md_op_i = 7'b0; alu_src1_i = a; alu_src2_i = b;
+        br_op_i = op; br_base_i = base; br_offs_i = offs;
+        src1_used_i = 1'b1; src2_used_i = 1'b1;
+        fw_raddr1_i = 5'd0; fw_raddr2_i = 5'd0;   // the instruction behind reads nothing
+        dest_i = 5'd0; gr_we_i = 1'b0; res_from_mem_i = 1'b0;
+        mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; mem_size_i = 3'b0; mem_zext_i = 1'b0;
+        pc_i = 32'h1c002000;
+        step;
+        allow_cur = 1'b0;
     end
 endtask
 
@@ -159,7 +203,8 @@ reg [31:0] A, B;
 initial begin
     allow_cur = 0; allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
     src1_used_i = 0; src2_used_i = 0; pc_i = 0; md_op_i = 0;
-    res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; gr_we_i = 0; dest_i = 0;
+    br_op_i = 0; br_base_i = 0; br_offs_i = 0;
+    res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; mem_zext_i = 0; gr_we_i = 0; dest_i = 0;
     repeat (4) @(posedge clk);
     reset = 1'b0;
     repeat (2) @(posedge clk);
@@ -282,6 +327,57 @@ initial begin
             "ALU leaves only after the div");
         repeat (2) step;
     end
+
+    // ------------------------------------------------- branch unit (stage 0)
+    // The compare operands are the registered ALU operands; jirl is always
+    // taken.  br_target_o = base + offs, and br_taken_o is only set while the
+    // branch really leaves stage 0.
+    send_br(7'b1 << BEQ, 32'd5, 32'd5, 32'h1c002000, 32'h8);
+    chk(br_taken_o && (br_target_o === 32'h1c002008), "beq: equal is taken, target = base + offs");
+    repeat (3) step;
+
+    send_br(7'b1 << BNE, 32'd5, 32'd5, 32'h1c002000, 32'h8);
+    chk(!br_taken_o, "bne: equal is not taken");
+    repeat (3) step;
+
+    send_br(7'b1 << BLT, 32'hffff_ffff, 32'd1, 32'h0, 32'h4);
+    chk(br_taken_o, "blt: -1 < 1 (signed)");
+    repeat (3) step;
+
+    send_br(7'b1 << BGE, 32'hffff_ffff, 32'd1, 32'h0, 32'h4);
+    chk(!br_taken_o, "bge: -1 >= 1 (signed) is false");
+    repeat (3) step;
+
+    send_br(7'b1 << BLTU, 32'hffff_ffff, 32'd1, 32'h0, 32'h4);
+    chk(!br_taken_o, "bltu: 0xffffffff < 1 (unsigned) is false");
+    repeat (3) step;
+
+    send_br(7'b1 << BGEU, 32'hffff_ffff, 32'd1, 32'h0, 32'h4);
+    chk(br_taken_o, "bgeu: 0xffffffff >= 1 (unsigned)");
+    repeat (3) step;
+
+    send_br(7'b1 << JIRL, 32'd0, 32'd0, 32'h1c003000, 32'h4);
+    chk(br_taken_o && (br_target_o === 32'h1c003004), "jirl: always taken, target = rj + offs");
+    repeat (3) step;
+
+    send(12'b1 << 4, 7'b0, 32'd1, 32'd1, 5'd3);   // and
+    chk(!br_taken_o, "no branch op: no redirect");
+    repeat (3) step;
+
+    // A branch that stage 1 holds back redirects right away (there is no reason
+    // to wait for the pipeline) and only once: the instruction stays in stage 0
+    // until the pipeline moves, but must not flush the target instruction again.
+    A = 32'h1c004000; B = 32'h8;
+    allow_next = 1'b0;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 2
+    step; step;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: and one in stage 1
+    send_br(7'b1 << BEQ, 32'd7, 32'd7, A, B);     // branch lands in stage 0, held
+    chk(br_taken_o && (br_target_o === (A + B)), "held branch redirects right away");
+    step;
+    chk(!br_taken_o && stall_o, "held branch redirects only once");
+    allow_next = 1'b1;
+    repeat (4) step;
 
     // ------------------------------------------------- forwarding groups
     // An ALU result is only forwarded from stage 1/2 (registers); at stage 0 it
