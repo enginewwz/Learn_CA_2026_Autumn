@@ -256,16 +256,16 @@ assign out_sel[1:0] = alu_no_mul_shortcut;
 // out_sel is one-hot, so the outputs are a plain wired-OR of masked stages
 // (no implied priority chain: the terms are mutually exclusive by construction)
 assign valid_o        = | out_sel;
-assign pc_o           = ({32{out_sel[0]}} & pc          [0]) | ({32{out_sel[1]}} & pc          [1]) | ({32{out_sel[2]}} & pc          [2]);
-assign src1_used_o    = (out_sel[0] & src1_used   [0]) | (out_sel[1] & src1_used   [1]) | (out_sel[2] & src1_used   [2]);
-assign src2_used_o    = (out_sel[0] & src2_used   [0]) | (out_sel[1] & src2_used   [1]) | (out_sel[2] & src2_used   [2]);
-assign res_from_mem_o = (out_sel[0] & res_from_mem[0]) | (out_sel[1] & res_from_mem[1]) | (out_sel[2] & res_from_mem[2]);
-assign mem_we_o       = (out_sel[0] & mem_we      [0]) | (out_sel[1] & mem_we      [1]) | (out_sel[2] & mem_we      [2]);
-assign mem_en_o       = (out_sel[0] & mem_en      [0]) | (out_sel[1] & mem_en      [1]) | (out_sel[2] & mem_en      [2]);
-assign mem_wdata_o    = ({32{out_sel[0]}} & mem_wdata   [0]) | ({32{out_sel[1]}} & mem_wdata   [1]) | ({32{out_sel[2]}} & mem_wdata   [2]);
-assign mem_size_o     = ({ 3{out_sel[0]}} & mem_size    [0]) | ({ 3{out_sel[1]}} & mem_size    [1]) | ({ 3{out_sel[2]}} & mem_size    [2]);
-assign gr_we_o        = (out_sel[0] & gr_we       [0]) | (out_sel[1] & gr_we       [1]) | (out_sel[2] & gr_we       [2]);
-assign dest_o         = ({ 5{out_sel[0]}} & dest        [0]) | ({ 5{out_sel[1]}} & dest        [1]) | ({ 5{out_sel[2]}} & dest        [2]);
+assign pc_o           = ({32{out_sel[0]}} & pc        [0]) | ({32{out_sel[1]}} & pc        [1]) | ({32{out_sel[2]}} & pc        [2]);
+assign src1_used_o    = (out_sel[0] & src1_used       [0]) | (out_sel[1] & src1_used       [1]) | (out_sel[2] & src1_used       [2]);
+assign src2_used_o    = (out_sel[0] & src2_used       [0]) | (out_sel[1] & src2_used       [1]) | (out_sel[2] & src2_used       [2]);
+assign res_from_mem_o = (out_sel[0] & res_from_mem    [0]) | (out_sel[1] & res_from_mem    [1]) | (out_sel[2] & res_from_mem    [2]);
+assign mem_we_o       = (out_sel[0] & mem_we          [0]) | (out_sel[1] & mem_we          [1]) | (out_sel[2] & mem_we          [2]);
+assign mem_en_o       = (out_sel[0] & mem_en          [0]) | (out_sel[1] & mem_en          [1]) | (out_sel[2] & mem_en          [2]);
+assign mem_wdata_o    = ({32{out_sel[0]}} & mem_wdata [0]) | ({32{out_sel[1]}} & mem_wdata [1]) | ({32{out_sel[2]}} & mem_wdata [2]);
+assign mem_size_o     = ({ 3{out_sel[0]}} & mem_size  [0]) | ({ 3{out_sel[1]}} & mem_size  [1]) | ({ 3{out_sel[2]}} & mem_size  [2]);
+assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]);
+assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]);
 
 // stage 2: ALU (registered), mul (combinational CPA on top of its stage-1
 // registers) or div (registered quotient/remainder, only once ~busy).
@@ -275,9 +275,9 @@ wire        sel_alu2   = out_sel[2] & alu_pos[2];
 wire        sel_mul2   = out_sel[2] & mul_pos[2];
 wire        sel_div2   = out_sel[2] & div_pos[2];
 
-assign ex_result      = ({32{out_sel[0]}} & alu_result[0]) |
-                        ({32{out_sel[1]}} & alu_result[1]) |
-                        ({32{sel_alu2}}   & alu_result[2]) |
+assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
+                        ({32{out_sel[1]}} & alu_result[1])   |
+                        ({32{sel_alu2}}   & alu_result[2])   |
                         ({32{sel_mul2}}   & mul_result_wire) |
                         ({32{sel_div2}}   & div_result);
 
