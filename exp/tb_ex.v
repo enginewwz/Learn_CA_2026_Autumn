@@ -38,10 +38,10 @@ wire [ 2:0] mem_size_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
-wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
-wire        fwd2_valid, fwd2_pending;
-wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest;
-wire [31:0] fwd0_data, fwd1_data, fwd2_data;
+wire        fw_write_ex_stage0, fw_valid_ex_stage0, fw_write_ex_stage1, fw_valid_ex_stage1;
+wire        fw_write_ex_stage2, fw_valid_ex_stage2;
+wire [ 4:0] fw_dest_ex_stage0, fw_dest_ex_stage1, fw_dest_ex_stage2;
+wire [31:0] fw_data_ex_stage1, fw_data_ex_stage2;
 
 EX u_ex(
     .clk            (clk            ),
@@ -76,18 +76,17 @@ EX u_ex(
     .valid_o        (valid_o        ),
     .ex_result      (ex_result      ),
     .stall_o        (stall_o        ),
-    .fwd0_valid     (fwd0_valid     ),
-    .fwd0_pending   (fwd0_pending   ),
-    .fwd0_dest      (fwd0_dest      ),
-    .fwd0_data      (fwd0_data      ),
-    .fwd1_valid     (fwd1_valid     ),
-    .fwd1_pending   (fwd1_pending   ),
-    .fwd1_dest      (fwd1_dest      ),
-    .fwd1_data      (fwd1_data      ),
-    .fwd2_valid     (fwd2_valid     ),
-    .fwd2_pending   (fwd2_pending   ),
-    .fwd2_dest      (fwd2_dest      ),
-    .fwd2_data      (fwd2_data      )
+    .fw_valid_ex_stage0     (fw_valid_ex_stage0     ),
+    .fw_write_ex_stage0   (fw_write_ex_stage0   ),
+    .fw_dest_ex_stage0      (fw_dest_ex_stage0      ),
+    .fw_valid_ex_stage1     (fw_valid_ex_stage1     ),
+    .fw_write_ex_stage1   (fw_write_ex_stage1   ),
+    .fw_dest_ex_stage1      (fw_dest_ex_stage1      ),
+    .fw_data_ex_stage1      (fw_data_ex_stage1      ),
+    .fw_valid_ex_stage2     (fw_valid_ex_stage2     ),
+    .fw_write_ex_stage2   (fw_write_ex_stage2   ),
+    .fw_dest_ex_stage2      (fw_dest_ex_stage2      ),
+    .fw_data_ex_stage2      (fw_data_ex_stage2      )
 );
 
 localparam MUL_W   = 0;
@@ -288,16 +287,18 @@ initial begin
     end
 
     // ------------------------------------------------- forwarding groups
-    // ALU is forwardable from every stage, so hold allow_next low to make it
-    // walk through the stages instead of short-circuiting out of stage 0
+    // An ALU result is only forwarded from stage 1/2 (registers); at stage 0 it
+    // is still the combinational ALU output, so ID must wait for it: pending.
+    // Hold allow_next low so it walks through the stages instead of
+    // short-circuiting out of stage 0.
     A = 32'h1234_5678; B = 32'h0000_00ff;
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd21);   // and
-    chk(fwd0_valid && (fwd0_dest === 5'd21) && (fwd0_data === (A & B)), "ALU stage 0 supplies");
+    chk(!fw_valid_ex_stage0 && fw_write_ex_stage0 && (fw_dest_ex_stage0 === 5'd21), "ALU stage 0: will write but not forwardable");
     step;
-    chk(fwd1_valid && (fwd1_dest === 5'd21) && (fwd1_data === (A & B)), "ALU stage 1 supplies");
+    chk(fw_valid_ex_stage1 && (fw_dest_ex_stage1 === 5'd21) && (fw_data_ex_stage1 === (A & B)), "ALU stage 1 supplies");
     step;
-    chk(fwd2_valid && (fwd2_dest === 5'd21) && (fwd2_data === (A & B)), "ALU stage 2 supplies");
+    chk(fw_valid_ex_stage2 && (fw_dest_ex_stage2 === 5'd21) && (fw_data_ex_stage2 === (A & B)), "ALU stage 2 supplies");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -305,10 +306,10 @@ initial begin
     A = 32'h0000_0003; B = 32'h0000_0005;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
-    chk(!fwd0_valid && fwd0_pending, "mul stage 0 pending");
-    step; chk(!fwd1_valid && fwd1_pending, "mul stage 1 pending");
-    step; chk(!fwd2_valid && fwd2_pending, "mul stage 2 pending");
-    step; chk(fwd2_pending, "mul still pending while handing to MEM");
+    chk(!fw_valid_ex_stage0 && fw_write_ex_stage0, "mul stage 0 pending (will write, not ready)");
+    step; chk(!fw_valid_ex_stage1 && fw_write_ex_stage1, "mul stage 1 pending");
+    step; chk(!fw_valid_ex_stage2 && fw_write_ex_stage2, "mul stage 2 pending");
+    step; chk(fw_write_ex_stage2 && !fw_valid_ex_stage2, "mul still pending while handing to MEM");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -320,7 +321,7 @@ initial begin
         held = 1'b0;
         for (i = 0; i < 40 && !valid_o; i = i + 1) begin
             step;
-            if (fwd2_pending) held = 1'b1;
+            if (fw_write_ex_stage2 && ! fw_valid_ex_stage2) held = 1'b1;
         end
         chk(held && valid_o && (ex_result === 32'd14) && (dest_o === 5'd23),
             "div pending in EX, result goes out to MEM");

@@ -104,10 +104,10 @@ wire        ex_stall;
 wire [31:0] ex_result;      // EX.v combinational output (this is the [EX] result)
 
 // EX.v forwarding, one group per stage (stage 0 is the youngest)
-wire        fwd0_valid, fwd0_pending, fwd1_valid, fwd1_pending;
-wire        fwd2_valid, fwd2_pending;
-wire [ 4:0] fwd0_dest, fwd1_dest, fwd2_dest;
-wire [31:0] fwd0_data, fwd1_data, fwd2_data;
+wire        fw_write_ex_stage0, fw_valid_ex_stage0, fw_write_ex_stage1, fw_valid_ex_stage1;
+wire        fw_write_ex_stage2, fw_valid_ex_stage2;
+wire [ 4:0] fw_dest_ex_stage0, fw_dest_ex_stage1, fw_dest_ex_stage2;
+wire [31:0] fw_data_ex_stage1, fw_data_ex_stage2;
 
 // the instruction's result, one entry per stage it is still live in.  [MEM] is
 // the registered copy of EX.v's result: it doubles as the load/store address and
@@ -238,12 +238,12 @@ wire        src_wait;
 wire [ 2:0] fw1_ex_hit,   fw2_ex_hit;   // per EX stage, bit 0 = the youngest
 wire [ 2:0] fw1_ex_sel,   fw2_ex_sel;   // the youngest EX hit as a one-hot
 wire [31:0] fw1_ex_data,  fw2_ex_data;  // value held by the selected EX hit
-wire        fw1_hit       [MEM:EX];
-wire        fw2_hit       [MEM:EX];
-wire        fw1_valid     [MEM:EX];
-wire        fw2_valid     [MEM:EX];
-wire        fw1_pending   [MEM:EX];
-wire        fw2_pending   [MEM:EX];
+wire [MEM:EX] fw1_hit     ;
+wire [MEM:EX] fw2_hit     ;
+wire [MEM:EX] fw1_valid   ;
+wire [MEM:EX] fw2_valid   ;
+wire [MEM:EX] fw1_pending ;
+wire [MEM:EX] fw2_pending ;
 wire        fw1_mem_sel,  fw2_mem_sel;  // final mux: take the operand from MEM
 wire        fw1_rf_sel,   fw2_rf_sel;   // final mux: no tap hit, plain register file read
 wire [31:0] fw1_data,     fw2_data;     // final operand
@@ -416,15 +416,15 @@ assign stall[WB] = 1'b0;
 
 // forwarding logic
 assign fw1_ex_hit = {
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd2_dest) && (fwd2_valid | fwd2_pending),
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd1_dest) && (fwd1_valid | fwd1_pending),
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage2) && fw_write_ex_stage2,
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage1) && fw_write_ex_stage1,
+    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage0) && fw_write_ex_stage0
 };
 
 assign fw2_ex_hit = {
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd2_dest) && (fwd2_valid | fwd2_pending),
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd1_dest) && (fwd1_valid | fwd1_pending),
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fwd0_dest) && (fwd0_valid | fwd0_pending)
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage2) && fw_write_ex_stage2,
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage1) && fw_write_ex_stage1,
+    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage0) && fw_write_ex_stage0
 };
 
 // several stages can hit at once, so resolve the youngest hit into a one-hot
@@ -434,26 +434,20 @@ assign fw2_ex_sel = fw2_ex_hit[0] ? 3'b001 : fw2_ex_hit[1] ? 3'b010 : fw2_ex_hit
 
 assign fw1_hit[EX]   = | fw1_ex_hit;
 assign fw2_hit[EX]   = | fw2_ex_hit;
-assign fw1_valid[EX] = (fw1_ex_sel[0] & fwd0_valid) | (fw1_ex_sel[1] & fwd1_valid) | (fw1_ex_sel[2] & fwd2_valid);
-assign fw2_valid[EX] = (fw2_ex_sel[0] & fwd0_valid) | (fw2_ex_sel[1] & fwd1_valid) | (fw2_ex_sel[2] & fwd2_valid);
-assign fw1_ex_data  = ({32{fw1_ex_sel[0]}} & fwd0_data) | ({32{fw1_ex_sel[1]}} & fwd1_data) | ({32{fw1_ex_sel[2]}} & fwd2_data);
-assign fw2_ex_data  = ({32{fw2_ex_sel[0]}} & fwd0_data) | ({32{fw2_ex_sel[1]}} & fwd1_data) | ({32{fw2_ex_sel[2]}} & fwd2_data);
+assign fw1_valid[EX] = (fw1_ex_sel[0] & fw_valid_ex_stage0) | (fw1_ex_sel[1] & fw_valid_ex_stage1) | (fw1_ex_sel[2] & fw_valid_ex_stage2);
+assign fw2_valid[EX] = (fw2_ex_sel[0] & fw_valid_ex_stage0) | (fw2_ex_sel[1] & fw_valid_ex_stage1) | (fw2_ex_sel[2] & fw_valid_ex_stage2);
+assign fw1_ex_data  = ({32{fw1_ex_sel[1]}} & fw_data_ex_stage1) | ({32{fw1_ex_sel[2]}} & fw_data_ex_stage2);   // stage 0 never supplies
+assign fw2_ex_data  = ({32{fw2_ex_sel[1]}} & fw_data_ex_stage1) | ({32{fw2_ex_sel[2]}} & fw_data_ex_stage2);   // stage 0 never supplies
 
-// MEM tap, with the same three signals.  hit = the MEM instruction writes a GPR
-// and its destination is the register this source reads; valid = the value
-// sitting in MEM is the register result (for a load or a store it is the
-// address / store data instead); pending = it is a load, whose data only arrives
-// through the memory handshake.
+// MEM part
 assign fw1_hit[MEM]   = valid[MEM] && gr_we[MEM] && src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
 assign fw2_hit[MEM]   = valid[MEM] && gr_we[MEM] && src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[MEM]);
 assign fw1_valid[MEM] = fw1_hit[MEM] && ~ mem_en[MEM];
 assign fw2_valid[MEM] = fw2_hit[MEM] && ~ mem_en[MEM];
 
 // a tap that hits but is not valid yet makes ID wait
-assign fw1_pending[EX]  = fw1_hit[EX]  & ~ fw1_valid[EX];
-assign fw1_pending[MEM] = fw1_hit[MEM] & ~ fw1_valid[MEM];
-assign fw2_pending[EX]  = fw2_hit[EX]  & ~ fw2_valid[EX];
-assign fw2_pending[MEM] = fw2_hit[MEM] & ~ fw2_valid[MEM];
+assign fw1_pending  = fw1_hit & ~ fw1_valid;
+assign fw2_pending  = fw2_hit & ~ fw2_valid;
 
 assign fw1_mem_sel = ~ fw1_valid[EX] &   fw1_valid[MEM];
 assign fw1_rf_sel  = ~ fw1_valid[EX] & ~ fw1_valid[MEM];
@@ -469,8 +463,7 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data) |
                   ({32{fw2_rf_sel}}  & rf_rdata2);
 
 // ID must wait when any tap of either source is still pending
-assign src_wait = fw1_pending[EX] | fw1_pending[MEM] |
-                  fw2_pending[EX] | fw2_pending[MEM];
+assign src_wait = | (fw1_pending | fw2_pending);
 
 assign stall[ID] = src_wait && valid[ID];
 
@@ -756,54 +749,53 @@ assign br_target = (inst_beq || inst_bne || inst_blt || inst_bge
                                                 /*inst_jirl*/ (rj_value + jirl_offs);
 
 EX u_ex(
-    .clk            (clk            ),
-    .reset          (reset          ),
-    .allow_cur      (allow[EX]      ),
-    .allow_next     (allow[MEM]     ),
+    .clk            (clk              ),
+    .reset          (reset            ),
+    .allow_cur      (allow[EX]        ),
+    .allow_next     (allow[MEM]       ),
+  
+    .valid_i        (next_valid[EX]   ),
+    .pc_i           (pc[ID]           ),
+    .src1_used_i    (src1_used[ID]    ),
+    .src2_used_i    (src2_used[ID]    ),
+    .alu_op_i       (alu_op_id        ),
+    .alu_src1_i     (alu_src1_id      ),
+    .alu_src2_i     (alu_src2_id      ),
+    .md_op_i        (md_op_id         ),
+    .res_from_mem_i (res_from_mem[ID] ),
+    .mem_we_i       (mem_we[ID]       ),
+    .mem_en_i       (mem_en[ID]       ),
+    .mem_wdata_i    (mem_wdata[ID]    ),
+    .mem_size_i     (mem_size[ID]     ),
+    .gr_we_i        (gr_we[ID]        ),
+    .dest_i         (dest[ID]         ),
+ 
+    .pc_o           (pc_o             ),
+    .src1_used_o    (src1_used_o      ),
+    .src2_used_o    (src2_used_o      ),
+    .res_from_mem_o (res_from_mem_o   ),
+    .mem_we_o       (mem_we_o         ),
+    .mem_en_o       (mem_en_o         ),
+    .mem_wdata_o    (mem_wdata_o      ),
+    .mem_size_o     (mem_size_o       ),
+    .gr_we_o        (gr_we_o          ),
+    .dest_o         (dest_o           ),
+ 
+    .ex_result      (ex_result        ),
+    .valid_o        (valid_o          ),
+    .stall_o        (ex_stall         ),
 
-    .valid_i        (next_valid[EX] ),
-    .pc_i           (pc[ID]         ),
-    .src1_used_i    (src1_used[ID]  ),
-    .src2_used_i    (src2_used[ID]  ),
-    .alu_op_i       (alu_op_id      ),
-    .alu_src1_i     (alu_src1_id    ),
-    .alu_src2_i     (alu_src2_id    ),
-    .md_op_i        (md_op_id       ),
-    .res_from_mem_i (res_from_mem[ID]),
-    .mem_we_i       (mem_we[ID]     ),
-    .mem_en_i       (mem_en[ID]     ),
-    .mem_wdata_i    (mem_wdata[ID]  ),
-    .mem_size_i     (mem_size[ID]   ),
-    .gr_we_i        (gr_we[ID]      ),
-    .dest_i         (dest[ID]       ),
-
-    .pc_o           (pc_o           ),
-    .src1_used_o    (src1_used_o    ),
-    .src2_used_o    (src2_used_o    ),
-    .res_from_mem_o (res_from_mem_o ),
-    .mem_we_o       (mem_we_o       ),
-    .mem_en_o       (mem_en_o       ),
-    .mem_wdata_o    (mem_wdata_o    ),
-    .mem_size_o     (mem_size_o     ),
-    .gr_we_o        (gr_we_o        ),
-    .dest_o         (dest_o         ),
-
-    .ex_result     (ex_result     ),
-    .valid_o        (valid_o        ),
-    .stall_o        (ex_stall       ),
-
-    .fwd0_valid     (fwd0_valid     ),
-    .fwd0_pending   (fwd0_pending   ),
-    .fwd0_dest      (fwd0_dest      ),
-    .fwd0_data      (fwd0_data      ),
-    .fwd1_valid     (fwd1_valid     ),
-    .fwd1_pending   (fwd1_pending   ),
-    .fwd1_dest      (fwd1_dest      ),
-    .fwd1_data      (fwd1_data      ),
-    .fwd2_valid     (fwd2_valid     ),
-    .fwd2_pending   (fwd2_pending   ),
-    .fwd2_dest      (fwd2_dest      ),
-    .fwd2_data      (fwd2_data      )
+    .fw_valid_ex_stage0     (fw_valid_ex_stage0 ),
+    .fw_write_ex_stage0     (fw_write_ex_stage0 ),
+    .fw_dest_ex_stage0      (fw_dest_ex_stage0  ),
+    .fw_valid_ex_stage1     (fw_valid_ex_stage1 ),
+    .fw_write_ex_stage1     (fw_write_ex_stage1 ),
+    .fw_dest_ex_stage1      (fw_dest_ex_stage1  ),
+    .fw_data_ex_stage1      (fw_data_ex_stage1  ),
+    .fw_valid_ex_stage2     (fw_valid_ex_stage2 ),
+    .fw_write_ex_stage2     (fw_write_ex_stage2 ),    
+    .fw_dest_ex_stage2      (fw_dest_ex_stage2  ),
+    .fw_data_ex_stage2      (fw_data_ex_stage2  )
     );
 
 always @(posedge clk) begin

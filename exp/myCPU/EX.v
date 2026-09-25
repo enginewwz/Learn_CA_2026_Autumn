@@ -45,18 +45,17 @@ module EX(
     //   pending : this stage writes that register but its value is not here yet (mul / div / load), so ID has to wait for MEM
     //   dest    : destination register of the instruction in that stage
     //   data    : its result (only meaningful together with valid)
-    output wire        fwd0_valid,
-    output wire        fwd0_pending,
-    output wire [ 4:0] fwd0_dest,
-    output wire [31:0] fwd0_data,
-    output wire        fwd1_valid,
-    output wire        fwd1_pending,
-    output wire [ 4:0] fwd1_dest,
-    output wire [31:0] fwd1_data,
-    output wire        fwd2_valid,
-    output wire        fwd2_pending,
-    output wire [ 4:0] fwd2_dest,
-    output wire [31:0] fwd2_data
+    output wire        fw_valid_ex_stage0,   // value is ready
+    output wire        fw_write_ex_stage0,   // this stage will write a GPR (value may still be pending)
+    output wire [ 4:0] fw_dest_ex_stage0,
+    output wire        fw_valid_ex_stage1,   // value is ready
+    output wire        fw_write_ex_stage1,   // this stage will write a GPR (value may still be pending)
+    output wire [ 4:0] fw_dest_ex_stage1,
+    output wire [31:0] fw_data_ex_stage1,
+    output wire        fw_valid_ex_stage2,   // value is ready
+    output wire        fw_write_ex_stage2,   // this stage will write a GPR (value may still be pending)
+    output wire [ 4:0] fw_dest_ex_stage2,
+    output wire [31:0] fw_data_ex_stage2
 );
 
 // md_op bit positions: one-hot mul/div operation select
@@ -93,16 +92,16 @@ reg  [31:0] alu_result   [2:0];
 // instruction in EX may leave from stage 1/0 instead (short-circuit).
 wire [2:0] out_sel;
 
-reg         src1_used    [2:0];
-reg         src2_used    [2:0];
+reg  [ 2:0] src1_used         ;
+reg  [ 2:0] src2_used         ;
 reg  [31:0] pc           [2:0];
 reg  [ 6:0] md_op        [2:0];
-reg         res_from_mem [2:0];
-reg         mem_we       [2:0];
-reg         mem_en       [2:0];
+reg  [ 2:0] res_from_mem      ;
+reg  [ 2:0] mem_we            ;
+reg  [ 2:0] mem_en            ;
 reg  [31:0] mem_wdata    [2:0];
 reg  [ 2:0] mem_size     [2:0];
-reg         gr_we        [2:0];
+reg  [ 2:0] gr_we             ;
 reg  [ 4:0] dest         [2:0];
 
 wire [31:0] alu_result_wire;
@@ -283,32 +282,26 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
 
 
 // EX -> ID forwarding, one group per stage.
-// Only the ALU can supply a value from EX (stage 0..2). mul / div / load all
-// show up as "pending" so ID waits until the value reaches MEM.
-wire [2:0] will_write, can_supply;
+wire [2:0] will_write;
+wire [2:1] can_supply;
 
-assign will_write[0] = valid[0] & gr_we[0];
-assign will_write[1] = valid[1] & gr_we[1];
-assign will_write[2] = valid[2] & gr_we[2];
+assign will_write = valid & gr_we;
 
-assign can_supply[0] = gr_we[0] & ~ mem_en[0] & alu_pos[0];
-assign can_supply[1] = gr_we[1] & ~ mem_en[1] & alu_pos[1];
-assign can_supply[2] = gr_we[2] & ~ mem_en[2] & alu_pos[2];
+assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1];
 
-assign fwd0_valid   = can_supply[0];
-assign fwd0_pending = will_write[0] & ~ can_supply[0];
-assign fwd0_dest    = dest[0];
-assign fwd0_data    = alu_result[0];
+assign fw_valid_ex_stage0   = 1'b0;                 // stage 0 never supplies
+assign fw_write_ex_stage0 = will_write[0];
+assign fw_dest_ex_stage0    = dest[0];
 
-assign fwd1_valid   = can_supply[1];
-assign fwd1_pending = will_write[1] & ~ can_supply[1];
-assign fwd1_dest    = dest[1];
-assign fwd1_data    = alu_result[1];
+assign fw_valid_ex_stage1   = can_supply[1];
+assign fw_write_ex_stage1   = will_write[1];
+assign fw_dest_ex_stage1    = dest[1];
+assign fw_data_ex_stage1    = alu_result[1];
 
-assign fwd2_valid   = can_supply[2];
-assign fwd2_pending = will_write[2] & ~ can_supply[2];
-assign fwd2_dest    = dest[2];
-assign fwd2_data    = alu_result[2];
+assign fw_valid_ex_stage2   = can_supply[2];
+assign fw_write_ex_stage2   = will_write[2];
+assign fw_dest_ex_stage2    = dest[2];
+assign fw_data_ex_stage2    = alu_result[2];
 
 alu u_alu(
     .alu_op     (alu_op         ),
