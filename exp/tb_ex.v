@@ -1,6 +1,6 @@
 // Standalone self-checking testbench for EX.v (not part of the CPU build).
 //
-//   iverilog -g2005 -o /tmp/tb_ex impl/myCPU/EX.v impl/myCPU/alu.v impl/myCPU/mul.v impl/tb_ex.v
+//   iverilog -g2005 -o /tmp/tb_ex exp/myCPU/EX.v exp/myCPU/alu.v exp/myCPU/mul.v exp/myCPU/div.v exp/tb_ex.v
 //   vvp /tmp/tb_ex
 //
 // Checks the parts the full CPU regression cannot reach yet (div tests come
@@ -32,16 +32,15 @@ reg  [31:0] mem_wdata_i;
 reg  [ 2:0] mem_size_i;
 reg         gr_we_i;
 reg  [ 4:0] dest_i;
+reg  [ 4:0] fw_raddr1_i = 5'd0, fw_raddr2_i = 5'd0;   // what the ID instruction behind reads
 
 wire [31:0] pc_o, mem_wdata_o, ex_result;
 wire [ 2:0] mem_size_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire        valid_o, stall_o;
-wire        fw_write_ex_stage0, fw_valid_ex_stage0, fw_write_ex_stage1, fw_valid_ex_stage1;
-wire        fw_write_ex_stage2, fw_valid_ex_stage2;
-wire [ 4:0] fw_dest_ex_stage0, fw_dest_ex_stage1, fw_dest_ex_stage2;
-wire [31:0] fw_data_ex_stage1, fw_data_ex_stage2;
+wire        fw1_hit_o, fw1_valid_o, fw2_hit_o, fw2_valid_o;
+wire [31:0] fw1_data_o, fw2_data_o;
 
 EX u_ex(
     .clk            (clk            ),
@@ -76,17 +75,14 @@ EX u_ex(
     .valid_o        (valid_o        ),
     .ex_result      (ex_result      ),
     .stall_o        (stall_o        ),
-    .fw_valid_ex_stage0     (fw_valid_ex_stage0     ),
-    .fw_write_ex_stage0   (fw_write_ex_stage0   ),
-    .fw_dest_ex_stage0      (fw_dest_ex_stage0      ),
-    .fw_valid_ex_stage1     (fw_valid_ex_stage1     ),
-    .fw_write_ex_stage1   (fw_write_ex_stage1   ),
-    .fw_dest_ex_stage1      (fw_dest_ex_stage1      ),
-    .fw_data_ex_stage1      (fw_data_ex_stage1      ),
-    .fw_valid_ex_stage2     (fw_valid_ex_stage2     ),
-    .fw_write_ex_stage2   (fw_write_ex_stage2   ),
-    .fw_dest_ex_stage2      (fw_dest_ex_stage2      ),
-    .fw_data_ex_stage2      (fw_data_ex_stage2      )
+    .fw_raddr1_i    (fw_raddr1_i    ),
+    .fw_raddr2_i    (fw_raddr2_i    ),
+    .fw1_hit_o      (fw1_hit_o      ),
+    .fw1_valid_o    (fw1_valid_o    ),
+    .fw1_data_o     (fw1_data_o     ),
+    .fw2_hit_o      (fw2_hit_o      ),
+    .fw2_valid_o    (fw2_valid_o    ),
+    .fw2_data_o     (fw2_data_o     )
 );
 
 localparam MUL_W   = 0;
@@ -113,6 +109,7 @@ task send;
         allow_cur = 1'b1; valid_i = 1'b1; alu_op_i = op; md_op_i = md;
         alu_src1_i = a; alu_src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
+        fw_raddr1_i = d; fw_raddr2_i = d;   // the instruction behind it reads the same register
         pc_i = 32'h1c001000; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; gr_we_i = 1'b1;
         step;
@@ -290,15 +287,16 @@ initial begin
     // An ALU result is only forwarded from stage 1/2 (registers); at stage 0 it
     // is still the combinational ALU output, so ID must wait for it: pending.
     // Hold allow_next low so it walks through the stages instead of
-    // short-circuiting out of stage 0.
+    // short-circuiting out of stage 0.  send() points fw_raddr1_i at the dest,
+    // i.e. it pretends the instruction in ID reads what the sent one writes.
     A = 32'h1234_5678; B = 32'h0000_00ff;
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd21);   // and
-    chk(!fw_valid_ex_stage0 && fw_write_ex_stage0 && (fw_dest_ex_stage0 === 5'd21), "ALU stage 0: will write but not forwardable");
+    chk(fw1_hit_o && !fw1_valid_o, "ALU stage 0: will write but not forwardable");
     step;
-    chk(fw_valid_ex_stage1 && (fw_dest_ex_stage1 === 5'd21) && (fw_data_ex_stage1 === (A & B)), "ALU stage 1 supplies");
+    chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 1 supplies");
     step;
-    chk(fw_valid_ex_stage2 && (fw_dest_ex_stage2 === 5'd21) && (fw_data_ex_stage2 === (A & B)), "ALU stage 2 supplies");
+    chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 2 supplies");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -306,10 +304,10 @@ initial begin
     A = 32'h0000_0003; B = 32'h0000_0005;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
-    chk(!fw_valid_ex_stage0 && fw_write_ex_stage0, "mul stage 0 pending (will write, not ready)");
-    step; chk(!fw_valid_ex_stage1 && fw_write_ex_stage1, "mul stage 1 pending");
-    step; chk(!fw_valid_ex_stage2 && fw_write_ex_stage2, "mul stage 2 pending");
-    step; chk(fw_write_ex_stage2 && !fw_valid_ex_stage2, "mul still pending while handing to MEM");
+    chk(fw1_hit_o && !fw1_valid_o, "mul stage 0 pending (will write, not ready)");
+    step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 1 pending");
+    step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 2 pending");
+    step; chk(fw1_hit_o && !fw1_valid_o, "mul still pending while handing to MEM");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -321,7 +319,7 @@ initial begin
         held = 1'b0;
         for (i = 0; i < 40 && !valid_o; i = i + 1) begin
             step;
-            if (fw_write_ex_stage2 && ! fw_valid_ex_stage2) held = 1'b1;
+            if (fw1_hit_o && ! fw1_valid_o) held = 1'b1;
         end
         chk(held && valid_o && (ex_result === 32'd14) && (dest_o === 5'd23),
             "div pending in EX, result goes out to MEM");

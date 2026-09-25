@@ -40,22 +40,18 @@ module EX(
     output wire [31:0] ex_result,
     output wire        stall_o,
 
-    // forwarding, one group per EX stage (stage 0 is the youngest):
-    //   valid   : this stage can supply the operand right now (ALU only)
-    //   pending : this stage writes that register but its value is not here yet (mul / div / load), so ID has to wait for MEM
-    //   dest    : destination register of the instruction in that stage
-    //   data    : its result (only meaningful together with valid)
-    output wire        fw_valid_ex_stage0,   // value is ready
-    output wire        fw_write_ex_stage0,   // this stage will write a GPR (value may still be pending)
-    output wire [ 4:0] fw_dest_ex_stage0,
-    output wire        fw_valid_ex_stage1,   // value is ready
-    output wire        fw_write_ex_stage1,   // this stage will write a GPR (value may still be pending)
-    output wire [ 4:0] fw_dest_ex_stage1,
-    output wire [31:0] fw_data_ex_stage1,
-    output wire        fw_valid_ex_stage2,   // value is ready
-    output wire        fw_write_ex_stage2,   // this stage will write a GPR (value may still be pending)
-    output wire [ 4:0] fw_dest_ex_stage2,
-    output wire [31:0] fw_data_ex_stage2
+    // EX -> ID forwarding.  EX resolves its own stages here; the top only sees,
+    // per operand, whether the register the ID instruction reads is written by
+    // something in EX (hit), whether that value is ready yet (valid) and the
+    // value itself (a hit that is not valid yet makes ID wait for MEM).
+    input  wire [ 4:0] fw_raddr1_i,   // the source registers the ID instruction reads
+    input  wire [ 4:0] fw_raddr2_i,
+    output wire        fw1_hit_o,     // ID src1 matches a register that EX will write
+    output wire        fw1_valid_o,   // ... and the value is here already
+    output wire [31:0] fw1_data_o,
+    output wire        fw2_hit_o,
+    output wire        fw2_valid_o,
+    output wire [31:0] fw2_data_o
 );
 
 // md_op bit positions: one-hot mul/div operation select
@@ -281,27 +277,47 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
                         ({32{sel_div2}}   & div_result);
 
 
-// EX -> ID forwarding, one group per stage.
+// EX -> ID forwarding.  The three stages are matched here, so the top does not
+// have to know them:
+//   hit   : some stage of EX writes the register the ID instruction reads, so
+//           ID must not read the register file
+//   valid : the youngest such stage can supply its value right now (ALU only)
+//   data  : that value
 wire [2:0] will_write;
 wire [2:1] can_supply;
+wire [2:0] fw1_hit;
+wire [2:0] fw2_hit;
+wire [2:1] fw1_sel;
+wire [2:1] fw2_sel;
 
 assign will_write = valid & gr_we;
 
 assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1];
 
-assign fw_valid_ex_stage0   = 1'b0;                 // stage 0 never supplies
-assign fw_write_ex_stage0 = will_write[0];
-assign fw_dest_ex_stage0    = dest[0];
+assign fw1_hit = {
+    src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[2]) && will_write[2],
+    src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[1]) && will_write[1],
+    src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[0]) && will_write[0]
+};
 
-assign fw_valid_ex_stage1   = can_supply[1];
-assign fw_write_ex_stage1   = will_write[1];
-assign fw_dest_ex_stage1    = dest[1];
-assign fw_data_ex_stage1    = alu_result[1];
+assign fw2_hit = {
+    src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[2]) && will_write[2],
+    src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[1]) && will_write[1],
+    src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[0]) && will_write[0]
+};
 
-assign fw_valid_ex_stage2   = can_supply[2];
-assign fw_write_ex_stage2   = will_write[2];
-assign fw_dest_ex_stage2    = dest[2];
-assign fw_data_ex_stage2    = alu_result[2];
+// the youngest hit wins; stage 0 never supplies (its ALU result is not
+// registered yet), so a stage-0 hit selects nothing and ID waits for MEM
+assign fw1_sel = fw1_hit[0] ? 2'b00 : fw1_hit[1] ? 2'b01 : fw1_hit[2] ? 2'b10 : 2'b00;
+assign fw2_sel = fw2_hit[0] ? 2'b00 : fw2_hit[1] ? 2'b01 : fw2_hit[2] ? 2'b10 : 2'b00;
+
+assign fw1_hit_o   = | fw1_hit;
+assign fw2_hit_o   = | fw2_hit;
+assign fw1_valid_o = (fw1_sel[1] & can_supply[1]) | (fw1_sel[2] & can_supply[2]);
+assign fw2_valid_o = (fw2_sel[1] & can_supply[1]) | (fw2_sel[2] & can_supply[2]);
+
+assign fw1_data_o  = ({32{fw1_sel[1]}} & alu_result[1]) | ({32{fw1_sel[2]}} & alu_result[2]);
+assign fw2_data_o  = ({32{fw2_sel[1]}} & alu_result[1]) | ({32{fw2_sel[2]}} & alu_result[2]);
 
 alu u_alu(
     .alu_op     (alu_op         ),

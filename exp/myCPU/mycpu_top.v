@@ -103,11 +103,9 @@ wire        ex_stall;
 
 wire [31:0] ex_result;      // EX.v combinational output (this is the [EX] result)
 
-// EX.v forwarding, one group per stage (stage 0 is the youngest)
-wire        fw_write_ex_stage0, fw_valid_ex_stage0, fw_write_ex_stage1, fw_valid_ex_stage1;
-wire        fw_write_ex_stage2, fw_valid_ex_stage2;
-wire [ 4:0] fw_dest_ex_stage0, fw_dest_ex_stage1, fw_dest_ex_stage2;
-wire [31:0] fw_data_ex_stage1, fw_data_ex_stage2;
+// EX.v forwarding
+wire        fw1_ex_hit_o, fw1_ex_valid_o, fw2_ex_hit_o, fw2_ex_valid_o;
+wire [31:0] fw1_ex_data_o, fw2_ex_data_o;
 
 // the instruction's result, one entry per stage it is still live in.  [MEM] is
 // the registered copy of EX.v's result: it doubles as the load/store address and
@@ -235,9 +233,6 @@ wire [31:0] mem_result;
 wire        src_wait;
 
 // forwarding
-wire [ 2:0] fw1_ex_hit,   fw2_ex_hit;   // per EX stage, bit 0 = the youngest
-wire [ 2:0] fw1_ex_sel,   fw2_ex_sel;   // the youngest EX hit as a one-hot
-wire [31:0] fw1_ex_data,  fw2_ex_data;  // value held by the selected EX hit
 wire [MEM:EX] fw1_hit     ;
 wire [MEM:EX] fw2_hit     ;
 wire [MEM:EX] fw1_valid   ;
@@ -414,30 +409,12 @@ assign allow[IF]  = ~ stall[IF] && allow[ID];
 assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
 
-// forwarding logic
-assign fw1_ex_hit = {
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage2) && fw_write_ex_stage2,
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage1) && fw_write_ex_stage1,
-    src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == fw_dest_ex_stage0) && fw_write_ex_stage0
-};
-
-assign fw2_ex_hit = {
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage2) && fw_write_ex_stage2,
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage1) && fw_write_ex_stage1,
-    src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == fw_dest_ex_stage0) && fw_write_ex_stage0
-};
-
-// several stages can hit at once, so resolve the youngest hit into a one-hot
-// select first; the 32-bit value is then a flat masked-OR instead of a chain.
-assign fw1_ex_sel = fw1_ex_hit[0] ? 3'b001 : fw1_ex_hit[1] ? 3'b010 : fw1_ex_hit[2] ? 3'b100 : 3'b000;
-assign fw2_ex_sel = fw2_ex_hit[0] ? 3'b001 : fw2_ex_hit[1] ? 3'b010 : fw2_ex_hit[2] ? 3'b100 : 3'b000;
-
-assign fw1_hit[EX]   = | fw1_ex_hit;
-assign fw2_hit[EX]   = | fw2_ex_hit;
-assign fw1_valid[EX] = (fw1_ex_sel[0] & fw_valid_ex_stage0) | (fw1_ex_sel[1] & fw_valid_ex_stage1) | (fw1_ex_sel[2] & fw_valid_ex_stage2);
-assign fw2_valid[EX] = (fw2_ex_sel[0] & fw_valid_ex_stage0) | (fw2_ex_sel[1] & fw_valid_ex_stage1) | (fw2_ex_sel[2] & fw_valid_ex_stage2);
-assign fw1_ex_data  = ({32{fw1_ex_sel[1]}} & fw_data_ex_stage1) | ({32{fw1_ex_sel[2]}} & fw_data_ex_stage2);   // stage 0 never supplies
-assign fw2_ex_data  = ({32{fw2_ex_sel[1]}} & fw_data_ex_stage1) | ({32{fw2_ex_sel[2]}} & fw_data_ex_stage2);   // stage 0 never supplies
+// forwarding logic: EX matches its own stages (it gets the ID read addresses),
+// the top only takes the resolved tap
+assign fw1_hit[EX]   = fw1_ex_hit_o;
+assign fw2_hit[EX]   = fw2_ex_hit_o;
+assign fw1_valid[EX] = fw1_ex_valid_o;
+assign fw2_valid[EX] = fw2_ex_valid_o;
 
 // MEM part
 assign fw1_hit[MEM]   = valid[MEM] && gr_we[MEM] && src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
@@ -454,11 +431,11 @@ assign fw1_rf_sel  = ~ fw1_valid[EX] & ~ fw1_valid[MEM];
 assign fw2_mem_sel = ~ fw2_valid[EX] &   fw2_valid[MEM];
 assign fw2_rf_sel  = ~ fw2_valid[EX] & ~ fw2_valid[MEM];
 
-assign fw1_data = ({32{fw1_valid[EX]}} & fw1_ex_data) |
+assign fw1_data = ({32{fw1_valid[EX]}} & fw1_ex_data_o) |
                   ({32{fw1_mem_sel}} & result[MEM]) |
                   ({32{fw1_rf_sel}}  & rf_rdata1);
 
-assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data) |
+assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o) |
                   ({32{fw2_mem_sel}} & result[MEM]) |
                   ({32{fw2_rf_sel}}  & rf_rdata2);
 
@@ -785,17 +762,14 @@ EX u_ex(
     .valid_o        (valid_o          ),
     .stall_o        (ex_stall         ),
 
-    .fw_valid_ex_stage0     (fw_valid_ex_stage0 ),
-    .fw_write_ex_stage0     (fw_write_ex_stage0 ),
-    .fw_dest_ex_stage0      (fw_dest_ex_stage0  ),
-    .fw_valid_ex_stage1     (fw_valid_ex_stage1 ),
-    .fw_write_ex_stage1     (fw_write_ex_stage1 ),
-    .fw_dest_ex_stage1      (fw_dest_ex_stage1  ),
-    .fw_data_ex_stage1      (fw_data_ex_stage1  ),
-    .fw_valid_ex_stage2     (fw_valid_ex_stage2 ),
-    .fw_write_ex_stage2     (fw_write_ex_stage2 ),    
-    .fw_dest_ex_stage2      (fw_dest_ex_stage2  ),
-    .fw_data_ex_stage2      (fw_data_ex_stage2  )
+    .fw_raddr1_i    (rf_raddr1       ),
+    .fw_raddr2_i    (rf_raddr2       ),
+    .fw1_hit_o      (fw1_ex_hit_o    ),
+    .fw1_valid_o    (fw1_ex_valid_o  ),
+    .fw1_data_o     (fw1_ex_data_o   ),
+    .fw2_hit_o      (fw2_ex_hit_o    ),
+    .fw2_valid_o    (fw2_ex_valid_o  ),
+    .fw2_data_o     (fw2_ex_data_o   )
     );
 
 always @(posedge clk) begin
