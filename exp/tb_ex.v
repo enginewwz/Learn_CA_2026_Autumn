@@ -1,16 +1,22 @@
 // Standalone self-checking testbench for EX.v (not part of the CPU build).
 //
-//   iverilog -g2005 -o /tmp/tb_ex exp/myCPU/EX.v exp/myCPU/alu.v exp/myCPU/mul.v exp/myCPU/div.v exp/tb_ex.v
+//   iverilog -g2005 -o /tmp/tb_ex exp/myCPU/EX.v exp/myCPU/alu.v exp/myCPU/mul.v exp/myCPU/div.v exp/myCPU/br.v exp/tb_ex.v
 //   vvp /tmp/tb_ex
 //
-// Checks the parts the full CPU regression cannot reach yet (div tests come
-// before the mul tests):
+// Checks the parts the full CPU regression cannot reach yet:
 //   * an ALU result that is the oldest instruction short-circuits out of its
 //     own stage (1-cycle EX -> MEM latency) and carries its control fields
 //   * mul.w / mulh.w / mulh.wu take exactly 4 cycles and produce the right
 //     low / high word, with ma/mb operands
 //   * allow_next = 0 freezes a mul at stage 3 without corrupting it
-//   * an ALU behind a mul never overtakes it
+//   * an ALU behind a mul / div never overtakes it
+//   * a div is started as soon as its operands are in stage 0 -- also while the
+//     downstream is blocked -- and is started exactly once (u_ex.div_start)
+//   * the branch unit: taken / target, bubble, and the held-branch case
+//
+// send() / send_br() hand the instruction over the way the top does: the
+// payload is presented, allow_cur stays low while stall_o is set, and only then
+// is it pulsed for one cycle.
 `timescale 1ns/1ps
 
 module tb_ex;
@@ -118,9 +124,16 @@ localparam JIRL = 6;
 integer errors = 0;
 integer checks = 0;
 
+// watch how often the stage-0 div is started (must be exactly once per div)
+integer   div_starts = 0;
+reg       div_watch  = 1'b0;
+always @(posedge clk) if (div_watch && u_ex.div_start) div_starts = div_starts + 1;
+
 task step; begin @(posedge clk); #1; end endtask
 
-// present one instruction at the EX input for one cycle
+// present one instruction at the EX input and hand it over when EX can take it.
+// The real top drives allow[EX] = ~stall[EX] && allow[MEM], so allow_cur must
+// never be high while stall_o is: the stalled instruction would be overwritten.
 task send;
     input [11:0] op;
     input [ 6:0] md;
@@ -128,13 +141,15 @@ task send;
     input [ 4:0] d;
     begin
         @(negedge clk);
-        allow_cur = 1'b1; valid_i = 1'b1; alu_op_i = op; md_op_i = md;
+        allow_cur = 1'b0; valid_i = 1'b1; alu_op_i = op; md_op_i = md;
         alu_src1_i = a; alu_src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         fw_raddr1_i = d; fw_raddr2_i = d;   // the instruction behind it reads the same register
         br_op_i = 7'b0; br_base_i = 32'b0; br_offs_i = 32'b0;
         pc_i = 32'h1c001000; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; gr_we_i = 1'b1;
+        while (stall_o) @(negedge clk);     // hold at the input while EX is busy
+        allow_cur = 1'b1;
         step;
         allow_cur = 1'b0;
     end
@@ -153,15 +168,15 @@ task chk;
     end
 endtask
 
-// present a branch to the EX input for one cycle (a, b are the compare
-// operands, base/offs the target pieces)
+// present a branch to the EX input (a, b are the compare operands, base/offs
+// the target pieces), same handshake as send
 task send_br;
     input [ 6:0] op;
     input [31:0] a, b;
     input [31:0] base, offs;
     begin
         @(negedge clk);
-        allow_cur = 1'b1; valid_i = 1'b1;
+        allow_cur = 1'b0; valid_i = 1'b1;
         alu_op_i = 12'b0; md_op_i = 7'b0; alu_src1_i = a; alu_src2_i = b;
         br_op_i = op; br_base_i = base; br_offs_i = offs;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
@@ -169,6 +184,8 @@ task send_br;
         dest_i = 5'd0; gr_we_i = 1'b0; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; mem_size_i = 3'b0; mem_zext_i = 1'b0;
         pc_i = 32'h1c002000;
+        while (stall_o) @(negedge clk);
+        allow_cur = 1'b1;
         step;
         allow_cur = 1'b0;
     end
@@ -327,6 +344,35 @@ initial begin
             "ALU leaves only after the div");
         repeat (2) step;
     end
+
+    // --------------------------------------- div starts during a stalled pipe
+    // The divider must be started as soon as the operands are in stage 0, even
+    // when stage 1/2 are blocked (then the division overlaps the stall), and a
+    // div that sits in stage 0 must be started exactly once.
+    A = 32'd100; B = 32'd7;
+    allow_next = 1'b0;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 2
+    step; step;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: and one in stage 1
+    div_starts = 0; div_watch = 1'b1;
+    send(12'b0, 7'b1 << DIV_W, A, B, 5'd15);      // div lands in stage 0, blocked
+    step;
+    chk(u_ex.div_busy, "div starts while the downstream is blocked");
+    chk(stall_o, "blocked div still holds stage 0");
+    allow_next = 1'b1;
+    begin : div_early
+        integer i;
+        reg     got;
+        got = 1'b0;
+        for (i = 0; i < 40 && !got; i = i + 1) begin
+            step;
+            if (valid_o && (dest_o === 5'd15)) got = 1'b1;
+        end
+        div_watch = 1'b0;
+        chk(got && (ex_result === 32'd14), "div started during the stall still yields 100/7");
+        chk(div_starts == 1, "a held div is started exactly once");
+    end
+    repeat (2) step;
 
     // ------------------------------------------------- branch unit (stage 0)
     // The compare operands are the registered ALU operands; jirl is always

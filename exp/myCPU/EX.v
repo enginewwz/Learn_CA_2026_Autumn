@@ -128,8 +128,8 @@ wire        sel_div2;
 // div handshake
 wire        div_busy;
 wire [31:0] div_quot, div_rem;
-reg         div_inflight;        // a div has been started and not yet left EX
-wire        div_wait2;           // stage-2 div that is still computing
+reg         div_started;         // stage-0 div has been started
+wire        stall_div;           // stage-2 div that is still computing
 wire        div_is_signed, div_is_mod;
 wire        div_start, div_leave;
 
@@ -149,20 +149,16 @@ wire [2:1] fw2_sel;
 // div is a blocking unit: it is started from EX stage 0 (the operands are
 // registered there), the instruction walks to stage 2 and waits there until the
 // unit goes idle, then its (registered) quotient/remainder go straight to MEM.
-// A following div cannot start until this one has left EX, so the unit's result
-// can never be overwritten while it is consumed.
-// While a div waits in stage 2 it must stall itself, and it must not look valid
-// to MEM yet, so out_sel[2] is gated as well.
-assign div_wait2 = div_pos[2] & div_busy;
+assign stall_div = div_pos[2] & div_busy;
 
-assign stall_pipeline[2] = (valid[2] & ~ allow_next) | div_wait2;
-assign stall_pipeline[1] = (stall_pipeline[2] & valid[1]) | (div_pos[0] & div_inflight);
+assign stall_pipeline[2] = (valid[2] & ~ allow_next) | stall_div;
+assign stall_pipeline[1] = (stall_pipeline[2] & valid[1]) | (div_pos[0] & ~ div_started & ~ div_start);
 assign stall_pipeline[0] = stall_pipeline[1] & valid[0];
 assign stall_o = stall_pipeline[0];
 
 assign div_is_signed = md_op[0][DIV_W] | md_op[0][MOD_W];
 assign div_is_mod    = md_op[2][MOD_W] | md_op[2][MOD_WU];
-assign div_start     = div_pos[0] & ~ stall_pipeline[1];
+assign div_start     = div_pos[0] & ~ div_started & (~ div_pos[2] | div_leave) & ~ div_pos[1];
 assign div_leave     = div_pos[2] & ~ div_busy & allow_next;
 
 always @(posedge clk) begin
@@ -287,7 +283,7 @@ assign alu_no_mul_shortcut[0] = (~|mul_pos[2:1]) & (~|div_pos[2:1]) & alu_pos[0]
 // already the oldest instruction short-circuits straight out of its stage.
 // (valid[2] keeps priority so an older valid instruction is never overtaken.)
 // A div waiting in stage 2 is still there, so it must not look valid to MEM.
-assign out_sel[2]   = valid [2] & ~ div_wait2;
+assign out_sel[2]   = valid[2] & ~ stall_div;
 assign out_sel[1:0] = alu_no_mul_shortcut;
 
 // out_sel is one-hot, so the outputs are a plain wired-OR of masked stages
@@ -301,7 +297,7 @@ assign mem_we_o       = (out_sel[0] & mem_we          [0]) | (out_sel[1] & mem_w
 assign mem_en_o       = (out_sel[0] & mem_en          [0]) | (out_sel[1] & mem_en          [1]) | (out_sel[2] & mem_en          [2]);
 assign mem_wdata_o    = ({32{out_sel[0]}} & mem_wdata [0]) | ({32{out_sel[1]}} & mem_wdata [1]) | ({32{out_sel[2]}} & mem_wdata [2]);
 assign mem_size_o     = ({ 3{out_sel[0]}} & mem_size  [0]) | ({ 3{out_sel[1]}} & mem_size  [1]) | ({ 3{out_sel[2]}} & mem_size  [2]);
-assign mem_zext_o     = (out_sel[0] & mem_zext         [0]) | (out_sel[1] & mem_zext         [1]) | (out_sel[2] & mem_zext         [2]);
+assign mem_zext_o     = (out_sel[0] & mem_zext        [0]) | (out_sel[1] & mem_zext        [1]) | (out_sel[2] & mem_zext        [2]);
 assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]);
 assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]);
 
@@ -415,9 +411,9 @@ div u_div(
 // one div in flight at a time: a following div waits in stage 0 until this one
 // has carried its result out of EX
 always @(posedge clk) begin
-    if (reset)               div_inflight <= 1'b0;
-    else if (div_start)      div_inflight <= 1'b1;
-    else if (div_leave)      div_inflight <= 1'b0;
+    if (reset)                                  div_started <= 1'b0;
+    else if (div_start & stall_pipeline[1])     div_started <= 1'b1;
+    else if (~ stall_pipeline[1])               div_started <= 1'b0;
 end
 
 endmodule
