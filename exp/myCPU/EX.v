@@ -140,11 +140,11 @@ reg         br_valid;
 
 // EX -> ID forwarding, one group per stage (stage 0 is the youngest)
 wire [2:0] will_write;
-wire [2:1] can_supply;
+wire [2:0] can_supply;
 wire [2:0] fw1_hit;
 wire [2:0] fw2_hit;
-wire [2:1] fw1_sel;
-wire [2:1] fw2_sel;
+wire [2:0] fw1_sel;
+wire [2:0] fw2_sel;
 
 // div is a blocking unit: it is started from EX stage 0 (the operands are
 // registered there), the instruction walks to stage 2 and waits there until the
@@ -345,9 +345,12 @@ assign br_target_o = br_target;
 //           ID must not read the register file
 //   valid : the youngest such stage can supply its value right now (ALU only)
 //   data  : that value
+// Stage 0 supplies its combinational ALU result: that costs "ALU + one mux" on
+// the EX -> ID path, but it saves ID from waiting for MEM.
 assign will_write = valid & gr_we;
 
-assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1];
+// a load's data is not here yet, and mul / div are not alu_pos
+assign can_supply = gr_we[2:0] & ~ mem_en[2:0] & alu_pos[2:0];
 
 assign fw1_hit = {
     src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[2]) && will_write[2],
@@ -361,18 +364,17 @@ assign fw2_hit = {
     src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[0]) && will_write[0]
 };
 
-// the youngest hit wins; stage 0 never supplies (its ALU result is not
-// registered yet), so a stage-0 hit selects nothing and ID waits for MEM
-assign fw1_sel = fw1_hit[0] ? 2'b00 : fw1_hit[1] ? 2'b01 : fw1_hit[2] ? 2'b10 : 2'b00;
-assign fw2_sel = fw2_hit[0] ? 2'b00 : fw2_hit[1] ? 2'b01 : fw2_hit[2] ? 2'b10 : 2'b00;
+// the youngest hit wins (bit k selects stage k)
+assign fw1_sel = fw1_hit[0] ? 3'b001 : fw1_hit[1] ? 3'b010 : fw1_hit[2] ? 3'b100 : 3'b000;
+assign fw2_sel = fw2_hit[0] ? 3'b001 : fw2_hit[1] ? 3'b010 : fw2_hit[2] ? 3'b100 : 3'b000;
 
 assign fw1_hit_o   = | fw1_hit;
 assign fw2_hit_o   = | fw2_hit;
-assign fw1_valid_o = (fw1_sel[1] & can_supply[1]) | (fw1_sel[2] & can_supply[2]);
-assign fw2_valid_o = (fw2_sel[1] & can_supply[1]) | (fw2_sel[2] & can_supply[2]);
+assign fw1_valid_o = (fw1_sel[0] & can_supply[0]) | (fw1_sel[1] & can_supply[1]) | (fw1_sel[2] & can_supply[2]);
+assign fw2_valid_o = (fw2_sel[0] & can_supply[0]) | (fw2_sel[1] & can_supply[1]) | (fw2_sel[2] & can_supply[2]);
 
-assign fw1_data_o  = ({32{fw1_sel[1]}} & alu_result[1]) | ({32{fw1_sel[2]}} & alu_result[2]);
-assign fw2_data_o  = ({32{fw2_sel[1]}} & alu_result[1]) | ({32{fw2_sel[2]}} & alu_result[2]);
+assign fw1_data_o  = ({32{fw1_sel[0]}} & alu_result[0]) | ({32{fw1_sel[1]}} & alu_result[1]) | ({32{fw1_sel[2]}} & alu_result[2]);
+assign fw2_data_o  = ({32{fw2_sel[0]}} & alu_result[0]) | ({32{fw2_sel[1]}} & alu_result[1]) | ({32{fw2_sel[2]}} & alu_result[2]);
 
 alu u_alu(
     .alu_op     (alu_op         ),
