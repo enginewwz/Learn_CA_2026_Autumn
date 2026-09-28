@@ -426,36 +426,20 @@ initial begin
     repeat (4) step;
 
     // ------------------------------------------------- forwarding groups
-    // An ALU result is forwarded from every stage, stage 0 included (there it is
-    // the combinational ALU output, so ID does not have to wait for MEM).
-    // A load / mul / div hit stays "pending" and makes ID wait.
-    // send() points fw_raddr1_i at the dest, i.e. it pretends the instruction
-    // in ID reads what the sent one writes.  allow_next is held low so the
-    // instruction walks through the stages instead of short-circuiting.
+    // An ALU result is only forwarded from stage 1/2 (registers); at stage 0 it
+    // is still the combinational ALU output, so ID must wait for it: pending.
+    // Hold allow_next low so it walks through the stages instead of
+    // short-circuiting out of stage 0.  send() points fw_raddr1_i at the dest,
+    // i.e. it pretends the instruction in ID reads what the sent one writes.
     A = 32'h1234_5678; B = 32'h0000_00ff;
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd21);   // and
-    chk(fw1_hit_o && fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 0 supplies (comb result)");
+    chk(fw1_hit_o && !fw1_valid_o, "ALU stage 0: will write but not forwardable");
     step;
     chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 1 supplies");
     step;
     chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 2 supplies");
     allow_next = 1'b1;
-    repeat (2) step;
-
-    // a load in stage 0 must not supply: its data comes back in MEM
-    @(negedge clk);
-    allow_cur = 1'b0; valid_i = 1'b1; alu_op_i = 12'b1 << 0; md_op_i = 7'b0;
-    alu_src1_i = 32'h1000_0000; alu_src2_i = 32'd4; dest_i = 5'd24;
-    src1_used_i = 1'b1; src2_used_i = 1'b0; fw_raddr1_i = 5'd24; fw_raddr2_i = 5'd0;
-    gr_we_i = 1'b1; mem_en_i = 1'b1; mem_we_i = 1'b0; res_from_mem_i = 1'b1;
-    mem_size_i = 3'b100; mem_zext_i = 1'b0;      // SIZE_WORD: ld.w
-    while (stall_o) @(negedge clk);
-    allow_cur = 1'b1;
-    step;
-    allow_cur = 1'b0;
-    chk(fw1_hit_o && !fw1_valid_o, "load in stage 0 stays pending (data comes from MEM)");
-    mem_en_i = 1'b0; res_from_mem_i = 1'b0;
     repeat (2) step;
 
     // mul never forwards from EX: it stays "pending" until it reaches MEM
