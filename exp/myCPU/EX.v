@@ -1,7 +1,6 @@
 module EX(
     input  wire        clk,
     input  wire        reset,
-    input  wire        allow_cur,       // allow[EX]
     input  wire        allow_next,      // allow[MEM]
                                         
     // ID -> EX: combinational at ID
@@ -27,7 +26,7 @@ module EX(
     input  wire        gr_we_i,
     input  wire [ 4:0] dest_i,
 
-    // EX -> MEM: combinational, the MEM stage registers them on allow_cur[MEM]
+    // EX -> MEM: combinational, the MEM stage registers them on allow[MEM]
     output wire [31:0] pc_o,
     output wire        src1_used_o,
     output wire        src2_used_o,
@@ -86,7 +85,9 @@ reg  [2:0] alu_pos;
 reg  [2:0] mul_pos;
 reg  [2:0] div_pos;              // this instruction is a div/mod
 wire [1:0] alu_no_mul_shortcut;  // if there is no mul in progress, alu should jump to stage[i]
-wire [2:0] stall_pipeline /* verilator split_var */;
+wire [2:0] next_valid;
+wire [2:0] allow /* verilator split_var */;
+wire       div_hold;        // the stage-0 div cannot start yet, so it must stay
 
 // ID -> EX payload, registered in stage 0
 reg  [11:0] alu_op;
@@ -146,23 +147,27 @@ wire [2:0] fw2_hit;
 wire [2:1] fw1_sel;
 wire [2:1] fw2_sel;
 
-// div is a blocking unit: it is started from EX stage 0 (the operands are
-// registered there), the instruction walks to stage 2 and waits there until the
-// unit goes idle, then its (registered) quotient/remainder go straight to MEM.
+assign allow[2] = (allow_next | ~ valid[2]) & ~ stall_div;
+assign allow[1] = allow[2] | ~ valid[1];
+assign allow[0] = (allow[1] & ~ div_hold) | ~ valid[0];
+assign stall_o = ~ allow[0];
+
+// a div that has not been started yet has to wait in stage 0 (the divider is
+// still busy with the older div), so stage 0 must not be reloaded meanwhile
+assign div_hold = div_pos[0] & ~ div_started & ~ div_start;
+
+assign next_valid[2] = valid[1] & ~ alu_no_mul_shortcut[1];
+assign next_valid[1] = valid[0] & ~ alu_no_mul_shortcut[0] & ~ div_hold;
+assign next_valid[0] = valid_i;
+
 assign stall_div = div_pos[2] & div_busy;
-
-assign stall_pipeline[2] = (valid[2] & ~ allow_next) | stall_div;
-assign stall_pipeline[1] = (stall_pipeline[2] & valid[1]) | (div_pos[0] & ~ div_started & ~ div_start);
-assign stall_pipeline[0] = stall_pipeline[1] & valid[0];
-assign stall_o = stall_pipeline[0];
-
 assign div_is_signed = md_op[0][DIV_W] | md_op[0][MOD_W];
 assign div_is_mod    = md_op[2][MOD_W] | md_op[2][MOD_WU];
 assign div_start     = div_pos[0] & ~ div_started & (~ div_pos[2] | div_leave) & ~ div_pos[1];
 assign div_leave     = div_pos[2] & ~ div_busy & allow_next;
 
 always @(posedge clk) begin
-    if (allow_cur) begin
+    if (allow[0]) begin
         alu_op           <= alu_op_i;
         alu_src1         <= alu_src1_i;
         alu_src2         <= alu_src2_i;
@@ -177,8 +182,8 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (! stall_pipeline[1]) alu_result [1] <= alu_result [0];
-    if (! stall_pipeline[2]) alu_result [2] <= alu_result [1];
+    if (allow[1]) alu_result [1] <= alu_result [0];
+    if (allow[2]) alu_result [2] <= alu_result [1];
 end
 
 always @(posedge clk) begin
@@ -186,12 +191,11 @@ always @(posedge clk) begin
         valid           <= 3'b0;
     end
     else begin
-        if (allow_cur)                valid [0] <= valid_i;
-        else if (! stall_pipeline[1]) valid [0] <= 1'b0;
+        if (allow[0])                valid [0] <= next_valid[0];
 
         // a short-circuited stage hands its instruction to MEM, not to stage+1
-        if (! stall_pipeline[1]) valid [1] <= valid [0] & ~ alu_no_mul_shortcut[0];
-        if (! stall_pipeline[2]) valid [2] <= valid [1] & ~ alu_no_mul_shortcut[1];
+        if (allow[1]) valid [1] <= next_valid[1];
+        if (allow[2]) valid [2] <= next_valid[2];
     end
 end
 
@@ -204,32 +208,27 @@ always @(posedge clk) begin
     else begin
         // exactly one of the three is set for a real instruction, and they shift
         // with the same ~shortcut terms as valid[], so flag <=> valid always holds
-        if (allow_cur) begin
-            alu_pos [0] <= (~|     md_op_i) & valid_i;
-            mul_pos [0] <= (| md_op_i[2:0]) & valid_i;
-            div_pos [0] <= (| md_op_i[6:3]) & valid_i;
+        if (allow[0]) begin
+            alu_pos [0] <= (~|     md_op_i) & next_valid[0];
+            mul_pos [0] <= (| md_op_i[2:0]) & next_valid[0];
+            div_pos [0] <= (| md_op_i[6:3]) & next_valid[0];
         end
-        else if (! stall_pipeline[1]) begin
-            alu_pos [0] <= 1'b0;
-            mul_pos [0] <= 1'b0;
-            div_pos [0] <= 1'b0;
+        if (allow[1]) begin
+            alu_pos [1] <= alu_pos [0] & next_valid[1];
+            mul_pos [1] <= mul_pos [0] & next_valid[1];
+            div_pos [1] <= div_pos [0] & next_valid[1];
         end
-        if (! stall_pipeline[1]) begin
-            alu_pos [1] <= alu_pos [0] & ~ alu_no_mul_shortcut[0];
-            mul_pos [1] <= mul_pos [0] & ~ alu_no_mul_shortcut[0];
-            div_pos [1] <= div_pos [0] & ~ alu_no_mul_shortcut[0];
-        end
-        if (! stall_pipeline[2]) begin
-            alu_pos [2] <= alu_pos [1] & ~ alu_no_mul_shortcut[1];
-            mul_pos [2] <= mul_pos [1] & ~ alu_no_mul_shortcut[1];
-            div_pos [2] <= div_pos [1] & ~ alu_no_mul_shortcut[1];
+        if (allow[2]) begin
+            alu_pos [2] <= alu_pos [1] & next_valid[2];
+            mul_pos [2] <= mul_pos [1] & next_valid[2];
+            div_pos [2] <= div_pos [1] & next_valid[2];
         end
     end
     
 end
 
 always @(posedge clk) begin
-    if (allow_cur) begin
+    if (allow[0]) begin
         pc           [0] <= pc_i;
         src1_used    [0] <= src1_used_i;
         src2_used    [0] <= src2_used_i; 
@@ -245,7 +244,7 @@ always @(posedge clk) begin
     end
 
 
-    if (! stall_pipeline[1]) begin
+    if (allow[1]) begin
         pc           [1] <= pc           [0];
         src1_used    [1] <= src1_used    [0];
         src2_used    [1] <= src2_used    [0];
@@ -260,7 +259,7 @@ always @(posedge clk) begin
         dest         [1] <= dest         [0];
     end
 
-    if (! stall_pipeline[2]) begin
+    if (allow[2]) begin
         pc           [2] <= pc           [1];
         src1_used    [2] <= src1_used    [1];
         src2_used    [2] <= src2_used    [1];
@@ -318,8 +317,8 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
 
 always @(posedge clk) begin
     if (reset)                    br_valid <= 1'b0;
-    else if (allow_cur)           br_valid <= | br_op_i;   // a branch entered stage 0
-    else if (! stall_pipeline[1]) br_valid <= 1'b0;        // it left without firing
+    else if (allow[0])            br_valid <= | br_op_i;   // a branch entered stage 0
+    else if (allow[1])            br_valid <= 1'b0;        // it left without firing
     else if (br_taken)            br_valid <= 1'b0;        // held, but already fired
 end
 
@@ -386,7 +385,7 @@ alu u_alu(
 mul u_mul(
     .clk    (clk                ),
     .reset  (reset              ),
-    .stall  (stall_pipeline[2:1]),
+    .allow  (allow[2:1]         ),
     .src1   (alu_src1           ),
     .src2   (alu_src2           ),
     .md_op  (md_op[0]           ),
@@ -412,8 +411,8 @@ div u_div(
 // has carried its result out of EX
 always @(posedge clk) begin
     if (reset)                                  div_started <= 1'b0;
-    else if (div_start & stall_pipeline[1])     div_started <= 1'b1;
-    else if (~ stall_pipeline[1])               div_started <= 1'b0;
+    else if (div_start & ~ allow[1])   div_started <= 1'b1;
+    else if (allow[1])                 div_started <= 1'b0;
 end
 
 endmodule

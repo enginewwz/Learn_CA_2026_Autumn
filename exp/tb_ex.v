@@ -15,8 +15,8 @@
 //   * the branch unit: taken / target, bubble, and the held-branch case
 //
 // send() / send_br() hand the instruction over the way the top does: the
-// payload is presented, allow_cur stays low while stall_o is set, and only then
-// is it pulsed for one cycle.
+// payload is presented and held until EX's stage 0 can take it (stall_o low),
+// then a bubble is offered again.
 `timescale 1ns/1ps
 
 module tb_ex;
@@ -25,8 +25,7 @@ reg clk = 1'b0;
 always #5 clk = ~clk;
 
 reg         reset    = 1'b1;
-reg         allow_cur = 1'b0;   // allow[ID]: the stage handing over may move
-reg         valid_i   = 1'b1;   // and it really has an instruction
+reg         valid_i   = 1'b0;   // this cycle really has an instruction for EX
 reg         allow_next = 1'b1;
 reg  [11:0] alu_op_i;
 reg  [31:0] alu_src1_i, alu_src2_i;
@@ -57,7 +56,6 @@ wire [31:0] br_target_o;
 EX u_ex(
     .clk            (clk            ),
     .reset          (reset          ),
-    .allow_cur      (allow_cur      ),
     .valid_i        (valid_i        ),
     .allow_next     (allow_next     ),
     .alu_op_i       (alu_op_i       ),
@@ -132,8 +130,8 @@ always @(posedge clk) if (div_watch && u_ex.div_start) div_starts = div_starts +
 task step; begin @(posedge clk); #1; end endtask
 
 // present one instruction at the EX input and hand it over when EX can take it.
-// The real top drives allow[EX] = ~stall[EX] && allow[MEM], so allow_cur must
-// never be high while stall_o is: the stalled instruction would be overwritten.
+// EX latches stage 0 on its own allow[0], so the model is: drive the payload,
+// wait until stall_o drops, let one edge latch it, then offer a bubble.
 task send;
     input [11:0] op;
     input [ 6:0] md;
@@ -141,7 +139,7 @@ task send;
     input [ 4:0] d;
     begin
         @(negedge clk);
-        allow_cur = 1'b0; valid_i = 1'b1; alu_op_i = op; md_op_i = md;
+        valid_i = 1'b1; alu_op_i = op; md_op_i = md;
         alu_src1_i = a; alu_src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         fw_raddr1_i = d; fw_raddr2_i = d;   // the instruction behind it reads the same register
@@ -149,9 +147,8 @@ task send;
         pc_i = 32'h1c001000; res_from_mem_i = 1'b0;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; gr_we_i = 1'b1;
         while (stall_o) @(negedge clk);     // hold at the input while EX is busy
-        allow_cur = 1'b1;
         step;
-        allow_cur = 1'b0;
+        valid_i = 1'b0;
     end
 endtask
 
@@ -176,7 +173,7 @@ task send_br;
     input [31:0] base, offs;
     begin
         @(negedge clk);
-        allow_cur = 1'b0; valid_i = 1'b1;
+        valid_i = 1'b1;
         alu_op_i = 12'b0; md_op_i = 7'b0; alu_src1_i = a; alu_src2_i = b;
         br_op_i = op; br_base_i = base; br_offs_i = offs;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
@@ -185,9 +182,8 @@ task send_br;
         mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0; mem_size_i = 3'b0; mem_zext_i = 1'b0;
         pc_i = 32'h1c002000;
         while (stall_o) @(negedge clk);
-        allow_cur = 1'b1;
         step;
-        allow_cur = 1'b0;
+        valid_i = 1'b0;
     end
 endtask
 
@@ -218,7 +214,7 @@ function [31:0] mhiu; input [31:0] a, b; reg [63:0] p; begin p = {32'b0,a} * {32
 reg [31:0] A, B;
 
 initial begin
-    allow_cur = 0; allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
+    allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
     src1_used_i = 0; src2_used_i = 0; pc_i = 0; md_op_i = 0;
     br_op_i = 0; br_base_i = 0; br_offs_i = 0;
     res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; mem_zext_i = 0; gr_we_i = 0; dest_i = 0;
@@ -242,33 +238,29 @@ initial begin
     repeat (2) step;
 
     // -------------------------------------- advancing a bubble (no instruction)
-    // allow_cur (the pipeline advances) is high but ID has nothing: valid_i = 0
-    // must leave EX empty instead of inventing an instruction from stale inputs
+    // valid_i = 0 must leave EX empty instead of inventing an instruction from
+    // stale inputs (the payload below is deliberately garbage)
     @(negedge clk);
-    allow_cur = 1'b1; valid_i = 1'b0;
+    valid_i = 1'b0;
     alu_op_i = 12'b1 << 0; md_op_i = 7'b1 << MUL_W;
     alu_src1_i = 32'hdead_beef; alu_src2_i = 32'h1234_5678; dest_i = 5'd31;
     src1_used_i = 1'b1; src2_used_i = 1'b1; gr_we_i = 1'b1;
     step;
-    allow_cur = 1'b0; valid_i = 1'b1;
     chk(!valid_o, "a bubble (valid_i = 0) leaves EX empty");
     repeat (2) step;
 
-    // ------------------- a blocked entry must not duplicate the instruction
-    // entry blocked (allow_cur = 0, what a busy MEM does) while stage 1/2 are
-    // free: the instruction must move on inside EX, not stay in stage 0 too
+    // --------------------- an instruction must not be duplicated in stage 0
+    // while the mul walks through EX (valid_i = 0 is what the top presents when
+    // it has nothing to hand over): one copy in stage 0 only, none left behind
     A = 32'h0000_ffff; B = 32'h0001_0000;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd17);
     chk(!valid_o, "mul not ready right after entry");
-    allow_cur = 1'b0; valid_i = 1'b1;
-    step; chk(!valid_o, "mul at stage 1 while the entry is blocked");
+    step; chk(!valid_o, "mul at stage 1");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd17),
-              "mul reached stage 2 while the entry was blocked");
+              "mul reached stage 2");
     step; chk(!valid_o, "mul left EX for MEM (allow_next = 1)");
-    allow_cur = 1'b1; valid_i = 1'b0;
-    step; step; step;
+    step; step;
     chk(!valid_o, "nothing left in EX after the mul drained (no stage-0 copy)");
-    valid_i = 1'b1;
 
 
     // ----------------------------------------------------------------- mul.w
@@ -371,6 +363,27 @@ initial begin
         div_watch = 1'b0;
         chk(got && (ex_result === 32'd14), "div started during the stall still yields 100/7");
         chk(div_starts == 1, "a held div is started exactly once");
+    end
+    repeat (2) step;
+
+    // ----------------------------------- two divs back to back (both finish)
+    // This is what the allow/next_valid split is for: the younger div waits in
+    // stage 0 (div_hold) until the older one has left, while stage 1 keeps
+    // moving.  With the older ==stall_pipeline[1]= hold this deadlocks: the
+    // older div is frozen in stage 1 and the younger one never starts.
+    send(12'b0, 7'b1 << DIV_W, 32'd100, 32'd7, 5'd20);   // 100/7 = 14
+    send(12'b0, 7'b1 << DIV_W, 32'd81,  32'd9, 5'd21);   // 81/9  = 9
+    begin : div_pair
+        integer i;
+        reg     got20, got21;
+        got20 = 1'b0; got21 = 1'b0;
+        for (i = 0; i < 80 && !(got20 && got21); i = i + 1) begin
+            step;
+            if (valid_o && (dest_o === 5'd20) && (ex_result === 32'd14)) got20 = 1'b1;
+            if (valid_o && (dest_o === 5'd21) && (ex_result === 32'd9 )) got21 = 1'b1;
+        end
+        chk(got20, "back-to-back div: first result 100/7");
+        chk(got21, "back-to-back div: second result 81/9");
     end
     repeat (2) step;
 

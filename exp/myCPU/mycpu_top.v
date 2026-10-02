@@ -743,7 +743,6 @@ assign br_redirect = br_taken_ex | br_taken_id;
 EX u_ex(
     .clk            (clk              ),
     .reset          (reset            ),
-    .allow_cur      (allow[EX]        ),
     .allow_next     (allow[MEM]       ),
   
     .valid_i        (next_valid[EX]   ),

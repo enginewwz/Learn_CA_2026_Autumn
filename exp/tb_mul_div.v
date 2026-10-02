@@ -16,13 +16,13 @@ reg         m_valid_in, m_stall;
 reg  [31:0] m_a, m_b;
 reg  [ 1:0] m_op;
 wire [ 6:0] m_md_op  = 7'b1 << m_op;      // one-hot: 0=mul.w 1=mulh.w 2=mulh.wu
-wire [ 1:0] m_stall2 = m_stall ? 2'b11 : 2'b00;
+wire [ 1:0] m_allow  = m_stall ? 2'b00 : 2'b11;   // mul.v now takes allow
 wire [31:0] m_sel;
 
 mul u_mul(
     .clk   (clk     ),
     .reset (reset   ),
-    .stall (m_stall2),
+    .allow (m_allow ),
     .src1  (m_a     ),
     .src2  (m_b     ),
     .md_op (m_md_op ),

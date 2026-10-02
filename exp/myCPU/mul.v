@@ -27,7 +27,7 @@
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 1:0] stall,
+    input  wire [ 1:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -131,7 +131,7 @@ always @(posedge clk) begin
         L2r[7] <= 64'b0;
         md1    <= 7'b0;
     end
-    else if (! stall[0]) begin
+    else if (allow[0]) begin
         L2r[0] <= L2[0];
         L2r[1] <= L2[1];
         L2r[2] <= L2[2];
@@ -172,7 +172,7 @@ always @(posedge clk) begin
         wc2 <= 64'b0;
         md2 <= 7'b0;
     end
-    else if (! stall[1]) begin
+    else if (allow[1]) begin
         ws2 <= wsum;
         wc2 <= wcarry;
         md2 <= md1;
