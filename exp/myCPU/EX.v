@@ -86,6 +86,10 @@ localparam MOD_W    = 4;
 localparam DIV_WU   = 5;
 localparam MOD_WU   = 6;
 
+// csr_ctl[CSR_WB] means "the write-back value comes from the CSR file at WB",
+// i.e. the ALU result must never be forwarded for it.  It is decoded once at ID.
+localparam CSR_WB = 8;
+
 // EX is three stages (0..2). The multiplier has two internal register stages, so
 // with the stage-0 operand register its result is already combinational when the
 // instruction is in stage 2, and MEM registers it itself (ex_result_mem)
@@ -339,7 +343,7 @@ assign mem_zext_o     = (out_sel[0] & mem_zext        [0]) | (out_sel[1] & mem_z
 assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]);
 assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]);
 
-// exp12/13 payload rides along with whichever stage drives the output
+// payload rides along with whichever stage drives the output
 assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]) | ({14{out_sel[2]}} & csr_num  [2]);
 assign csr_ctl_o      = ({ 9{out_sel[0]}} & csr_ctl  [0]) | ({ 9{out_sel[1]}} & csr_ctl  [1]) | ({ 9{out_sel[2]}} & csr_ctl  [2]);
 assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]);
@@ -391,7 +395,10 @@ assign br_target_o = br_target;
 //   data  : that value
 assign will_write = valid & gr_we;
 
-assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1];
+// a CSR / counter instruction produces its value at WB, not here, so it must
+// look "pending" to the instruction behind (which then waits for WB)
+assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1]
+                  & ~ {csr_ctl[2][CSR_WB], csr_ctl[1][CSR_WB]};
 
 assign fw1_hit = {
     src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[2]) && will_write[2],
