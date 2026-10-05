@@ -394,7 +394,7 @@ end
 
 // first cycle for new stage
 assign cur_valid = valid & ~ flush;
-assign next_valid = {cur_valid[TOTAL_STAGE_WIDTH -2: 0] & ~stall[MEM:IF], 1'b1} & allow | (~ allow & cur_valid);
+assign next_valid = {cur_valid[MEM:IF] & ~stall[MEM:IF], 1'b1} & allow | (~ allow & cur_valid);
 
 // valid[EX] is registered inside EX.v (see the [EX] alias block), so only the
 // other four stages are updated here
