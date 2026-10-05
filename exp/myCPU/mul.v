@@ -27,7 +27,7 @@
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 1:0] stall,
+    input  wire [ 1:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -42,23 +42,44 @@ localparam MULH_WU = 2;
 // ---------------------------------------------------------------- stage 0
 reg [63:0] L2r [0:7];         // 18 vectors reduced to 8
 reg [ 6:0] md1;
+reg [ 4:0] nneg;
 
 // ---------------------------------------------------------------- stage 1
 reg [63:0] ws2, wc2;          // reduced to (sum, carry)
 reg [ 6:0] md2;
 
-// operand extension: the only bit that distinguishes signed from unsigned
-wire        signed_op = md_op[MULH_W];
-wire [63:0] Aext      = signed_op ? {{32{src1[31]}}, src1[31:0]} : {32'b0, src1[31:0]};
-wire        sb        = signed_op & src2[31];
-
-// bx[0] = x[-1] = 0, bx[1..32] = b[0..31], bx[33] = x[32] = sb, bx[34] = x[33] = sb
-wire [34:0] bx = {sb, sb, src2, 1'b0};
-
-// Booth digits + partial products
+// Booth encoding
+wire        signed_op;
+wire [63:0] Aext;
+wire        sb;
+wire [34:0] bx;
 wire [63:0] pp  [0:16];
 wire [16:0] negc;
-genvar g;
+
+// Wallace levels
+wire [63:0] L1 [0:11];
+wire [63:0] L2 [0:7];
+wire [63:0] L3 [0:5];
+wire [63:0] L4 [0:3];
+wire [63:0] L5 [0:2];
+wire [63:0] wsum, wcarry;
+wire [63:0] prod;
+
+// output
+reg  [31:0] sel;
+
+genvar  g;
+integer k;
+
+// operand extension: the only bit that distinguishes signed from unsigned
+assign signed_op = md_op[MULH_W];
+assign Aext      = signed_op ? {{32{src1[31]}}, src1[31:0]} : {32'b0, src1[31:0]};
+assign sb        = signed_op & src2[31];
+
+// bx[0] = x[-1] = 0, bx[1..32] = b[0..31], bx[33] = x[32] = sb, bx[34] = x[33] = sb
+assign bx = {sb, sb, src2, 1'b0};
+
+// Booth digits + partial products
 generate
     for (g = 0; g < 17; g = g + 1) begin : g_booth
         wire p0 = bx[2*g];
@@ -75,8 +96,6 @@ generate
 endgenerate
 
 // +1 per negative digit completes its two's complement
-reg  [4:0] nneg;
-integer    k;
 always @(*) begin
     nneg = 5'd0;
     for (k = 0; k < 17; k = k + 1)
@@ -84,7 +103,6 @@ always @(*) begin
 end
 
 // Wallace levels L1..L2: 18 -> 12 -> 8   (stage 0)
-wire [63:0] L1 [0:11];
 generate
     for (g = 0; g < 5; g = g + 1) begin : g_l1
         csa64 u(.a(pp[3*g]), .b(pp[3*g+1]), .c(pp[3*g+2]),
@@ -94,7 +112,6 @@ endgenerate
 csa64 u_l1f(.a(pp[15]), .b(pp[16]), .c({59'b0, nneg}),
             .s(L1[10]), .co(L1[11]));
 
-wire [63:0] L2 [0:7];
 generate
     for (g = 0; g < 4; g = g + 1) begin : g_l2
         csa64 u(.a(L1[3*g]), .b(L1[3*g+1]), .c(L1[3*g+2]),
@@ -114,7 +131,7 @@ always @(posedge clk) begin
         L2r[7] <= 64'b0;
         md1    <= 7'b0;
     end
-    else if (! stall[0]) begin
+    else if (allow[0]) begin
         L2r[0] <= L2[0];
         L2r[1] <= L2[1];
         L2r[2] <= L2[2];
@@ -128,7 +145,6 @@ always @(posedge clk) begin
 end
 
 // Wallace levels L3..L6: 8 -> 6 -> 4 -> 3 -> 2   (stage 1)
-wire [63:0] L3 [0:5];
 generate
     for (g = 0; g < 2; g = g + 1) begin : g_l3
         csa64 u(.a(L2r[3*g]), .b(L2r[3*g+1]), .c(L2r[3*g+2]),
@@ -138,7 +154,6 @@ endgenerate
 assign L3[4] = L2r[6];
 assign L3[5] = L2r[7];
 
-wire [63:0] L4 [0:3];
 generate
     for (g = 0; g < 2; g = g + 1) begin : g_l4
         csa64 u(.a(L3[3*g]), .b(L3[3*g+1]), .c(L3[3*g+2]),
@@ -146,11 +161,9 @@ generate
     end
 endgenerate
 
-wire [63:0] L5 [0:2];
 csa64 u_l5(.a(L4[0]), .b(L4[1]), .c(L4[2]), .s(L5[0]), .co(L5[1]));
 assign L5[2] = L4[3];
 
-wire [63:0] wsum, wcarry;
 csa64 u_l6(.a(L5[0]), .b(L5[1]), .c(L5[2]), .s(wsum), .co(wcarry));
 
 always @(posedge clk) begin
@@ -159,7 +172,7 @@ always @(posedge clk) begin
         wc2 <= 64'b0;
         md2 <= 7'b0;
     end
-    else if (! stall[1]) begin
+    else if (allow[1]) begin
         ws2 <= wsum;
         wc2 <= wcarry;
         md2 <= md1;
@@ -167,8 +180,8 @@ always @(posedge clk) begin
 end
 
 // output (combinational): one CPA + high/low select; the caller registers sel
-wire [63:0] prod = ws2 + wc2;
-reg  [31:0] sel;
+assign prod = ws2 + wc2;
+
 always @(*) begin
     case (1'b1)
         md2[MUL_W]   : sel = prod[31:0];
