@@ -1,6 +1,8 @@
 module EX(
     input  wire        clk,
     input  wire        reset,
+    input  wire        flush_i,         // global flush: everything in EX is younger
+                                        // than the redirect, so EX is reset wholesale
     input  wire        allow_next,      // allow[MEM]
                                         
     // ID -> EX: combinational at ID
@@ -10,6 +12,13 @@ module EX(
     input  wire [ 6:0] br_op_i,         // branch payload, registered with the ALU operands
     input  wire [31:0] br_base_i,
     input  wire [31:0] br_offs_i,
+
+    // exp12/13: CSR / exception payload; like the stage fields below it is
+    // latched in stage 0 and shifted to stage 1/2 together with the instruction
+    input  wire [13:0] csr_num_i,
+    input  wire [ 8:0] csr_ctl_i,
+    input  wire [31:0] csr_wdata_i,
+    input  wire [31:0] csr_mask_i,
 
     // should be stored through out the stages
     input  wire        valid_i,
@@ -38,6 +47,12 @@ module EX(
     output wire        mem_zext_o,
     output wire        gr_we_o,
     output wire [ 4:0] dest_o,
+
+    // exp12/13 payload, aligned with the stage that drives EX -> MEM
+    output wire [13:0] csr_num_o,
+    output wire [ 8:0] csr_ctl_o,
+    output wire [31:0] csr_wdata_o,
+    output wire [31:0] csr_mask_o,
 
     // execute result, valid and handshake
     output wire        valid_o,
@@ -118,6 +133,12 @@ reg  [ 2:0] mem_zext          ;   // the load zero-extends (ld.bu / ld.hu)
 reg  [ 2:0] gr_we             ;
 reg  [ 4:0] dest         [2:0];
 
+// exp12/13: CSR / exception payload, shifted alongside the fields above
+reg  [13:0] csr_num      [2:0];
+reg  [ 8:0] csr_ctl      [2:0];
+reg  [31:0] csr_wdata    [2:0];
+reg  [31:0] csr_mask     [2:0];
+
 // unit results
 wire [31:0] alu_result_wire;
 wire [31:0] mul_result_wire;
@@ -133,6 +154,12 @@ reg         div_started;         // stage-0 div has been started
 wire        stall_div;           // stage-2 div that is still computing
 wire        div_is_signed, div_is_mod;
 wire        div_start, div_leave;
+
+// mul / div have no flush of their own: a global flush resets them outright.
+// This is safe because a flush only ever kills instructions younger than the
+// redirect, i.e. everything then inside EX.
+wire        flush_reset;
+assign      flush_reset = reset | flush_i;
 
 // branch unit (stage 0)
 wire        br_taken;
@@ -187,7 +214,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (reset) begin
+    if (flush_reset) begin
         valid           <= 3'b0;
     end
     else begin
@@ -200,7 +227,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (reset) begin
+    if (flush_reset) begin
         alu_pos <= 3'b0;
         mul_pos <= 3'b0;
         div_pos <= 3'b0;
@@ -241,6 +268,10 @@ always @(posedge clk) begin
         mem_zext     [0] <= mem_zext_i;
         gr_we        [0] <= gr_we_i;
         dest         [0] <= dest_i;
+        csr_num      [0] <= csr_num_i;
+        csr_ctl      [0] <= csr_ctl_i;
+        csr_wdata    [0] <= csr_wdata_i;
+        csr_mask     [0] <= csr_mask_i;
     end
 
 
@@ -257,6 +288,10 @@ always @(posedge clk) begin
         mem_zext     [1] <= mem_zext     [0];
         gr_we        [1] <= gr_we        [0];
         dest         [1] <= dest         [0];
+        csr_num      [1] <= csr_num      [0];
+        csr_ctl      [1] <= csr_ctl      [0];
+        csr_wdata    [1] <= csr_wdata    [0];
+        csr_mask     [1] <= csr_mask     [0];
     end
 
     if (allow[2]) begin
@@ -272,6 +307,10 @@ always @(posedge clk) begin
         mem_zext     [2] <= mem_zext     [1];
         gr_we        [2] <= gr_we        [1];
         dest         [2] <= dest         [1];
+        csr_num      [2] <= csr_num      [1];
+        csr_ctl      [2] <= csr_ctl      [1];
+        csr_wdata    [2] <= csr_wdata    [1];
+        csr_mask     [2] <= csr_mask     [1];
     end
 end
 
@@ -300,6 +339,12 @@ assign mem_zext_o     = (out_sel[0] & mem_zext        [0]) | (out_sel[1] & mem_z
 assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]);
 assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]);
 
+// exp12/13 payload rides along with whichever stage drives the output
+assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]) | ({14{out_sel[2]}} & csr_num  [2]);
+assign csr_ctl_o      = ({ 9{out_sel[0]}} & csr_ctl  [0]) | ({ 9{out_sel[1]}} & csr_ctl  [1]) | ({ 9{out_sel[2]}} & csr_ctl  [2]);
+assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]);
+assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]) | ({32{out_sel[2]}} & csr_mask [2]);
+
 // stage 2: ALU (registered), mul (combinational CPA on top of its stage-1
 // registers) or div (registered quotient/remainder, only once ~busy).
 // Each option is qualified by out_sel[2], which makes all five terms exclusive.
@@ -316,7 +361,7 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
 
 
 always @(posedge clk) begin
-    if (reset)                    br_valid <= 1'b0;
+    if (flush_reset)             br_valid <= 1'b0;
     else if (allow[0])            br_valid <= | br_op_i;   // a branch entered stage 0
     else if (allow[1])            br_valid <= 1'b0;        // it left without firing
     else if (br_taken)            br_valid <= 1'b0;        // held, but already fired
@@ -384,7 +429,7 @@ alu u_alu(
 // already valid at EX stage 2 and goes straight to MEM
 mul u_mul(
     .clk    (clk                ),
-    .reset  (reset              ),
+    .reset  (flush_reset       ),
     .allow  (allow[2:1]         ),
     .src1   (alu_src1           ),
     .src2   (alu_src2           ),
@@ -396,7 +441,7 @@ mul u_mul(
 // done is left open on purpose: it is a pulse, ~busy is what stage 2 waits for.
 div u_div(
     .clk       (clk         ),
-    .reset     (reset       ),
+    .reset     (flush_reset),
     .start     (div_start   ),
     .is_signed (div_is_signed),
     .src1      (alu_src1    ),
@@ -410,9 +455,9 @@ div u_div(
 // one div in flight at a time: a following div waits in stage 0 until this one
 // has carried its result out of EX
 always @(posedge clk) begin
-    if (reset)                                  div_started <= 1'b0;
-    else if (div_start & ~ allow[1])   div_started <= 1'b1;
-    else if (allow[1])                 div_started <= 1'b0;
+    if (flush_reset)                        div_started <= 1'b0;
+    else if (div_start & ~ allow[1])         div_started <= 1'b1;
+    else if (allow[1])                       div_started <= 1'b0;
 end
 
 endmodule

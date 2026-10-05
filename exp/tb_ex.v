@@ -13,6 +13,8 @@
 //   * a div is started as soon as its operands are in stage 0 -- also while the
 //     downstream is blocked -- and is started exactly once (u_ex.div_start)
 //   * the branch unit: taken / target, bubble, and the held-branch case
+//   * exp12/13: the CSR payload rides out with the instruction, and a global
+//     flush (flush_i) empties EX and resets the mul/div in flight
 //
 // send() / send_br() hand the instruction over the way the top does: the
 // payload is presented and held until EX's stage 0 can take it (stall_o low),
@@ -41,12 +43,20 @@ reg  [ 4:0] dest_i;
 reg  [ 4:0] fw_raddr1_i = 5'd0, fw_raddr2_i = 5'd0;   // what the ID instruction behind reads
 reg  [ 6:0] br_op_i;
 reg  [31:0] br_base_i, br_offs_i;
+reg  [13:0] csr_num_i   = 14'd0;
+reg  [ 8:0] csr_ctl_i   = 9'd0;
+reg  [31:0] csr_wdata_i = 32'd0;
+reg  [31:0] csr_mask_i  = 32'd0;
+reg         flush_i     = 1'b0;
 
 wire [31:0] pc_o, mem_wdata_o, ex_result;
 wire [ 2:0] mem_size_o;
 wire        mem_zext_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
+wire [13:0] csr_num_o;
+wire [ 8:0] csr_ctl_o;
+wire [31:0] csr_wdata_o, csr_mask_o;
 wire        valid_o, stall_o;
 wire        fw1_hit_o, fw1_valid_o, fw2_hit_o, fw2_valid_o;
 wire [31:0] fw1_data_o, fw2_data_o;
@@ -56,6 +66,7 @@ wire [31:0] br_target_o;
 EX u_ex(
     .clk            (clk            ),
     .reset          (reset          ),
+    .flush_i        (flush_i        ),
     .valid_i        (valid_i        ),
     .allow_next     (allow_next     ),
     .alu_op_i       (alu_op_i       ),
@@ -64,6 +75,10 @@ EX u_ex(
     .br_op_i        (br_op_i        ),
     .br_base_i      (br_base_i      ),
     .br_offs_i      (br_offs_i      ),
+    .csr_num_i      (csr_num_i      ),
+    .csr_ctl_i      (csr_ctl_i      ),
+    .csr_wdata_i    (csr_wdata_i    ),
+    .csr_mask_i     (csr_mask_i     ),
     .src1_used_i    (src1_used_i    ),
     .src2_used_i    (src2_used_i    ),
     .pc_i           (pc_i           ),
@@ -87,6 +102,10 @@ EX u_ex(
     .mem_zext_o     (mem_zext_o     ),
     .gr_we_o        (gr_we_o        ),
     .dest_o         (dest_o         ),
+    .csr_num_o      (csr_num_o      ),
+    .csr_ctl_o      (csr_ctl_o      ),
+    .csr_wdata_o    (csr_wdata_o    ),
+    .csr_mask_o     (csr_mask_o     ),
     .valid_o        (valid_o        ),
     .ex_result      (ex_result      ),
     .stall_o        (stall_o        ),
@@ -480,6 +499,58 @@ initial begin
             "div pending in EX, result goes out to MEM");
     end
     repeat (2) step;
+
+    // ------------------------------------------------- exp12/13: CSR payload
+    // The payload must ride out of EX together with whichever stage drives the
+    // output (here the ALU short-circuits straight out of stage 0).
+    @(negedge clk);
+    valid_i = 1'b1;
+    alu_op_i = 12'b1 << 6; md_op_i = 7'b0; alu_src1_i = 32'd0; alu_src2_i = 32'd0;
+    dest_i = 5'd5; src1_used_i = 1'b0; src2_used_i = 1'b0; gr_we_i = 1'b1;
+    res_from_mem_i = 1'b0; mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0;
+    mem_size_i = 3'b0; mem_zext_i = 1'b0;
+    br_op_i = 7'b0; br_base_i = 32'b0; br_offs_i = 32'b0;
+    csr_num_i = 14'h41; csr_ctl_i = 9'b1;
+    csr_wdata_i = 32'hdead_beef; csr_mask_i = 32'h0000_ffff;
+    while (stall_o) @(negedge clk);
+    step;
+    valid_i = 1'b0;
+    chk(valid_o && (csr_num_o === 14'h41) && csr_ctl_o[0]
+        && (csr_wdata_o === 32'hdead_beef) && (csr_mask_o === 32'h0000_ffff),
+        "CSR payload rides out with the instruction");
+    repeat (2) step;
+    csr_num_i = 14'd0; csr_ctl_i = 9'd0; csr_wdata_i = 32'd0; csr_mask_i = 32'd0;
+
+    // ------------------------------------------- exp12/13: global flush
+    // A flush drops whatever EX holds and resets the mul/div in flight; the
+    // very next instruction must come out clean (nothing stale left behind).
+    A = 32'h0000_ffff; B = 32'h0001_0000;
+    allow_next = 1'b0;
+    send(12'b0, 7'b1 << MUL_W, A, B, 5'd24);
+    step;                                       // mul is walking through EX
+    flush_i = 1'b1;
+    step;
+    flush_i = 1'b0;
+    chk(!valid_o, "flush empties EX");
+    chk(!u_ex.mul_pos[0] && !u_ex.mul_pos[1] && !u_ex.mul_pos[2], "flush clears mul_pos");
+    allow_next = 1'b1;
+    repeat (2) step;
+    send(12'b0, 7'b1 << MUL_W, A, B, 5'd25);
+    step; step;
+    chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd25),
+        "a mul after the flush is clean");
+    repeat (2) step;
+
+    send(12'b0, 7'b1 << DIV_W, 32'd100, 32'd7, 5'd26);
+    step;                                       // divider now busy
+    chk(u_ex.div_busy, "divider busy before the flush");
+    flush_i = 1'b1;
+    step;
+    flush_i = 1'b0;
+    chk(!u_ex.div_busy, "flush resets the divider");
+    chk(!valid_o, "flush empties EX (div case)");
+    repeat (2) step;
+    do_div(7'b1 << DIV_W, 32'd100, 32'd7, 5'd27, 32'd14);
 
     $display("==========================================");
     if (errors == 0) $display("PASS: %0d checks, 0 errors", checks);

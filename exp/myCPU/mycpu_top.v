@@ -48,6 +48,17 @@ localparam SIZE_BYTE         = 0;
 localparam SIZE_HALF         = 1;
 localparam SIZE_WORD         = 2;
 
+// csr_ctl bit positions (exp12/13)
+localparam CSR_RD            = 0;   // csrrd/csrwr/csrxchg: rd <- CSR[csr_num]
+localparam CSR_WE            = 1;   // csrwr/csrxchg: write the CSR
+localparam CSR_XCHG          = 2;   // csrxchg semantics (masked), 0 with WE=1 is csrwr
+localparam CSR_ERTN          = 3;   // ertn
+localparam CSR_SYSCALL       = 4;   // syscall
+localparam CSR_BREAK         = 5;   // break
+localparam CSR_RDCNTVL       = 6;   // rdcntvl.w
+localparam CSR_RDCNTVH       = 7;   // rdcntvh.w
+localparam CSR_RDCNTID       = 8;   // rdcntid
+
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
 
@@ -95,6 +106,13 @@ reg         mem_zext [MEM:ID] /* verilator split_var */;   // the load zero-exte
 reg         gr_we [WB:ID] /* verilator split_var */;
 reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
+// exp12/13: CSR / exception payload.  These are decoded in ID and carried to
+// the commit point, where the CSR file (step 2) will consume them.
+reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
+reg  [ 8:0] csr_ctl [WB:ID] /* verilator split_var */;
+reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
+reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
+
 // EX.v outputs, aliased into the [EX] elements of the stage fields above
 wire [31:0] pc_o;
 wire        src1_used_o;
@@ -107,6 +125,10 @@ wire [ 2:0] mem_size_o;
 wire        mem_zext_o;
 wire        gr_we_o;
 wire  [4:0] dest_o;
+wire [13:0] csr_num_o;
+wire  [8:0] csr_ctl_o;
+wire [31:0] csr_wdata_o;
+wire [31:0] csr_mask_o;
 wire        valid_o;
 wire        ex_stall;
 
@@ -205,6 +227,19 @@ wire        inst_ld_hu;
 wire        inst_st_b;
 wire        inst_st_h;
 
+// exp12/13: CSR, system and counter instructions
+wire        inst_csr_any;       // any of csrrd / csrwr / csrxchg
+wire        inst_csrrd;
+wire        inst_csrwr;
+wire        inst_csrxchg;
+wire        inst_ertn;
+wire        inst_syscall;
+wire        inst_break;
+wire        inst_idle;
+wire        inst_rdcntvl_w;
+wire        inst_rdcntvh_w;
+wire        inst_rdcntid;
+
 wire        need_ui5;
 wire        need_ui12;
 wire        need_si12;
@@ -278,6 +313,10 @@ always @(*) begin
     mem_zext[EX]     = mem_zext_o;
     gr_we[EX]        = gr_we_o;
     dest[EX]         = dest_o;
+    csr_num[EX]      = csr_num_o;
+    csr_ctl[EX]      = csr_ctl_o;
+    csr_wdata[EX]    = csr_wdata_o;
+    csr_mask[EX]     = csr_mask_o;
     valid[EX]        = valid_o;
 end
 
@@ -413,9 +452,21 @@ always @(posedge clk) begin
     end
 end
 
-// flush logic: the ID branch kills IF only (bl still has to walk to WB for its
-// link), the EX branch kills ID and IF; the older branch (EX) wins.
-assign flush = br_taken_ex ? 5'b00011 :
+// exception / interrupt request.  Step 2 wires this from the CSR / exception
+// unit (csr.v).  A request is serviced at the first instruction entering WB.
+// next_valid[WB] is hardwired to 1'b1 (WB always accepts), so
+// allow[WB] & next_valid[WB] == allow[WB]; writing it this way keeps the
+// expression out of the cur_valid/next_valid combinational cycle.
+wire        excp_req   = 1'b0;          // TODO(step 2): driven by csr.v
+wire        wb_commit  = allow[WB];
+wire        excp_flush = excp_req & wb_commit;
+
+// flush logic: an exception kills everything still in IF / ID / EX (every one
+// of them is younger than the request); the ID branch kills IF only (bl still
+// has to walk to WB for its link), the EX branch kills ID and IF.  The
+// exception is the oldest event, so it has the highest priority.
+assign flush = excp_flush  ? 5'b00111 :
+               br_taken_ex ? 5'b00011 :
                br_taken_id ? 5'b00001 :
                              5'b00000;
 
@@ -558,6 +609,29 @@ assign inst_st_h  = op_31_26_d[6'h0a] & op_25_22_d[4'h5];
 assign inst_ld_bu = op_31_26_d[6'h0a] & op_25_22_d[4'h8];
 assign inst_ld_hu = op_31_26_d[6'h0a] & op_25_22_d[4'h9];
 
+// exp12/13: CSR / system / counter instructions.
+//   csrrd / csrwr / csrxchg are byte 0x04, i.e. op_31_26 = 6'h01 and
+//   inst[25:24] = 2'b00, split by inst[9:5] (0 = csrrd, 1 = csrwr, else xchg).
+//   ertn / idle are byte 0x06 in the same op_31_26 group; op_19_15 separates them.
+assign inst_csr_any = op_31_26_d[6'h01] & ~ inst[ID][25] & ~ inst[ID][24];
+assign inst_csrrd   = inst_csr_any & (inst[ID][9:5] == 5'd0);
+assign inst_csrwr   = inst_csr_any & (inst[ID][9:5] == 5'd1);
+assign inst_csrxchg = inst_csr_any & ~ inst_csrrd & ~ inst_csrwr;
+assign inst_ertn    = op_31_26_d[6'h01] & inst[ID][25] & ~ inst[ID][24] & op_19_15_d[5'h10];
+assign inst_idle    = op_31_26_d[6'h01] & inst[ID][25] & ~ inst[ID][24] & op_19_15_d[5'h11];
+
+assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
+assign inst_break   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h15];
+
+// rdcntvl.w / rdcntvh.w put rd in [4:0], rdcntid puts it in [9:5]; the shared
+// word (rd = 0) is decoded as rdcntvl.w.
+assign inst_rdcntvl_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00]
+                      & (inst[ID][14:10] == 5'b11000) & (inst[ID][9:5] == 5'd0);
+assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00]
+                      & (inst[ID][14:10] == 5'b11001) & (inst[ID][9:5] == 5'd0);
+assign inst_rdcntid   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00]
+                      & (inst[ID][14:10] == 5'b11000) & (inst[ID][4:0] == 5'd0) & ~ inst_rdcntvl_w;
+
 // ID source usage includes branch operands and store data, not only ALU inputs
 always @(*) begin
     src1_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
@@ -570,7 +644,8 @@ always @(*) begin
                   | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
                   | inst_blt | inst_bge | inst_bltu | inst_bgeu
                   | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
-                  | inst_st_b | inst_st_h;
+                  | inst_st_b | inst_st_h
+                  | inst_csrxchg;          // rj is the csrxchg write mask
     src2_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_st_w | inst_beq | inst_bne
@@ -578,7 +653,8 @@ always @(*) begin
                   | inst_mul_w | inst_mulh_w | inst_mulh_wu
                   | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
                   | inst_blt | inst_bge | inst_bltu | inst_bgeu
-                  | inst_st_b | inst_st_h;
+                  | inst_st_b | inst_st_h
+                  | inst_csrwr | inst_csrxchg;   // rd is the CSR write data
 end
 
 always @(posedge clk) begin
@@ -636,6 +712,26 @@ always @(*) begin
     mem_zext[ID]            = inst_ld_bu | inst_ld_hu;
 end
 
+// ID builds the exp12/13 CSR / exception payload; EX.v / MEM / WB carry it.
+//   csr_wdata : csrwr / csrxchg write value = rd
+//   csr_mask  : csrxchg mask = rj; csrwr writes every bit, csrrd never writes
+always @(*) begin
+    csr_num[ID] = inst[ID][23:10];
+
+    csr_wdata[ID] = fw2_data;
+    csr_mask[ID]  = inst_csrwr ? 32'hffffffff : fw1_data;
+
+    csr_ctl[ID][CSR_RD]      = inst_csrrd | inst_csrwr | inst_csrxchg;
+    csr_ctl[ID][CSR_WE]      = inst_csrwr | inst_csrxchg;
+    csr_ctl[ID][CSR_XCHG]    = inst_csrxchg;
+    csr_ctl[ID][CSR_ERTN]    = inst_ertn;
+    csr_ctl[ID][CSR_SYSCALL] = inst_syscall;
+    csr_ctl[ID][CSR_BREAK]   = inst_break;
+    csr_ctl[ID][CSR_RDCNTVL] = inst_rdcntvl_w;
+    csr_ctl[ID][CSR_RDCNTVH] = inst_rdcntvh_w;
+    csr_ctl[ID][CSR_RDCNTID] = inst_rdcntid;
+end
+
 always @(posedge clk) begin
     if (allow[MEM]) begin
         res_from_mem[MEM] <= res_from_mem[EX];
@@ -651,7 +747,8 @@ end
 always @(*) begin
     gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
               & ~inst_st_b & ~inst_st_h
-              & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu;
+              & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
+              & ~inst_ertn & ~inst_syscall & ~inst_break & ~inst_idle;
     dest[ID]  = inst_bl ? 5'd1 : rd;
 end
 
@@ -663,6 +760,22 @@ always @(posedge clk) begin
     if (allow[WB]) begin
         gr_we[WB] <= gr_we[MEM];
         dest[WB]  <= dest[MEM];
+    end
+end
+
+// exp12/13 payload follows the instruction to the commit point
+always @(posedge clk) begin
+    if (allow[MEM]) begin
+        csr_num[MEM]   <= csr_num[EX];
+        csr_ctl[MEM]   <= csr_ctl[EX];
+        csr_wdata[MEM] <= csr_wdata[EX];
+        csr_mask[MEM]  <= csr_mask[EX];
+    end
+    if (allow[WB]) begin
+        csr_num[WB]   <= csr_num[MEM];
+        csr_ctl[WB]   <= csr_ctl[MEM];
+        csr_wdata[WB] <= csr_wdata[MEM];
+        csr_mask[WB]  <= csr_mask[MEM];
     end
 end
 
@@ -685,7 +798,8 @@ assign br_offs_i26 = {{ 4{i26[25]}}, i26[25:0], 2'b0};
 assign br_offs_i16 = {{14{i16[15]}}, i16[15:0], 2'b0};
 
 assign src_reg_is_rd = inst_beq | inst_bne | inst_st_w | inst_st_b | inst_st_h
-                     | inst_blt | inst_bge | inst_bltu | inst_bgeu;
+                     | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                     | inst_csrwr | inst_csrxchg;   // rf_raddr2 = rd (CSR write data)
 
 assign src1_is_pc    = inst_jirl | inst_bl | inst_pcaddu12i;
 
@@ -743,6 +857,7 @@ assign br_redirect = br_taken_ex | br_taken_id;
 EX u_ex(
     .clk            (clk              ),
     .reset          (reset            ),
+    .flush_i        (excp_flush       ),
     .allow_next     (allow[MEM]       ),
   
     .valid_i        (next_valid[EX]   ),
@@ -756,6 +871,10 @@ EX u_ex(
     .br_base_i      (br_base_id       ),
     .br_offs_i      (br_offs_i16      ),
     .md_op_i        (md_op_id         ),
+    .csr_num_i      (csr_num[ID]      ),
+    .csr_ctl_i      (csr_ctl[ID]      ),
+    .csr_wdata_i    (csr_wdata[ID]    ),
+    .csr_mask_i     (csr_mask[ID]     ),
     .res_from_mem_i (res_from_mem[ID] ),
     .mem_we_i       (mem_we[ID]       ),
     .mem_en_i       (mem_en[ID]       ),
@@ -776,6 +895,10 @@ EX u_ex(
     .mem_zext_o     (mem_zext_o       ),
     .gr_we_o        (gr_we_o          ),
     .dest_o         (dest_o           ),
+    .csr_num_o      (csr_num_o        ),
+    .csr_ctl_o      (csr_ctl_o        ),
+    .csr_wdata_o    (csr_wdata_o      ),
+    .csr_mask_o     (csr_mask_o       ),
  
     .ex_result      (ex_result        ),
     .valid_o        (valid_o          ),
