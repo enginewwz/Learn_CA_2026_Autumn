@@ -140,7 +140,7 @@ wire [ 1:0] crmd_plv_o;
 wire        crmd_ie_o;
 /* verilator lint_on UNUSEDSIGNAL */
 wire        int_o;
-wire        adef_if;
+wire        if_adef;
 
 // a CSR / counter result only appears at WB, so it must not be forwarded from EX
 // (EX.v suppresses its own taps) or from MEM - both just read `csr_ctl[*][CSR_WB]`
@@ -554,18 +554,18 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o) |
                   ({32{fw2_mem_sel}} & result[MEM]) |
                   ({32{fw2_rf_sel}}  & rf_rdata2);
 
-assign inst_sram_en    = IF_req_valid & ~ adef_if;
+assign inst_sram_en    = IF_req_valid & ~ if_adef;
 assign inst_sram_we    = 4'b0;
 assign inst_sram_addr  = pc[IF];
 assign inst_sram_wdata = 32'b0;
 assign inst_rd         = inst_sram_rdata;
 
-assign adef_if = | pc[IF][1:0];
+assign if_adef = | pc[IF][1:0];
 
 // nop = andi $r0, $r0, 0
 always @(posedge clk) begin
     if (allow[ID]) begin
-        if (adef_if)                inst[ID] <= 32'h0340_0000; // nop
+        if (if_adef)                inst[ID] <= 32'h0340_0000; // nop
         else if (IF_rsp_fire_wire)  inst[ID] <= inst_rd;
         else                        inst[ID] <= inst[IF];
     end
@@ -573,7 +573,7 @@ end
 
 always @(posedge clk) begin
     if (reset)          excp_cause[IF] <= 6'h0;
-    else if (allow[ID]) excp_cause[IF] <= adef_if ? (6'h1 << EXCP_ADEF) : 6'h0;
+    else if (allow[ID]) excp_cause[IF] <= if_adef ? (6'h1 << EXCP_ADEF) : 6'h0;
 end
 
 always @(posedge clk) begin
@@ -1055,8 +1055,8 @@ assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
 assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN];
 assign wb_excp_ertn = excp_i | ertn_i;
 
-assign excp_ecode    = excp_cause[WB][EXCP_ALE]  ? 6'h9 :
-                       excp_cause[WB][EXCP_INT]  ? 6'h0 :
+assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
+                       excp_cause[WB][EXCP_ALE]  ? 6'h9 :
                        excp_cause[WB][EXCP_ADEF] ? 6'h8 :
                        excp_cause[WB][EXCP_INE]  ? 6'hd :
                        excp_cause[WB][EXCP_BRK]  ? 6'hc :
@@ -1074,7 +1074,8 @@ assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
 
 // a csrwr / csrxchg commits its CSR write in WB, in program order with the read
 
-assign excp_badv_en  = excp_i & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
+assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
+                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
 
 assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
 assign csr_raddr = csr_num[WB];
