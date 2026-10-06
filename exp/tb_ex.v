@@ -44,7 +44,8 @@ reg  [ 4:0] fw_raddr1_i = 5'd0, fw_raddr2_i = 5'd0;   // what the ID instruction
 reg  [ 6:0] br_op_i;
 reg  [31:0] br_base_i, br_offs_i;
 reg  [13:0] csr_num_i   = 14'd0;
-reg  [ 8:0] csr_ctl_i   = 9'd0;
+reg  [ 7:0] csr_ctl_i   = 8'd0;
+reg  [ 5:0] excp_cause_i = 6'd0;
 reg  [31:0] csr_wdata_i = 32'd0;
 reg  [31:0] csr_mask_i  = 32'd0;
 reg         flush_i     = 1'b0;
@@ -55,7 +56,8 @@ wire        mem_zext_o;
 wire        src1_used_o, src2_used_o, res_from_mem_o, mem_we_o, mem_en_o, gr_we_o;
 wire [ 4:0] dest_o;
 wire [13:0] csr_num_o;
-wire [ 8:0] csr_ctl_o;
+wire [ 7:0] csr_ctl_o;
+wire [ 5:0] excp_cause_o;
 wire [31:0] csr_wdata_o, csr_mask_o;
 wire        valid_o, stall_o;
 wire        fw1_hit_o, fw1_valid_o, fw2_hit_o, fw2_valid_o;
@@ -77,6 +79,7 @@ EX u_ex(
     .br_offs_i      (br_offs_i      ),
     .csr_num_i      (csr_num_i      ),
     .csr_ctl_i      (csr_ctl_i      ),
+    .excp_cause_i   (excp_cause_i   ),
     .csr_wdata_i    (csr_wdata_i    ),
     .csr_mask_i     (csr_mask_i     ),
     .src1_used_i    (src1_used_i    ),
@@ -104,6 +107,7 @@ EX u_ex(
     .dest_o         (dest_o         ),
     .csr_num_o      (csr_num_o      ),
     .csr_ctl_o      (csr_ctl_o      ),
+    .excp_cause_o   (excp_cause_o   ),
     .csr_wdata_o    (csr_wdata_o    ),
     .csr_mask_o     (csr_mask_o     ),
     .valid_o        (valid_o        ),
@@ -510,7 +514,7 @@ initial begin
     res_from_mem_i = 1'b0; mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0;
     mem_size_i = 3'b0; mem_zext_i = 1'b0;
     br_op_i = 7'b0; br_base_i = 32'b0; br_offs_i = 32'b0;
-    csr_num_i = 14'h41; csr_ctl_i = 9'b1;
+    csr_num_i = 14'h41; csr_ctl_i = 8'b1;
     csr_wdata_i = 32'hdead_beef; csr_mask_i = 32'h0000_ffff;
     while (stall_o) @(negedge clk);
     step;
@@ -519,7 +523,7 @@ initial begin
         && (csr_wdata_o === 32'hdead_beef) && (csr_mask_o === 32'h0000_ffff),
         "CSR payload rides out with the instruction");
     repeat (2) step;
-    csr_num_i = 14'd0; csr_ctl_i = 9'd0; csr_wdata_i = 32'd0; csr_mask_i = 32'd0;
+    csr_num_i = 14'd0; csr_ctl_i = 8'd0; csr_wdata_i = 32'd0; csr_mask_i = 32'd0;
 
     // ------------------------------------------- exp12/13: global flush
     // A flush drops whatever EX holds and resets the mul/div in flight; the

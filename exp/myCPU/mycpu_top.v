@@ -52,12 +52,21 @@ localparam SIZE_WORD         = 2;
 localparam CSR_RD            = 0;   // csrrd/csrwr/csrxchg: rd <- CSR[csr_num]
 localparam CSR_WE            = 1;   // csrwr/csrxchg: write the CSR
 localparam CSR_ERTN          = 2;   // ertn
-localparam CSR_SYSCALL       = 3;   // syscall
-localparam CSR_BREAK         = 4;   // break
-localparam CSR_RDCNTVL       = 5;   // rdcntvl.w
-localparam CSR_RDCNTVH       = 6;   // rdcntvh.w
-localparam CSR_RDCNTID       = 7;   // rdcntid
-localparam CSR_WB            = 8;   // rd comes from csr.v at WB
+localparam CSR_EXCP          = 3;   // this slot carries an exception; kind is in excp_cause
+localparam CSR_RDCNTVL       = 4;   // rdcntvl.w
+localparam CSR_RDCNTVH       = 5;   // rdcntvh.w
+localparam CSR_RDCNTID       = 6;   // rdcntid
+localparam CSR_WB            = 7;   // rd comes from csr.v at WB
+
+// excp_cause bit positions: one-hot, registered from IF (ADEF is born there) all
+// the way to WB.  WB is where the exception entry ports are driven from, i.e. the
+// same point as every other CSR access.
+localparam EXCP_SYS          = 0;   // syscall
+localparam EXCP_BRK          = 1;   // break
+localparam EXCP_INE          = 2;   // instruction not exist
+localparam EXCP_ADEF         = 3;   // fetch address not 4-byte aligned
+localparam EXCP_ALE          = 4;   // load / store not naturally aligned (judged in MEM)
+localparam EXCP_INT          = 5;   // interrupt (judged in MEM)
 
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
@@ -109,12 +118,12 @@ reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 // exp12/13: CSR / exception payload.  Decoded in ID and carried to the commit
 // point (WB), where the CSR file consumes it.
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
-reg  [ 8:0] csr_ctl [WB:ID] /* verilator split_var */;
+reg  [ 7:0] csr_ctl [WB:ID] /* verilator split_var */;
+reg  [ 5:0] excp_cause [WB:IF] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
 
 // CSR file interconnect; the read port is used by the WB write-back mux
-wire [13:0] csr_raddr;
 wire [31:0] csr_rdata;
 wire        csr_we;
 wire [13:0] csr_waddr;
@@ -123,27 +132,32 @@ wire [31:0] eentry_o;
 wire [31:0] era_o;
 wire [63:0] timer_o;
 
-// csr.v also exposes the interrupt request and a write-first CRMD view.  The
-// interrupt and privilege paths are not wired yet, so nothing consumes them.
+// csr.v also exposes a write-first CRMD view for a future privilege check; that
+// path is not wired yet, so nothing consumes it.
 /* verilator lint_off UNUSEDSIGNAL */
 wire [ 1:0] crmd_plv_o;
 wire        crmd_ie_o;
-wire        int_o;
 /* verilator lint_on UNUSEDSIGNAL */
+wire        int_o;
+wire        adef_if;
 
 // a CSR / counter result only appears at WB, so it must not be forwarded from EX
 // (EX.v suppresses its own taps) or from MEM - both just read `csr_ctl[*][CSR_WB]`
 
-// exception / ertn request: raised the cycle the instruction leaves EX, so it is
-// serviced while it sits in MEM.  The CSR access lands at the rising edge that
-// takes it into WB, i.e. at the same point as any other CSR write.
-reg         excp_req_reg;
-wire        next_excp_req_mem;
-reg         ertn_req_reg;
-wire        next_ertn_req_mem;
-reg  [31:0] excp_pc_reg;
-wire        excp_take;
-wire [31:0] excp_target;
+// exception / ertn / interrupt.  Two points, on purpose:
+//   MEM kills - no memory access, and flush IF..EX so the instruction about to
+//              enter MEM never gets there (it must not reach the memory);
+//   WB  enters - the entry ports are driven from WB, the same point as csr_we.
+wire        mem_ale;        // this load / store is not naturally aligned
+wire        int_take;       // an interrupt is pending
+wire        mem_excp;       // the instruction in MEM must not access memory
+wire        mem_excp_ertn;
+wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
+wire        excp_i;
+wire        ertn_i;
+wire [ 5:0] excp_ecode;
+wire        excp_badv_en;
+reg  [31:0] excp_badv_wb;   // BADV of the instruction now in WB
 
 // EX.v outputs, aliased into the [EX] elements of the stage fields above
 wire [31:0] ex_pc_o;
@@ -158,7 +172,9 @@ wire        ex_mem_zext_o;
 wire        ex_gr_we_o;
 wire  [4:0] ex_dest_o;
 wire [13:0] ex_csr_num_o;
-wire  [8:0] ex_csr_ctl_o;
+wire [ 7:0] ex_csr_ctl_o;
+wire [ 5:0] ex_excp_cause_o;
+wire [ 5:0] excp_cause_id;
 wire [31:0] ex_csr_wdata_o;
 wire [31:0] ex_csr_mask_o;
 wire        ex_valid_o;
@@ -264,6 +280,7 @@ wire        inst_idle;
 wire        inst_rdcntvl_w;
 wire        inst_rdcntvh_w;
 wire        inst_rdcntid;
+wire        inst_ine;
 
 wire        need_ui5;
 wire        need_ui12;
@@ -340,6 +357,7 @@ always @(*) begin
     dest[EX]         = ex_dest_o;
     csr_num[EX]      = ex_csr_num_o;
     csr_ctl[EX]      = ex_csr_ctl_o;
+    excp_cause[EX]   = ex_excp_cause_o;
     csr_wdata[EX]    = ex_csr_wdata_o;
     csr_mask[EX]     = ex_csr_mask_o;
     valid[EX]        = ex_valid_o;
@@ -421,7 +439,7 @@ assign fake_MEM_rsp_valid = MEM_rsp_ready;
 assign seq_pc       = pc[IF] + 32'h4;
 // an exception / ertn redirect is older than any branch, so it wins here and in
 // flush; then the EX branch, then the ID branch
-assign nextpc       = excp_take   ? excp_target   :
+assign nextpc       = wb_excp_ertn  ? (ertn_i ? era_o : eentry_o) :
                       br_reg      ? br_pc_reg     :
                       br_taken_ex ? br_target_ex  :
                       br_taken_id ? br_target_id  : seq_pc;
@@ -452,9 +470,9 @@ always @(posedge clk) begin
     end
     else begin
         if (allow[IF] ) pc[IF]  <= nextpc;
-        if (allow[ID]) pc[ID]  <= pc[IF];
+        if (allow[ID] ) pc[ID]  <= pc[IF];
         if (allow[MEM]) pc[MEM] <= pc[EX];
-        if (allow[WB]) pc[WB]  <= pc[MEM];
+        if (allow[WB] ) pc[WB]  <= pc[MEM];
     end
 end
 
@@ -479,33 +497,11 @@ always @(posedge clk) begin
     end
 end
 
-assign next_excp_req_mem = cur_valid[EX] & csr_ctl[EX][CSR_SYSCALL] & allow[MEM];
-assign next_ertn_req_mem = cur_valid[EX] & csr_ctl[EX][CSR_ERTN]    & allow[MEM];
-
-// exception / ertn request.
-always @(posedge clk) begin
-    if (reset) begin
-        excp_req_reg <= 1'b0;
-        ertn_req_reg <= 1'b0;
-        excp_pc_reg  <= 32'b0;
-    end
-    else begin
-        excp_req_reg <= next_excp_req_mem;
-        ertn_req_reg <= next_ertn_req_mem;
-        if (next_excp_req_mem)
-            excp_pc_reg <= pc[EX];
-    end
-end
-
-assign excp_take   = excp_req_reg | ertn_req_reg;
-assign excp_target = ertn_req_reg ? era_o : eentry_o;
-
-// flush logic: an exception kills IF / ID / EX; the ID
-// branch kills IF only, the EX branch kills ID and IF.
-assign flush = excp_take   ? 5'b00111 :
-               br_taken_ex ? 5'b00011 :
-               br_taken_id ? 5'b00001 :
-                             5'b00000;
+// the ID branch kills IF only; the EX branch kills ID and IF
+assign flush = mem_excp_ertn ? 5'b00111 :
+               br_taken_ex   ? 5'b00011 :
+               br_taken_id   ? 5'b00001 :
+                               5'b00000;
 
 // allow logic --> generate with stall logic
 assign allow[WB]  = 1'b1;
@@ -517,6 +513,15 @@ assign allow[IF]  = ~ stall[IF] && allow[ID];
 // EX reports its own stall request (div waiting, ALU/mul/div back-pressure)
 assign stall[EX] = ex_stall;
 assign stall[WB] = 1'b0;
+
+// ID must wait when any tap of either source is still pending
+assign src_wait = | (fw1_pending | fw2_pending);
+
+assign stall[ID] = src_wait && valid[ID];
+
+// stall for IF & MEM
+assign stall[IF]  = ~ IF_rsp_fire | mem_excp_ertn;  // should not include valid[IF]
+assign stall[MEM] = valid[MEM] && mem_en[MEM] && ~ mem_excp && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
 
 // forwarding logic: EX matches its own stages (it gets the ID read addresses),
 // the top only takes the resolved tap
@@ -548,26 +553,26 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o) |
                   ({32{fw2_mem_sel}} & result[MEM]) |
                   ({32{fw2_rf_sel}}  & rf_rdata2);
 
-// ID must wait when any tap of either source is still pending
-assign src_wait = | (fw1_pending | fw2_pending);
-
-assign stall[ID] = src_wait && valid[ID];
-
-// stall for IF & MEM
-assign stall[IF]  = ~ IF_rsp_fire;  // should not include valid[IF], for we need to manage the issue that we send request and were flushed then
-assign stall[MEM] = valid[MEM] && mem_en[MEM] && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
-
-assign inst_sram_en    = IF_req_valid;
+assign inst_sram_en    = IF_req_valid & ~ adef_if;
 assign inst_sram_we    = 4'b0;
 assign inst_sram_addr  = pc[IF];
 assign inst_sram_wdata = 32'b0;
 assign inst_rd         = inst_sram_rdata;
 
+assign adef_if = | pc[IF][1:0];
+
+// nop = andi $r0, $r0, 0
 always @(posedge clk) begin
     if (allow[ID]) begin
-        if (IF_rsp_fire_wire)   inst[ID] <= inst_rd;
-        else                    inst[ID] <= inst[IF];
+        if (adef_if)                inst[ID] <= 32'h0340_0000; // nop
+        else if (IF_rsp_fire_wire)  inst[ID] <= inst_rd;
+        else                        inst[ID] <= inst[IF];
     end
+end
+
+always @(posedge clk) begin
+    if (reset)          excp_cause[IF] <= 6'h0;
+    else if (allow[ID]) excp_cause[IF] <= adef_if ? (6'h1 << EXCP_ADEF) : 6'h0;
 end
 
 always @(posedge clk) begin
@@ -579,7 +584,7 @@ assign op_25_22  = inst[ID][25:22];
 assign op_21_20  = inst[ID][21:20];
 assign op_19_15  = inst[ID][19:15];
 
-assign rd   = inst[ID][ 4: 0];
+assign rd   = inst_rdcntid ? inst[ID][9:5] : inst[ID][4:0];   // rdcntid keeps rd in [9:5]
 assign rj   = inst[ID][ 9: 5];
 assign rk   = inst[ID][14:10];
 
@@ -658,7 +663,7 @@ assign inst_ertn    = op_31_26_d[6'h01] & inst[ID][25] & ~ inst[ID][24] & op_19_
 assign inst_idle    = op_31_26_d[6'h01] & inst[ID][25] & ~ inst[ID][24] & op_19_15_d[5'h11];
 
 assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
-assign inst_break   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h15];
+assign inst_break   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14];
 
 // rdcntvl.w / rdcntvh.w put rd in [4:0], rdcntid puts it in [9:5]; the shared
 // word (rd = 0) is decoded as rdcntvl.w.
@@ -668,6 +673,23 @@ assign inst_rdcntvh_w = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] 
                       & (inst[ID][14:10] == 5'b11001) & (inst[ID][9:5] == 5'd0);
 assign inst_rdcntid   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h0] & op_19_15_d[5'h00]
                       & (inst[ID][14:10] == 5'b11000) & (inst[ID][4:0] == 5'd0) & ~ inst_rdcntvl_w;
+
+// instruction-not-existent: nothing above matched.  The ADEF slot carries a nop
+// (andi $r0,$r0,0), so it matches inst_andi and is never flagged here.
+assign inst_ine = ~ (inst_lu12i_w | inst_add_w | inst_sub_w | inst_slt | inst_sltu
+                   | inst_nor | inst_and | inst_or | inst_xor
+                   | inst_slli_w | inst_srli_w | inst_srai_w
+                   | inst_addi_w | inst_ld_w | inst_st_w | inst_jirl | inst_b | inst_bl
+                   | inst_beq | inst_bne
+                   | inst_slti | inst_sltui | inst_andi | inst_ori | inst_xori
+                   | inst_sll_w | inst_srl_w | inst_sra_w | inst_pcaddu12i
+                   | inst_mul_w | inst_mulh_w | inst_mulh_wu
+                   | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
+                   | inst_blt | inst_bge | inst_bltu | inst_bgeu
+                   | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
+                   | inst_st_b | inst_st_h
+                   | inst_csr_any | inst_ertn | inst_syscall | inst_break | inst_idle
+                   | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid);
 
 // ID source usage includes branch operands and store data, not only ALU inputs
 always @(*) begin
@@ -754,7 +776,10 @@ end
 //   csr_mask  : the write mask, already resolved here: csrwr writes every bit,
 //               csrxchg uses rj, csrrd never writes
 always @(*) begin
-    csr_num[ID] = inst[ID][23:10];
+    // rdcntid has no CSR number in the instruction: it always reads TID (0x040).
+    // Decoded here and carried down, so WB needs no mux.  Folding it in also makes
+    // csr_num[WB] the write address for rdcntid, but rdcntid never asserts CSR_WE.
+    csr_num[ID] = inst_rdcntid ? 14'h040 : inst[ID][23:10];
 
     csr_wdata[ID] = fw2_data;
     csr_mask[ID]  = inst_csrwr ? 32'hffffffff : fw1_data;
@@ -762,14 +787,23 @@ always @(*) begin
     csr_ctl[ID][CSR_RD]      = inst_csrrd | inst_csrwr | inst_csrxchg;
     csr_ctl[ID][CSR_WE]      = inst_csrwr | inst_csrxchg;
     csr_ctl[ID][CSR_ERTN]    = inst_ertn;
-    csr_ctl[ID][CSR_SYSCALL] = inst_syscall;
-    csr_ctl[ID][CSR_BREAK]   = inst_break;
     csr_ctl[ID][CSR_RDCNTVL] = inst_rdcntvl_w;
     csr_ctl[ID][CSR_RDCNTVH] = inst_rdcntvh_w;
     csr_ctl[ID][CSR_RDCNTID] = inst_rdcntid;
     csr_ctl[ID][CSR_WB]      = inst_csrrd | inst_csrwr | inst_csrxchg
                              | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid;
+    // all carried exceptions share one csr_ctl bit; excp_cause says which one
+    excp_cause[ID]           = excp_cause[IF] | excp_cause_id;
+    csr_ctl[ID][CSR_EXCP]    = | excp_cause[ID];
 end
+
+// ADEF arrives from IF, the other three are decoded here
+assign excp_cause_id[EXCP_SYS]  = inst_syscall;
+assign excp_cause_id[EXCP_BRK]  = inst_break;
+assign excp_cause_id[EXCP_INE]  = inst_ine;
+assign excp_cause_id[EXCP_ADEF] = 1'b0;
+assign excp_cause_id[EXCP_ALE]  = 1'b0;      // ALE / interrupt are judged in MEM
+assign excp_cause_id[EXCP_INT]  = 1'b0;
 
 always @(posedge clk) begin
     if (allow[MEM]) begin
@@ -805,16 +839,24 @@ end
 // exp12/13 payload follows the instruction to the commit point
 always @(posedge clk) begin
     if (allow[MEM]) begin
-        csr_num[MEM]   <= csr_num[EX];
-        csr_ctl[MEM]   <= csr_ctl[EX];
-        csr_wdata[MEM] <= csr_wdata[EX];
-        csr_mask[MEM]  <= csr_mask[EX];
+        csr_num[MEM]    <= csr_num[EX];
+        csr_ctl[MEM]    <= csr_ctl[EX];
+        csr_wdata[MEM]  <= csr_wdata[EX];
+        csr_mask[MEM]   <= csr_mask[EX];
+        excp_cause[MEM] <= excp_cause[EX];
     end
     if (allow[WB]) begin
-        csr_num[WB]   <= csr_num[MEM];
-        csr_ctl[WB]   <= csr_ctl[MEM];
-        csr_wdata[WB] <= csr_wdata[MEM];
-        csr_mask[WB]  <= csr_mask[MEM];
+        csr_num[WB]    <= csr_num[MEM];
+        csr_ctl[WB]    <= csr_ctl[MEM] | (mem_excp ? (8'h1 << CSR_EXCP) : 8'h0);
+        csr_wdata[WB]  <= csr_wdata[MEM];
+        csr_mask[WB]   <= csr_mask[MEM];
+        // ALE / interrupt / ertn are judged in MEM and have no carried copy, so
+        // their kind and BADV join the cause register on the MEM->WB edge.  WB
+        // then holds everything the entry ports need.
+        excp_cause[WB] <= excp_cause[MEM]
+                          | (mem_ale  ? (6'h1 << EXCP_ALE) : 6'h0)
+                          | (int_take ? (6'h1 << EXCP_INT) : 6'h0);
+        excp_badv_wb   <= mem_ale ? result[MEM] : pc[MEM];
     end
 end
 
@@ -881,7 +923,8 @@ assign rj_value  = fw1_data;
 
 // ID resolves b / bl only: they are unconditional and their target depends on
 // pc plus the immediate, so no forwarding is involved.
-assign br_taken_id  = (inst_b | inst_bl) & cur_valid[ID] & allow[ID];
+
+assign br_taken_id  = (inst_b | inst_bl) & valid[ID];
 assign br_target_id = pc[ID] + br_offs_i26;
 
 // The conditional branches and jirl are resolved in EX stage 0 (br.v):
@@ -891,7 +934,7 @@ assign br_target_id = pc[ID] + br_offs_i26;
 assign br_op_id   = {inst_jirl, inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_bne, inst_beq};
 assign br_base_id = inst_jirl ? rj_value : pc[ID];
 
-assign br_redirect = br_taken_ex | br_taken_id | excp_take;
+assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn;
 
 EX u_ex(
     .clk            (clk              ),
@@ -912,6 +955,7 @@ EX u_ex(
     .md_op_i        (md_op_id         ),
     .csr_num_i      (csr_num[ID]      ),
     .csr_ctl_i      (csr_ctl[ID]      ),
+    .excp_cause_i   (excp_cause[ID]   ),
     .csr_wdata_i    (csr_wdata[ID]    ),
     .csr_mask_i     (csr_mask[ID]     ),
     .res_from_mem_i (res_from_mem[ID] ),
@@ -936,6 +980,7 @@ EX u_ex(
     .dest_o         (ex_dest_o           ),
     .csr_num_o      (ex_csr_num_o        ),
     .csr_ctl_o      (ex_csr_ctl_o        ),
+    .excp_cause_o   (ex_excp_cause_o     ),
     .csr_wdata_o    (ex_csr_wdata_o      ),
     .csr_mask_o     (ex_csr_mask_o       ),
  
@@ -960,7 +1005,7 @@ always @(posedge clk) begin
     if (allow[WB])  result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
-assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid;
+assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid && ~ mem_excp;
 assign data_sram_addr  = result[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
@@ -977,7 +1022,7 @@ assign st_we_word = 4'b1111;
 
 assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
 
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM]}} & st_we;
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
 assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
                          ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
                          ({32{mem_word}} &    mem_wdata[MEM]);
@@ -996,11 +1041,29 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
                     ({32{mem_half}} & ld_half_ext)  |
                     ({32{mem_word}} & data_sram_rdata);
 
+// MEM judges its own three causes; the carried ones are in csr_ctl[MEM][CSR_EXCP]
+assign mem_ale   = mem_en[MEM] & (mem_half ? result[MEM][0] :
+                                  mem_word ? | result[MEM][1:0] : 1'b0);
+assign int_take  = int_o;
+assign mem_excp  = csr_ctl[MEM][CSR_EXCP] | mem_ale | int_take;
+
+assign mem_excp_ertn   = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
+
+// WB drives the entry, exactly like csr_we
+assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
+assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN];
+assign wb_excp_ertn = excp_i | ertn_i;
+
+assign excp_ecode    = excp_cause[WB][EXCP_ALE]  ? 6'h9 :
+                       excp_cause[WB][EXCP_INT]  ? 6'h0 :
+                       excp_cause[WB][EXCP_ADEF] ? 6'h8 :
+                       excp_cause[WB][EXCP_INE]  ? 6'hd :
+                       excp_cause[WB][EXCP_BRK]  ? 6'hc :
+                                                   6'hb;   // syscall
+
 // WB stage: write back to regfile.  A CSR / counter instruction takes its value
 // from the CSR file (or the free-running timer) here rather than from the ALU.
-assign csr_raddr = csr_ctl[WB][CSR_RDCNTID] ? 14'h040 : csr_num[WB];
-
-assign rf_we    = gr_we[WB] && valid[WB];
+assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
 assign rf_waddr = dest[WB];
 assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
                   csr_ctl[WB][CSR_RDCNTID] ? csr_rdata      :
@@ -1009,31 +1072,29 @@ assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
                                              result[WB];
 
 // a csrwr / csrxchg commits its CSR write in WB, in program order with the read
+
+assign excp_badv_en  = excp_i & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
+
 assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
 assign csr_waddr = csr_num[WB];
 assign csr_wdata_w = csr_wdata[WB];
 
-assign debug_wb_pc       = pc[WB];
-assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
-assign debug_wb_rf_wnum  = dest[WB];
-assign debug_wb_rf_wdata = rf_wdata;
-
 csr u_csr(
     .clk             (clk          ),
     .reset           (reset        ),
-    .raddr_i         (csr_raddr    ),
+    .raddr_i         (csr_num[WB]  ),
     .rdata_o         (csr_rdata    ),
     .we_i            (csr_we       ),
     .waddr_i         (csr_waddr    ),
     .wdata_i         (csr_wdata_w  ),
     .wmask_i         (csr_mask[WB] ),
-    .excp_i          (excp_req_reg ),
-    .excp_pc_i       (excp_pc_reg  ),
-    .excp_ecode_i    (6'h0b        ),   // SYS
+    .excp_i          (excp_i       ),
+    .excp_pc_i       (pc[WB]       ),
+    .excp_ecode_i    (excp_ecode   ),
     .excp_esubcode_i (9'h0         ),
-    .excp_badv_en_i  (1'b0         ),
-    .excp_badv_i     (32'h0        ),
-    .ertn_i          (ertn_req_reg ),
+    .excp_badv_en_i  (excp_badv_en ),
+    .excp_badv_i     (excp_badv_wb ),
+    .ertn_i          (ertn_i       ),
     .hwi_i           (8'h0         ),
     .ipi_i           (1'b0         ),
     .crmd_plv_o      (crmd_plv_o   ),
@@ -1043,5 +1104,10 @@ csr u_csr(
     .int_o           (int_o        ),
     .timer_o         (timer_o      )
 );
+
+assign debug_wb_pc       = pc[WB];
+assign debug_wb_rf_we    = {4{rf_we}};  // only support word read
+assign debug_wb_rf_wnum  = dest[WB];
+assign debug_wb_rf_wdata = rf_wdata;
 
 endmodule

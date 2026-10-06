@@ -16,7 +16,8 @@ module EX(
     // exp12/13: CSR / exception payload; like the stage fields below it is
     // latched in stage 0 and shifted to stage 1/2 together with the instruction
     input  wire [13:0] csr_num_i,
-    input  wire [ 8:0] csr_ctl_i,
+    input  wire [ 7:0] csr_ctl_i,
+    input  wire [ 5:0] excp_cause_i,
     input  wire [31:0] csr_wdata_i,
     input  wire [31:0] csr_mask_i,
 
@@ -50,7 +51,8 @@ module EX(
 
     // exp12/13 payload, aligned with the stage that drives EX -> MEM
     output wire [13:0] csr_num_o,
-    output wire [ 8:0] csr_ctl_o,
+    output wire [ 7:0] csr_ctl_o,
+    output wire [ 5:0] excp_cause_o,
     output wire [31:0] csr_wdata_o,
     output wire [31:0] csr_mask_o,
 
@@ -88,7 +90,8 @@ localparam MOD_WU   = 6;
 
 // csr_ctl[CSR_WB] means "the write-back value comes from the CSR file at WB",
 // i.e. the ALU result must never be forwarded for it.  It is decoded once at ID.
-localparam CSR_WB = 8;
+// NOTE: this bit index must stay in step with mycpu_top.v.
+localparam CSR_WB = 7;
 
 // EX is three stages (0..2). The multiplier has two internal register stages, so
 // with the stage-0 operand register its result is already combinational when the
@@ -139,7 +142,8 @@ reg  [ 4:0] dest         [2:0];
 
 // exp12/13: CSR / exception payload, shifted alongside the fields above
 reg  [13:0] csr_num      [2:0];
-reg  [ 8:0] csr_ctl      [2:0];
+reg  [ 7:0] csr_ctl      [2:0];
+reg  [ 5:0] excp_cause   [2:0];
 reg  [31:0] csr_wdata    [2:0];
 reg  [31:0] csr_mask     [2:0];
 
@@ -274,6 +278,7 @@ always @(posedge clk) begin
         dest         [0] <= dest_i;
         csr_num      [0] <= csr_num_i;
         csr_ctl      [0] <= csr_ctl_i;
+        excp_cause   [0] <= excp_cause_i;
         csr_wdata    [0] <= csr_wdata_i;
         csr_mask     [0] <= csr_mask_i;
     end
@@ -294,6 +299,7 @@ always @(posedge clk) begin
         dest         [1] <= dest         [0];
         csr_num      [1] <= csr_num      [0];
         csr_ctl      [1] <= csr_ctl      [0];
+        excp_cause   [1] <= excp_cause   [0];
         csr_wdata    [1] <= csr_wdata    [0];
         csr_mask     [1] <= csr_mask     [0];
     end
@@ -313,6 +319,7 @@ always @(posedge clk) begin
         dest         [2] <= dest         [1];
         csr_num      [2] <= csr_num      [1];
         csr_ctl      [2] <= csr_ctl      [1];
+        excp_cause   [2] <= excp_cause   [1];
         csr_wdata    [2] <= csr_wdata    [1];
         csr_mask     [2] <= csr_mask     [1];
     end
@@ -345,7 +352,8 @@ assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} &
 
 // payload rides along with whichever stage drives the output
 assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]) | ({14{out_sel[2]}} & csr_num  [2]);
-assign csr_ctl_o      = ({ 9{out_sel[0]}} & csr_ctl  [0]) | ({ 9{out_sel[1]}} & csr_ctl  [1]) | ({ 9{out_sel[2]}} & csr_ctl  [2]);
+assign csr_ctl_o      = ({ 8{out_sel[0]}} & csr_ctl  [0]) | ({ 8{out_sel[1]}} & csr_ctl  [1]) | ({ 8{out_sel[2]}} & csr_ctl  [2]);
+assign excp_cause_o   = ({ 6{out_sel[0]}} & excp_cause[0]) | ({ 6{out_sel[1]}} & excp_cause[1]) | ({ 6{out_sel[2]}} & excp_cause[2]);
 assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]);
 assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]) | ({32{out_sel[2]}} & csr_mask [2]);
 
