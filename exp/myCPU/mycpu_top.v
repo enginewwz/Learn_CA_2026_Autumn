@@ -126,6 +126,7 @@ reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
 // CSR file interconnect; the read port is used by the WB write-back mux
 wire [31:0] csr_rdata;
 wire        csr_we;
+wire [13:0] csr_raddr;
 wire [13:0] csr_waddr;
 wire [31:0] csr_wdata_w;
 wire [31:0] eentry_o;
@@ -1076,13 +1077,14 @@ assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
 assign excp_badv_en  = excp_i & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
 
 assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
+assign csr_raddr = csr_num[WB];
 assign csr_waddr = csr_num[WB];
 assign csr_wdata_w = csr_wdata[WB];
 
 csr u_csr(
     .clk             (clk          ),
     .reset           (reset        ),
-    .raddr_i         (csr_num[WB]  ),
+    .raddr_i         (csr_raddr    ),
     .rdata_o         (csr_rdata    ),
     .we_i            (csr_we       ),
     .waddr_i         (csr_waddr    ),
