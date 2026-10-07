@@ -534,6 +534,21 @@ initial begin
     repeat (2) step;
     csr_num_i = 14'd0; csr_ctl_i = 8'd0; csr_wdata_i = 32'd0; csr_mask_i = 32'd0;
 
+    // A stage that is held (allow = 0) must still be cleared by the flush: the
+    // clear has to bypass allow[], otherwise the killed instruction survives and
+    // is handed to MEM one cycle later, when flush[EX] is already low again.
+    A = 32'h0000_ffff; B = 32'h0001_0000;
+    allow_next = 1'b0;
+    send(12'b0, 7'b1 << MUL_W, A, B, 5'd30);
+    step; step; step;                       // parked in stage 3, downstream held
+    chk(valid_o, "mul parked in stage 3 under back-pressure");
+    flush_i = 1'b1;
+    step;
+    flush_i = 1'b0;
+    chk(!valid_o, "flush clears a held stage 3 (allow_next = 0)");
+    allow_next = 1'b1;
+    repeat (2) step;
+
     // ------------------------------------------- exp12/13: global flush
     // A flush drops whatever EX holds and resets the mul/div in flight; the
     // very next instruction must come out clean (nothing stale left behind).
@@ -563,6 +578,18 @@ initial begin
     chk(!u_ex.div_busy, "flush resets the divider");
     chk(!valid_o, "flush empties EX (div case)");
     repeat (2) step;
+
+    // The flush must take effect in the same cycle, not just at the next edge:
+    // a flushed instruction must not look like it is leaving EX.  Otherwise a
+    // flushed branch still drives br_taken_o -> nextpc, and a flushed
+    // instruction is still offered to MEM as the EX->MEM hand-off.
+    send_br(7'b1 << BEQ, 32'd5, 32'd5, 32'h1c002000, 32'h8);
+    chk(br_taken_o && valid_o, "live branch in stage 0 before the flush");
+    flush_i = 1'b1;
+    step;
+    chk(!br_taken_o, "flush drops the branch at the next edge");
+    flush_i = 1'b0;
+    step; step;
     do_div(7'b1 << DIV_W, 32'd100, 32'd7, 5'd27, 32'd14);
 
     $display("==========================================");

@@ -486,7 +486,7 @@ assign src_wait = | (fw1_pending | fw2_pending);
 
 // stall for IF & MEM
 assign stall[IF]  = ~ IF_rsp_fire | mem_excp_ertn;  // should not include valid[IF]
-assign stall[ID] = src_wait && valid[ID];
+assign stall[ID] = src_wait && cur_valid[ID];
 assign stall[EX] = ex_stall;
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && ~ mem_excp && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
 assign stall[WB] = 1'b0;
@@ -876,7 +876,7 @@ regfile u_regfile(
 
 assign rj_value  = fw1_data;
 
-assign br_taken_id  = (inst_b | inst_bl) & valid[ID];
+assign br_taken_id  = (inst_b | inst_bl) & cur_valid[ID];
 assign br_target_id = pc[ID] + br_offs_i26;
 
 assign br_op_id   = {inst_jirl, inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_bne, inst_beq};

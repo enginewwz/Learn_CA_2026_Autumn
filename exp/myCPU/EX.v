@@ -3,7 +3,7 @@ module EX(
     input  wire        reset,
     input  wire        flush_i,         // global flush
     input  wire        allow_next,      // allow[MEM]
-                                        
+    
     // ID -> EX: combinational at ID
     input  wire [11:0] alu_op_i,
     input  wire [31:0] alu_src1_i,
@@ -91,9 +91,17 @@ localparam CSR_WB = 7;
 reg  [3:0] valid;
 reg  [3:0] alu_pos;
 reg  [3:0] mul_pos;
-reg  [3:0] div_pos;              // this instruction is a div/mod
-wire [2:0] alu_no_mul_shortcut;  // if there is no mul in progress, alu should jump to stage[i]
+reg  [3:0] div_pos;
+wire [2:0] alu_no_mul_div_shortcut;  // if there is no mul/div in progress, alu should jump to stage[i]
+wire [3:0] cur_valid;
 wire [3:0] next_valid;
+wire [3:0] cur_alu_pos;
+wire [3:0] cur_mul_pos;
+wire [3:0] cur_div_pos;
+wire [3:0] next_alu_pos;
+wire [3:0] next_mul_pos;
+wire [3:0] next_div_pos;
+wire [3:0] stall;
 wire [3:0] allow /* verilator split_var */;
 wire       div_hold;        // the stage-0 div cannot start yet, so it must stay
 
@@ -166,22 +174,39 @@ wire [3:0] fw2_hit;
 wire [3:1] fw1_sel;
 wire [3:1] fw2_sel;
 
-assign allow[3] = (allow_next | ~ valid[3]) & ~ stall_div;
-assign allow[2] = allow[3] | ~ valid[2];
-assign allow[1] = allow[2] | ~ valid[1];
-assign allow[0] = (allow[1] & ~ div_hold) | ~ valid[0];
+assign stall[3] = stall_div;
+assign stall[2] = 1'b0;
+assign stall[1] = 1'b0;
+assign stall[0] = div_hold;
+
+// assign allow = ({allow_next, allow[3:1]} | ~ valid) & ~ stall;
+assign allow[3] = (allow_next | ~ valid[3]) & ~ stall[3];
+assign allow[2] = (allow[3]   | ~ valid[2]) & ~ stall[2];
+assign allow[1] = (allow[2]   | ~ valid[1]) & ~ stall[1];
+assign allow[0] = (allow[1]   | ~ valid[0]) & ~ stall[0];
+
 assign stall_o = ~ allow[0];
 
-// a div that has not been started yet has to wait in stage 0 (the divider is
-// still busy with the older div)
-assign div_hold = div_pos[0] & ~ div_started & ~ div_start;
+assign cur_valid = valid & {4{~ flush_i}};
 
-assign next_valid[3] = valid[2] & ~ alu_no_mul_shortcut[2];
-assign next_valid[2] = valid[1] & ~ alu_no_mul_shortcut[1];
-assign next_valid[1] = valid[0] & ~ alu_no_mul_shortcut[0] & ~ div_hold;
-assign next_valid[0] = valid_i;
+// consider alu_no_mul_div_shortcut will happen with allow -> it can be simply placed here instead.
+assign next_valid = {cur_valid[2:0] & ~ stall[2:0] & ~ alu_no_mul_div_shortcut, valid_i} & allow | (~ allow & cur_valid);
+
+// cur here means if not allow will perform as this
+assign cur_alu_pos = alu_pos & {4{~ flush_i}};
+assign cur_mul_pos = mul_pos & {4{~ flush_i}};
+assign cur_div_pos = div_pos & {4{~ flush_i}};
+
+assign next_alu_pos = ({cur_alu_pos[2:0] & ~ stall[2:0] & ~ alu_no_mul_div_shortcut, (~| md_op_i) & valid_i} & allow)
+                    | (~ allow & cur_alu_pos);
+assign next_mul_pos = ({cur_mul_pos[2:0] & ~ stall[2:0], (| md_op_i[2:0]) & valid_i} & allow)
+                    | (~ allow & cur_mul_pos);
+assign next_div_pos = ({cur_div_pos[2:0] & ~ stall[2:0], (| md_op_i[6:3]) & valid_i} & allow)
+                    | (~ allow & cur_div_pos);
 
 assign stall_div = div_pos[3] & div_busy;
+assign div_hold = div_pos[0] & ~ div_started & ~ div_start;
+
 assign div_is_signed = md_op[0][DIV_W] | md_op[0][MOD_W];
 assign div_is_mod    = md_op[3][MOD_W] | md_op[3][MOD_WU];
 assign div_start     = div_pos[0] & ~ div_started & (~ div_pos[3] | div_leave) & ~ div_pos[2] & ~ div_pos[1];
@@ -209,46 +234,25 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (flush_reset) begin
-        valid           <= 4'b0;
+    if (reset) begin
+        valid <= 4'b0;
     end
     else begin
-        if (allow[0]) valid [0] <= next_valid[0];
-        if (allow[1]) valid [1] <= next_valid[1];
-        if (allow[2]) valid [2] <= next_valid[2];
-        if (allow[3]) valid [3] <= next_valid[3];
+        valid <= next_valid;
     end
 end
 
 always @(posedge clk) begin
-    if (flush_reset) begin
+    if (reset) begin
         alu_pos <= 4'b0;
         mul_pos <= 4'b0;
         div_pos <= 4'b0;
     end
     else begin
-        if (allow[0]) begin
-            alu_pos [0] <= (~|     md_op_i) & next_valid[0];
-            mul_pos [0] <= (| md_op_i[2:0]) & next_valid[0];
-            div_pos [0] <= (| md_op_i[6:3]) & next_valid[0];
-        end
-        if (allow[1]) begin
-            alu_pos [1] <= alu_pos [0] & next_valid[1];
-            mul_pos [1] <= mul_pos [0] & next_valid[1];
-            div_pos [1] <= div_pos [0] & next_valid[1];
-        end
-        if (allow[2]) begin
-            alu_pos [2] <= alu_pos [1] & next_valid[2];
-            mul_pos [2] <= mul_pos [1] & next_valid[2];
-            div_pos [2] <= div_pos [1] & next_valid[2];
-        end
-        if (allow[3]) begin
-            alu_pos [3] <= alu_pos [2] & next_valid[3];
-            mul_pos [3] <= mul_pos [2] & next_valid[3];
-            div_pos [3] <= div_pos [2] & next_valid[3];
-        end
+        alu_pos <= next_alu_pos;
+        mul_pos <= next_mul_pos;
+        div_pos <= next_div_pos;
     end
-    
 end
 
 always @(posedge clk) begin
@@ -271,7 +275,6 @@ always @(posedge clk) begin
         csr_wdata    [0] <= csr_wdata_i;
         csr_mask     [0] <= csr_mask_i;
     end
-
 
     if (allow[1]) begin
         pc           [1] <= pc           [0];
@@ -334,17 +337,17 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (flush_reset)                         div_started <= 1'b0;
+    if (reset)                               div_started <= 1'b0;
     else if (div_start & ~ allow[1])         div_started <= 1'b1;
     else if (allow[1])                       div_started <= 1'b0;
 end
 
-assign alu_no_mul_shortcut[2] = (~ mul_pos[3])   & (~ div_pos[3])   & alu_pos[2] & (~|alu_pos[  3]) & allow_next;
-assign alu_no_mul_shortcut[1] = (~|mul_pos[3:2]) & (~|div_pos[3:2]) & alu_pos[1] & (~|alu_pos[3:2]) & allow_next;
-assign alu_no_mul_shortcut[0] = (~|mul_pos[3:1]) & (~|div_pos[3:1]) & alu_pos[0] & (~|alu_pos[3:1]) & allow_next;
+assign alu_no_mul_div_shortcut[2] = (~ mul_pos[3])   & (~ div_pos[3])   & alu_pos[2] & (~|alu_pos[  3]) & allow_next;
+assign alu_no_mul_div_shortcut[1] = (~|mul_pos[3:2]) & (~|div_pos[3:2]) & alu_pos[1] & (~|alu_pos[3:2]) & allow_next;
+assign alu_no_mul_div_shortcut[0] = (~|mul_pos[3:1]) & (~|div_pos[3:1]) & alu_pos[0] & (~|alu_pos[3:1]) & allow_next;
 
 assign out_sel[3]   = valid[3] & ~ stall_div;
-assign out_sel[2:0] = alu_no_mul_shortcut;
+assign out_sel[2:0] = alu_no_mul_div_shortcut;
 
 assign valid_o        = | out_sel;
 assign pc_o           = ({32{out_sel[0]}} & pc        [0]) | ({32{out_sel[1]}} & pc        [1]) | ({32{out_sel[2]}} & pc        [2]) | ({32{out_sel[3]}} & pc        [3]);
@@ -379,7 +382,7 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
                         result3;
 
 always @(posedge clk) begin
-    if (flush_reset)        br_valid <= 1'b0;
+    if (reset)              br_valid <= 1'b0;
     else if (allow[0])      br_valid <= | br_op_i;   // a branch entered stage 0
     else if (allow[1])      br_valid <= 1'b0;        // it left without firing
     else if (br_taken)      br_valid <= 1'b0;        // held, but already fired
@@ -458,7 +461,7 @@ alu u_alu(
 // result is stable by the time it reaches the EX output mux
 mul u_mul(
     .clk    (clk                ),
-    .reset  (flush_reset       ),
+    .reset  (reset              ),
     .allow  (allow[3:1]         ),
     .src1   (alu_src1           ),
     .src2   (alu_src2           ),
@@ -470,7 +473,7 @@ mul u_mul(
 // done is left open on purpose: it is a pulse, ~busy is what stage 2 waits for.
 div u_div(
     .clk       (clk         ),
-    .reset     (flush_reset),
+    .reset     (flush_reset ),
     .start     (div_start   ),
     .is_signed (div_is_signed),
     .src1      (alu_src1    ),
