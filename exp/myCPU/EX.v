@@ -88,13 +88,13 @@ localparam CSR_WB = 7;
 
 // stage flags: exactly one of alu_pos / mul_pos / div_pos is set per stage, and
 // flag <=> valid holds for every stage
-reg  [2:0] valid;
-reg  [2:0] alu_pos;
-reg  [2:0] mul_pos;
-reg  [2:0] div_pos;              // this instruction is a div/mod
-wire [1:0] alu_no_mul_shortcut;  // if there is no mul in progress, alu should jump to stage[i]
-wire [2:0] next_valid;
-wire [2:0] allow /* verilator split_var */;
+reg  [3:0] valid;
+reg  [3:0] alu_pos;
+reg  [3:0] mul_pos;
+reg  [3:0] div_pos;              // this instruction is a div/mod
+wire [2:0] alu_no_mul_shortcut;  // if there is no mul in progress, alu should jump to stage[i]
+wire [3:0] next_valid;
+wire [3:0] allow /* verilator split_var */;
 wire       div_hold;        // the stage-0 div cannot start yet, so it must stay
 
 // ID -> EX payload, registered in stage 0
@@ -105,39 +105,41 @@ reg  [ 6:0] br_op;
 reg  [31:0] br_base;
 reg  [31:0] br_offs;
 
-reg  [31:0] alu_result   [2:0];
+reg  [31:0] alu_result   [3:0];
 
 // One-hot view of which EX stage drives the EX -> MEM interface this cycle.
-wire [2:0] out_sel;
+wire [3:0] out_sel;
 
 // the instruction's fields, one entry per stage it is still live in
-reg  [ 2:0] src1_used         ;
-reg  [ 2:0] src2_used         ;
-reg  [31:0] pc           [2:0];
-reg  [ 6:0] md_op        [2:0];
-reg  [ 2:0] res_from_mem      ;
-reg  [ 2:0] mem_we            ;
-reg  [ 2:0] mem_en            ;
-reg  [31:0] mem_wdata    [2:0];
-reg  [ 2:0] mem_size     [2:0];   // one-hot: SIZE_BYTE / SIZE_HALF / SIZE_WORD
-reg  [ 2:0] mem_zext          ;   // the load zero-extends (ld.bu / ld.hu)
-reg  [ 2:0] gr_we             ;
-reg  [ 4:0] dest         [2:0];
+reg  [ 3:0] src1_used         ;
+reg  [ 3:0] src2_used         ;
+reg  [31:0] pc           [3:0];
+reg  [ 6:0] md_op        [3:0];
+reg  [ 3:0] res_from_mem      ;
+reg  [ 3:0] mem_we            ;
+reg  [ 3:0] mem_en            ;
+reg  [31:0] mem_wdata    [3:0];
+reg  [ 2:0] mem_size     [3:0];   // one-hot: SIZE_BYTE / SIZE_HALF / SIZE_WORD
+reg  [ 3:0] mem_zext          ;   // the load zero-extends (ld.bu / ld.hu)
+reg  [ 3:0] gr_we             ;
+reg  [ 4:0] dest         [3:0];
 
 // CSR / exception payload, shifted alongside the fields above
-reg  [13:0] csr_num      [2:0];
-reg  [ 7:0] csr_ctl      [2:0];
-reg  [ 5:0] excp_cause   [2:0];
-reg  [31:0] csr_wdata    [2:0];
-reg  [31:0] csr_mask     [2:0];
+reg  [13:0] csr_num      [3:0];
+reg  [ 7:0] csr_ctl      [3:0];
+reg  [ 5:0] excp_cause   [3:0];
+reg  [31:0] csr_wdata    [3:0];
+reg  [31:0] csr_mask     [3:0];
 
 // unit results
 wire [31:0] alu_result_wire;
 wire [31:0] mul_result_wire;
 wire [31:0] div_result;
-wire        sel_alu2;
-wire        sel_mul2;
-wire        sel_div2;
+wire        sel_alu3;
+wire        sel_mul3;
+wire        sel_div3;
+
+wire [31:0] result3;
 
 // div handshake
 wire        div_busy;
@@ -157,14 +159,15 @@ wire [31:0] br_target;
 reg         br_valid;
 
 // EX -> ID forwarding, one group per stage (stage 0 is the youngest)
-wire [2:0] will_write;
-wire [2:1] can_supply;
-wire [2:0] fw1_hit;
-wire [2:0] fw2_hit;
-wire [2:1] fw1_sel;
-wire [2:1] fw2_sel;
+wire [3:0] will_write;
+wire [3:1] can_supply;
+wire [3:0] fw1_hit;
+wire [3:0] fw2_hit;
+wire [3:1] fw1_sel;
+wire [3:1] fw2_sel;
 
-assign allow[2] = (allow_next | ~ valid[2]) & ~ stall_div;
+assign allow[3] = (allow_next | ~ valid[3]) & ~ stall_div;
+assign allow[2] = allow[3] | ~ valid[2];
 assign allow[1] = allow[2] | ~ valid[1];
 assign allow[0] = (allow[1] & ~ div_hold) | ~ valid[0];
 assign stall_o = ~ allow[0];
@@ -173,15 +176,16 @@ assign stall_o = ~ allow[0];
 // still busy with the older div)
 assign div_hold = div_pos[0] & ~ div_started & ~ div_start;
 
+assign next_valid[3] = valid[2] & ~ alu_no_mul_shortcut[2];
 assign next_valid[2] = valid[1] & ~ alu_no_mul_shortcut[1];
 assign next_valid[1] = valid[0] & ~ alu_no_mul_shortcut[0] & ~ div_hold;
 assign next_valid[0] = valid_i;
 
-assign stall_div = div_pos[2] & div_busy;
+assign stall_div = div_pos[3] & div_busy;
 assign div_is_signed = md_op[0][DIV_W] | md_op[0][MOD_W];
-assign div_is_mod    = md_op[2][MOD_W] | md_op[2][MOD_WU];
-assign div_start     = div_pos[0] & ~ div_started & (~ div_pos[2] | div_leave) & ~ div_pos[1];
-assign div_leave     = div_pos[2] & ~ div_busy & allow_next;
+assign div_is_mod    = md_op[3][MOD_W] | md_op[3][MOD_WU];
+assign div_start     = div_pos[0] & ~ div_started & (~ div_pos[3] | div_leave) & ~ div_pos[2] & ~ div_pos[1];
+assign div_leave     = div_pos[3] & ~ div_busy & allow_next;
 
 always @(posedge clk) begin
     if (allow[0]) begin
@@ -201,24 +205,26 @@ end
 always @(posedge clk) begin
     if (allow[1]) alu_result [1] <= alu_result [0];
     if (allow[2]) alu_result [2] <= alu_result [1];
+    if (allow[3]) alu_result [3] <= alu_result [2];
 end
 
 always @(posedge clk) begin
     if (flush_reset) begin
-        valid           <= 3'b0;
+        valid           <= 4'b0;
     end
     else begin
         if (allow[0]) valid [0] <= next_valid[0];
         if (allow[1]) valid [1] <= next_valid[1];
         if (allow[2]) valid [2] <= next_valid[2];
+        if (allow[3]) valid [3] <= next_valid[3];
     end
 end
 
 always @(posedge clk) begin
     if (flush_reset) begin
-        alu_pos <= 3'b0;
-        mul_pos <= 3'b0;
-        div_pos <= 3'b0;
+        alu_pos <= 4'b0;
+        mul_pos <= 4'b0;
+        div_pos <= 4'b0;
     end
     else begin
         if (allow[0]) begin
@@ -235,6 +241,11 @@ always @(posedge clk) begin
             alu_pos [2] <= alu_pos [1] & next_valid[2];
             mul_pos [2] <= mul_pos [1] & next_valid[2];
             div_pos [2] <= div_pos [1] & next_valid[2];
+        end
+        if (allow[3]) begin
+            alu_pos [3] <= alu_pos [2] & next_valid[3];
+            mul_pos [3] <= mul_pos [2] & next_valid[3];
+            div_pos [3] <= div_pos [2] & next_valid[3];
         end
     end
     
@@ -301,6 +312,25 @@ always @(posedge clk) begin
         csr_wdata    [2] <= csr_wdata    [1];
         csr_mask     [2] <= csr_mask     [1];
     end
+    if (allow[3]) begin
+        pc           [3] <= pc           [2];
+        src1_used    [3] <= src1_used    [2];
+        src2_used    [3] <= src2_used    [2];
+        md_op        [3] <= md_op        [2];
+        res_from_mem [3] <= res_from_mem [2];
+        mem_we       [3] <= mem_we       [2];
+        mem_en       [3] <= mem_en       [2];
+        mem_wdata    [3] <= mem_wdata    [2];
+        mem_size     [3] <= mem_size     [2];
+        mem_zext     [3] <= mem_zext     [2];
+        gr_we        [3] <= gr_we        [2];
+        dest         [3] <= dest         [2];
+        csr_num      [3] <= csr_num      [2];
+        csr_ctl      [3] <= csr_ctl      [2];
+        excp_cause   [3] <= excp_cause   [2];
+        csr_wdata    [3] <= csr_wdata    [2];
+        csr_mask     [3] <= csr_mask     [2];
+    end
 end
 
 always @(posedge clk) begin
@@ -309,42 +339,44 @@ always @(posedge clk) begin
     else if (allow[1])                       div_started <= 1'b0;
 end
 
-assign alu_no_mul_shortcut[1] = (~ mul_pos[2])   & (~ div_pos[2])   & alu_pos[1] & (~|alu_pos[  2]) & allow_next;
-assign alu_no_mul_shortcut[0] = (~|mul_pos[2:1]) & (~|div_pos[2:1]) & alu_pos[0] & (~|alu_pos[2:1]) & allow_next;
+assign alu_no_mul_shortcut[2] = (~ mul_pos[3])   & (~ div_pos[3])   & alu_pos[2] & (~|alu_pos[  3]) & allow_next;
+assign alu_no_mul_shortcut[1] = (~|mul_pos[3:2]) & (~|div_pos[3:2]) & alu_pos[1] & (~|alu_pos[3:2]) & allow_next;
+assign alu_no_mul_shortcut[0] = (~|mul_pos[3:1]) & (~|div_pos[3:1]) & alu_pos[0] & (~|alu_pos[3:1]) & allow_next;
 
-assign out_sel[2]   = valid[2] & ~ stall_div;
-assign out_sel[1:0] = alu_no_mul_shortcut;
+assign out_sel[3]   = valid[3] & ~ stall_div;
+assign out_sel[2:0] = alu_no_mul_shortcut;
 
 assign valid_o        = | out_sel;
-assign pc_o           = ({32{out_sel[0]}} & pc        [0]) | ({32{out_sel[1]}} & pc        [1]) | ({32{out_sel[2]}} & pc        [2]);
-assign src1_used_o    = (out_sel[0] & src1_used       [0]) | (out_sel[1] & src1_used       [1]) | (out_sel[2] & src1_used       [2]);
-assign src2_used_o    = (out_sel[0] & src2_used       [0]) | (out_sel[1] & src2_used       [1]) | (out_sel[2] & src2_used       [2]);
-assign res_from_mem_o = (out_sel[0] & res_from_mem    [0]) | (out_sel[1] & res_from_mem    [1]) | (out_sel[2] & res_from_mem    [2]);
-assign mem_we_o       = (out_sel[0] & mem_we          [0]) | (out_sel[1] & mem_we          [1]) | (out_sel[2] & mem_we          [2]);
-assign mem_en_o       = (out_sel[0] & mem_en          [0]) | (out_sel[1] & mem_en          [1]) | (out_sel[2] & mem_en          [2]);
-assign mem_wdata_o    = ({32{out_sel[0]}} & mem_wdata [0]) | ({32{out_sel[1]}} & mem_wdata [1]) | ({32{out_sel[2]}} & mem_wdata [2]);
-assign mem_size_o     = ({ 3{out_sel[0]}} & mem_size  [0]) | ({ 3{out_sel[1]}} & mem_size  [1]) | ({ 3{out_sel[2]}} & mem_size  [2]);
-assign mem_zext_o     = (out_sel[0] & mem_zext        [0]) | (out_sel[1] & mem_zext        [1]) | (out_sel[2] & mem_zext        [2]);
-assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]);
-assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]);
+assign pc_o           = ({32{out_sel[0]}} & pc        [0]) | ({32{out_sel[1]}} & pc        [1]) | ({32{out_sel[2]}} & pc        [2]) | ({32{out_sel[3]}} & pc        [3]);
+assign src1_used_o    = (out_sel[0] & src1_used       [0]) | (out_sel[1] & src1_used       [1]) | (out_sel[2] & src1_used       [2]) | (out_sel[3] & src1_used       [3]);
+assign src2_used_o    = (out_sel[0] & src2_used       [0]) | (out_sel[1] & src2_used       [1]) | (out_sel[2] & src2_used       [2]) | (out_sel[3] & src2_used       [3]);
+assign res_from_mem_o = (out_sel[0] & res_from_mem    [0]) | (out_sel[1] & res_from_mem    [1]) | (out_sel[2] & res_from_mem    [2]) | (out_sel[3] & res_from_mem    [3]);
+assign mem_we_o       = (out_sel[0] & mem_we          [0]) | (out_sel[1] & mem_we          [1]) | (out_sel[2] & mem_we          [2]) | (out_sel[3] & mem_we          [3]);
+assign mem_en_o       = (out_sel[0] & mem_en          [0]) | (out_sel[1] & mem_en          [1]) | (out_sel[2] & mem_en          [2]) | (out_sel[3] & mem_en          [3]);
+assign mem_wdata_o    = ({32{out_sel[0]}} & mem_wdata [0]) | ({32{out_sel[1]}} & mem_wdata [1]) | ({32{out_sel[2]}} & mem_wdata [2]) | ({32{out_sel[3]}} & mem_wdata [3]);
+assign mem_size_o     = ({ 3{out_sel[0]}} & mem_size  [0]) | ({ 3{out_sel[1]}} & mem_size  [1]) | ({ 3{out_sel[2]}} & mem_size  [2]) | ({ 3{out_sel[3]}} & mem_size  [3]);
+assign mem_zext_o     = (out_sel[0] & mem_zext        [0]) | (out_sel[1] & mem_zext        [1]) | (out_sel[2] & mem_zext        [2]) | (out_sel[3] & mem_zext        [3]);
+assign gr_we_o        = (out_sel[0] & gr_we           [0]) | (out_sel[1] & gr_we           [1]) | (out_sel[2] & gr_we           [2]) | (out_sel[3] & gr_we           [3]);
+assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} & dest      [1]) | ({ 5{out_sel[2]}} & dest      [2]) | ({ 5{out_sel[3]}} & dest      [3]);
 
 // payload rides along with whichever stage drives the output
-assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]) | ({14{out_sel[2]}} & csr_num  [2]);
-assign csr_ctl_o      = ({ 8{out_sel[0]}} & csr_ctl  [0]) | ({ 8{out_sel[1]}} & csr_ctl  [1]) | ({ 8{out_sel[2]}} & csr_ctl  [2]);
-assign excp_cause_o   = ({ 6{out_sel[0]}} & excp_cause[0]) | ({ 6{out_sel[1]}} & excp_cause[1]) | ({ 6{out_sel[2]}} & excp_cause[2]);
-assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]);
-assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]) | ({32{out_sel[2]}} & csr_mask [2]);
+assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]) | ({14{out_sel[2]}} & csr_num  [2]) | ({14{out_sel[3]}} & csr_num  [3]);
+assign csr_ctl_o      = ({ 8{out_sel[0]}} & csr_ctl  [0]) | ({ 8{out_sel[1]}} & csr_ctl  [1]) | ({ 8{out_sel[2]}} & csr_ctl  [2]) | ({ 8{out_sel[3]}} & csr_ctl  [3]);
+assign excp_cause_o   = ({ 6{out_sel[0]}} & excp_cause[0]) | ({ 6{out_sel[1]}} & excp_cause[1]) | ({ 6{out_sel[2]}} & excp_cause[2]) | ({ 6{out_sel[3]}} & excp_cause[3]);
+assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]) | ({32{out_sel[3]}} & csr_wdata[3]);
+assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]) | ({32{out_sel[2]}} & csr_mask [2]) | ({32{out_sel[3]}} & csr_mask [3]);
 
 assign div_result = ({32{div_is_mod}} & div_rem) | ({32{~ div_is_mod}} & div_quot);
-assign sel_alu2   = out_sel[2] & alu_pos[2];
-assign sel_mul2   = out_sel[2] & mul_pos[2];
-assign sel_div2   = out_sel[2] & div_pos[2];
+assign sel_alu3   = out_sel[3] & alu_pos[3];
+assign sel_mul3   = out_sel[3] & mul_pos[3];
+assign sel_div3   = out_sel[3] & div_pos[3];
+
+assign result3 = ({32{sel_alu3}} & alu_result[3]) | ({32{sel_mul3}} & mul_result_wire) | ({32{sel_div3}} & div_result);
 
 assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
                         ({32{out_sel[1]}} & alu_result[1])   |
-                        ({32{sel_alu2}}   & alu_result[2])   |
-                        ({32{sel_mul2}}   & mul_result_wire) |
-                        ({32{sel_div2}}   & div_result);
+                        ({32{out_sel[2]}} & alu_result[2])   |
+                        result3;
 
 always @(posedge clk) begin
     if (flush_reset)        br_valid <= 1'b0;
@@ -378,16 +410,21 @@ assign br_target_o = br_target;
 assign will_write = valid & gr_we;
 
 // csr insts are seen as alu insts here, thus should not forward
-assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1]
-                  & ~ {csr_ctl[2][CSR_WB], csr_ctl[1][CSR_WB]};
+// stage 3 is the EX output, so all three results (alu / mul / div) can be
+// forwarded from there; the younger stages only have the registered ALU result
+assign can_supply[3] = gr_we[3] & ~ mem_en[3] & ~ stall_div & ~ csr_ctl[3][CSR_WB];
+assign can_supply[2] = gr_we[2] & ~ mem_en[2] & alu_pos[2] & ~ csr_ctl[2][CSR_WB];
+assign can_supply[1] = gr_we[1] & ~ mem_en[1] & alu_pos[1] & ~ csr_ctl[1][CSR_WB];
 
 assign fw1_hit = {
+    src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[3]) && will_write[3],
     src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[2]) && will_write[2],
     src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[1]) && will_write[1],
     src1_used_i && (fw_raddr1_i != 5'd0) && (fw_raddr1_i == dest[0]) && will_write[0]
 };
 
 assign fw2_hit = {
+    src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[3]) && will_write[3],
     src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[2]) && will_write[2],
     src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[1]) && will_write[1],
     src2_used_i && (fw_raddr2_i != 5'd0) && (fw_raddr2_i == dest[0]) && will_write[0]
@@ -395,16 +432,20 @@ assign fw2_hit = {
 
 // the youngest hit wins; stage 0 never supplies (its ALU result is not
 // registered yet), so a stage-0 hit selects nothing and ID waits for MEM
-assign fw1_sel = fw1_hit[0] ? 2'b00 : fw1_hit[1] ? 2'b01 : fw1_hit[2] ? 2'b10 : 2'b00;
-assign fw2_sel = fw2_hit[0] ? 2'b00 : fw2_hit[1] ? 2'b01 : fw2_hit[2] ? 2'b10 : 2'b00;
+assign fw1_sel = fw1_hit[0] ? 3'b000 : fw1_hit[1] ? 3'b001 : fw1_hit[2] ? 3'b010 : fw1_hit[3] ? 3'b100 : 3'b000;
+assign fw2_sel = fw2_hit[0] ? 3'b000 : fw2_hit[1] ? 3'b001 : fw2_hit[2] ? 3'b010 : fw2_hit[3] ? 3'b100 : 3'b000;
 
 assign fw1_hit_o   = | fw1_hit;
 assign fw2_hit_o   = | fw2_hit;
-assign fw1_valid_o = (fw1_sel[1] & can_supply[1]) | (fw1_sel[2] & can_supply[2]);
-assign fw2_valid_o = (fw2_sel[1] & can_supply[1]) | (fw2_sel[2] & can_supply[2]);
+assign fw1_valid_o = | (fw1_sel & can_supply);
+assign fw2_valid_o = | (fw2_sel & can_supply);
 
-assign fw1_data_o  = ({32{fw1_sel[1]}} & alu_result[1]) | ({32{fw1_sel[2]}} & alu_result[2]);
-assign fw2_data_o  = ({32{fw2_sel[1]}} & alu_result[1]) | ({32{fw2_sel[2]}} & alu_result[2]);
+assign fw1_data_o  = ({32{fw1_sel[1]}} & alu_result[1]) |
+                     ({32{fw1_sel[2]}} & alu_result[2]) |
+                     ({32{fw1_sel[3]}} & result3);
+assign fw2_data_o  = ({32{fw2_sel[1]}} & alu_result[1]) |
+                     ({32{fw2_sel[2]}} & alu_result[2]) |
+                     ({32{fw2_sel[3]}} & result3);
 
 alu u_alu(
     .alu_op     (alu_op         ),
@@ -413,19 +454,19 @@ alu u_alu(
     .alu_result (alu_result_wire)
 );
 
-// mul: 2 internal stages (EX stages 1 and 2); its combinational CPA output is
-// already valid at EX stage 2 and goes straight to MEM
+// mul: 3 internal stages (EX stages 1..3); its CPA output is registered, so the
+// result is stable by the time it reaches the EX output mux
 mul u_mul(
     .clk    (clk                ),
     .reset  (flush_reset       ),
-    .allow  (allow[2:1]         ),
+    .allow  (allow[3:1]         ),
     .src1   (alu_src1           ),
     .src2   (alu_src2           ),
     .md_op  (md_op[0]           ),
     .result (mul_result_wire    )
 );
 
-// div: blocking, fed with the stage-0 operands, result read out at stage 2.
+// div: blocking, fed with the stage-0 operands, result read out at stage 3.
 // done is left open on purpose: it is a pulse, ~busy is what stage 2 waits for.
 div u_div(
     .clk       (clk         ),

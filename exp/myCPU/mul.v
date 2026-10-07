@@ -3,9 +3,9 @@
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
 //        -> s0: Booth encode (17 digits) + partial products + Wallace L1..L2
 //        -> s1: Wallace L3..L6                              (8 -> 2 vectors)
-//        -> sel: final CPA + high/low select (combinational, register it outside)
+//        -> s2: final CPA + high/low select, registered
 //
-// stall[1:0]: stage k is frozen while stall[k]; one bit per internal stage.
+// stall[2:0]: stage k is frozen while stall[k]; one bit per internal stage.
 // There is no valid here - the caller tracks positions (mul_pos).
 //
 // md_op is the one-hot mul/div select shared with the top:
@@ -27,7 +27,7 @@
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 1:0] allow,
+    input  wire [ 2:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -66,7 +66,8 @@ wire [63:0] wsum, wcarry;
 wire [63:0] prod;
 
 // output
-reg  [31:0] sel;
+reg  [31:0] sel;               // combinational CPA + select
+reg  [31:0] result_r;             // registered result, aligned with EX stage 3
 
 genvar  g;
 integer k;
@@ -179,7 +180,8 @@ always @(posedge clk) begin
     end
 end
 
-// output (combinational): one CPA + high/low select; the caller registers sel
+// final CPA + high/low select, then one register so that the 14-level CPA ->
+// pipeline-register path is split
 assign prod = ws2 + wc2;
 
 always @(*) begin
@@ -190,7 +192,13 @@ always @(*) begin
         default      : sel = prod[31:0];
     endcase
 end
-assign result = sel;
+
+always @(posedge clk) begin
+    if (reset)         result_r <= 32'b0;
+    else if (allow[2]) result_r <= sel;
+end
+
+assign result = result_r;
 
 endmodule
 

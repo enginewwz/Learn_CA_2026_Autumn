@@ -279,8 +279,9 @@ initial begin
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd17);
     chk(!valid_o, "mul not ready right after entry");
     step; chk(!valid_o, "mul at stage 1");
+    step; chk(!valid_o, "mul at stage 2");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd17),
-              "mul reached stage 2");
+              "mul reached stage 3");
     step; chk(!valid_o, "mul left EX for MEM (allow_next = 1)");
     step; step;
     chk(!valid_o, "nothing left in EX after the mul drained (no stage-0 copy)");
@@ -291,30 +292,31 @@ initial begin
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd9);
     chk(!valid_o, "mul.w not ready at stage 0");
     step; chk(!valid_o, "mul.w not ready at stage 1");
+    step; chk(!valid_o, "mul.w not ready at stage 2");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd9),
-              "mul.w low word at stage 2 (comb to MEM)");
+              "mul.w low word at stage 3 (registered)");
     repeat (2) step;
 
     // --------------------------------------------------------------- mulh.w
     A = 32'hdead_beef; B = 32'h8000_0001;
     send(12'b0, 7'b1 << MULH_W, A, B, 5'd11);
-    step; step;
+    step; step; step;
     chk(valid_o && (ex_result === mhi(A, B)), "mulh.w signed high word");
     repeat (2) step;
 
     // -------------------------------------------------------------- mulh.wu
     send(12'b0, 7'b1 << MULH_WU, A, B, 5'd11);
-    step; step;
+    step; step; step;
     chk(valid_o && (ex_result === mhiu(A, B)), "mulh.wu unsigned high word");
     repeat (2) step;
 
     // ------------------------------------------- mul frozen by allow_next=0
     A = 32'h7fff_ffff; B = 32'h7fff_ffff;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd4);
-    step; step;                 // -> stage 1, stage 2
+    step; step; step;           // -> stage 1, stage 2, stage 3
     allow_next = 1'b0;
-    step;                       // held at stage 2
-    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 2 under back-pressure");
+    step;                       // held at stage 3
+    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 3 under back-pressure");
     step;                       // still frozen, value must survive
     chk(valid_o && (ex_result === mlo(A, B)), "mul value stable while stalled");
     allow_next = 1'b1;
@@ -325,8 +327,8 @@ initial begin
     A = 32'h0000_ffff; B = 32'h0001_0000;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd6);          // mul, stage 0 next cycle
     send(12'b1 << 6, 7'b0, 32'hf0f0_f0f0, 32'h0f0f_0f0f, 5'd8); // ALU right behind
-    // after the two sends: mul@1, alu@0 -> 1 step puts the mul at stage 2
-    step;
+    // after the two sends: mul@1, alu@0 -> 2 steps put the mul at stage 3
+    step; step;
     chk(valid_o && (dest_o === 5'd6) && (ex_result === mlo(A, B)),
         "mul in front drives the output, not the younger ALU");
     step;
@@ -366,8 +368,10 @@ initial begin
     // div that sits in stage 0 must be started exactly once.
     A = 32'd100; B = 32'd7;
     allow_next = 1'b0;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 3
+    step; step; step;
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 2
-    step; step;
+    step;
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: and one in stage 1
     div_starts = 0; div_watch = 1'b1;
     send(12'b0, 7'b1 << DIV_W, A, B, 5'd15);      // div lands in stage 0, blocked
@@ -451,8 +455,10 @@ initial begin
     // until the pipeline moves, but must not flush the target instruction again.
     A = 32'h1c004000; B = 32'h8;
     allow_next = 1'b0;
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 3
+    step; step; step;
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: park one in stage 2
-    step; step;
+    step;
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // and: and one in stage 1
     send_br(7'b1 << BEQ, 32'd7, 32'd7, A, B);     // branch lands in stage 0, held
     chk(br_taken_o && (br_target_o === (A + B)), "held branch redirects right away");
@@ -475,17 +481,20 @@ initial begin
     chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 1 supplies");
     step;
     chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 2 supplies");
+    step;
+    chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 3 supplies (from the output mux)");
     allow_next = 1'b1;
     repeat (2) step;
 
-    // mul never forwards from EX: it stays "pending" until it reaches MEM
+    // the mul result is registered at stage 3, so only the output stage forwards
     A = 32'h0000_0003; B = 32'h0000_0005;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
     chk(fw1_hit_o && !fw1_valid_o, "mul stage 0 pending (will write, not ready)");
     step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 1 pending");
     step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 2 pending");
-    step; chk(fw1_hit_o && !fw1_valid_o, "mul still pending while handing to MEM");
+    step; chk(fw1_hit_o && fw1_valid_o && (fw1_data_o === mlo(A, B)),
+              "mul supplies from stage 3");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -536,11 +545,11 @@ initial begin
     step;
     flush_i = 1'b0;
     chk(!valid_o, "flush empties EX");
-    chk(!u_ex.mul_pos[0] && !u_ex.mul_pos[1] && !u_ex.mul_pos[2], "flush clears mul_pos");
+    chk(!u_ex.mul_pos[0] && !u_ex.mul_pos[1] && !u_ex.mul_pos[2] && !u_ex.mul_pos[3], "flush clears mul_pos");
     allow_next = 1'b1;
     repeat (2) step;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd25);
-    step; step;
+    step; step; step;
     chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd25),
         "a mul after the flush is clean");
     repeat (2) step;
