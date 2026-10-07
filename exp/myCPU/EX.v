@@ -1,25 +1,16 @@
 module EX(
     input  wire        clk,
     input  wire        reset,
-    input  wire        flush_i,         // global flush: everything in EX is younger
-                                        // than the redirect, so EX is reset wholesale
+    input  wire        flush_i,         // global flush
     input  wire        allow_next,      // allow[MEM]
                                         
     // ID -> EX: combinational at ID
     input  wire [11:0] alu_op_i,
     input  wire [31:0] alu_src1_i,
     input  wire [31:0] alu_src2_i,
-    input  wire [ 6:0] br_op_i,         // branch payload, registered with the ALU operands
+    input  wire [ 6:0] br_op_i,         // branch payload
     input  wire [31:0] br_base_i,
     input  wire [31:0] br_offs_i,
-
-    // exp12/13: CSR / exception payload; like the stage fields below it is
-    // latched in stage 0 and shifted to stage 1/2 together with the instruction
-    input  wire [13:0] csr_num_i,
-    input  wire [ 7:0] csr_ctl_i,
-    input  wire [ 5:0] excp_cause_i,
-    input  wire [31:0] csr_wdata_i,
-    input  wire [31:0] csr_mask_i,
 
     // should be stored through out the stages
     input  wire        valid_i,
@@ -36,6 +27,13 @@ module EX(
     input  wire        gr_we_i,
     input  wire [ 4:0] dest_i,
 
+    // CSR / exception payload
+    input  wire [13:0] csr_num_i,
+    input  wire [ 7:0] csr_ctl_i,
+    input  wire [ 5:0] excp_cause_i,
+    input  wire [31:0] csr_wdata_i,
+    input  wire [31:0] csr_mask_i,
+
     // EX -> MEM: combinational, the MEM stage registers them on allow[MEM]
     output wire [31:0] pc_o,
     output wire        src1_used_o,
@@ -49,7 +47,7 @@ module EX(
     output wire        gr_we_o,
     output wire [ 4:0] dest_o,
 
-    // exp12/13 payload, aligned with the stage that drives EX -> MEM
+    // payload, aligned with the stage that drives EX -> MEM
     output wire [13:0] csr_num_o,
     output wire [ 7:0] csr_ctl_o,
     output wire [ 5:0] excp_cause_o,
@@ -65,10 +63,7 @@ module EX(
     output wire        br_taken_o,
     output wire [31:0] br_target_o,
 
-    // EX -> ID forwarding.  EX resolves its own stages here; the top only sees,
-    // per operand, whether the register the ID instruction reads is written by
-    // something in EX (hit), whether that value is ready yet (valid) and the
-    // value itself (a hit that is not valid yet makes ID wait for MEM).
+    // EX -> ID forwarding
     input  wire [ 4:0] fw_raddr1_i,   // the source registers the ID instruction reads
     input  wire [ 4:0] fw_raddr2_i,
     output wire        fw1_hit_o,     // ID src1 matches a register that EX will write
@@ -88,17 +83,8 @@ localparam MOD_W    = 4;
 localparam DIV_WU   = 5;
 localparam MOD_WU   = 6;
 
-// csr_ctl[CSR_WB] means "the write-back value comes from the CSR file at WB",
-// i.e. the ALU result must never be forwarded for it.  It is decoded once at ID.
-// NOTE: this bit index must stay in step with mycpu_top.v.
+// csr_ctl[CSR_WB] means "the write-back value comes from the CSR file at WB"
 localparam CSR_WB = 7;
-
-// EX is three stages (0..2). The multiplier has two internal register stages, so
-// with the stage-0 operand register its result is already combinational when the
-// instruction is in stage 2, and MEM registers it itself (ex_result_mem)
-
-// mul / div results are therefore NOT forwarded inside EX: their consumers wait
-// until the value is in MEM.
 
 // stage flags: exactly one of alu_pos / mul_pos / div_pos is set per stage, and
 // flag <=> valid holds for every stage
@@ -122,8 +108,6 @@ reg  [31:0] br_offs;
 reg  [31:0] alu_result   [2:0];
 
 // One-hot view of which EX stage drives the EX -> MEM interface this cycle.
-// Normally that is stage 2; an ALU result that is already the oldest
-// instruction in EX may leave from stage 1/0 instead (short-circuit).
 wire [2:0] out_sel;
 
 // the instruction's fields, one entry per stage it is still live in
@@ -140,7 +124,7 @@ reg  [ 2:0] mem_zext          ;   // the load zero-extends (ld.bu / ld.hu)
 reg  [ 2:0] gr_we             ;
 reg  [ 4:0] dest         [2:0];
 
-// exp12/13: CSR / exception payload, shifted alongside the fields above
+// CSR / exception payload, shifted alongside the fields above
 reg  [13:0] csr_num      [2:0];
 reg  [ 7:0] csr_ctl      [2:0];
 reg  [ 5:0] excp_cause   [2:0];
@@ -163,9 +147,7 @@ wire        stall_div;           // stage-2 div that is still computing
 wire        div_is_signed, div_is_mod;
 wire        div_start, div_leave;
 
-// mul / div have no flush of their own: a global flush resets them outright.
-// This is safe because a flush only ever kills instructions younger than the
-// redirect, i.e. everything then inside EX.
+// global flush
 wire        flush_reset;
 assign      flush_reset = reset | flush_i;
 
@@ -188,7 +170,7 @@ assign allow[0] = (allow[1] & ~ div_hold) | ~ valid[0];
 assign stall_o = ~ allow[0];
 
 // a div that has not been started yet has to wait in stage 0 (the divider is
-// still busy with the older div), so stage 0 must not be reloaded meanwhile
+// still busy with the older div)
 assign div_hold = div_pos[0] & ~ div_started & ~ div_start;
 
 assign next_valid[2] = valid[1] & ~ alu_no_mul_shortcut[1];
@@ -226,9 +208,7 @@ always @(posedge clk) begin
         valid           <= 3'b0;
     end
     else begin
-        if (allow[0])                valid [0] <= next_valid[0];
-
-        // a short-circuited stage hands its instruction to MEM, not to stage+1
+        if (allow[0]) valid [0] <= next_valid[0];
         if (allow[1]) valid [1] <= next_valid[1];
         if (allow[2]) valid [2] <= next_valid[2];
     end
@@ -241,8 +221,6 @@ always @(posedge clk) begin
         div_pos <= 3'b0;
     end
     else begin
-        // exactly one of the three is set for a real instruction, and they shift
-        // with the same ~shortcut terms as valid[], so flag <=> valid always holds
         if (allow[0]) begin
             alu_pos [0] <= (~|     md_op_i) & next_valid[0];
             mul_pos [0] <= (| md_op_i[2:0]) & next_valid[0];
@@ -325,18 +303,18 @@ always @(posedge clk) begin
     end
 end
 
+always @(posedge clk) begin
+    if (flush_reset)                         div_started <= 1'b0;
+    else if (div_start & ~ allow[1])         div_started <= 1'b1;
+    else if (allow[1])                       div_started <= 1'b0;
+end
+
 assign alu_no_mul_shortcut[1] = (~ mul_pos[2])   & (~ div_pos[2])   & alu_pos[1] & (~|alu_pos[  2]) & allow_next;
 assign alu_no_mul_shortcut[0] = (~|mul_pos[2:1]) & (~|div_pos[2:1]) & alu_pos[0] & (~|alu_pos[2:1]) & allow_next;
 
-// Stage 2 normally drives the outputs; when it is empty an ALU result that is
-// already the oldest instruction short-circuits straight out of its stage.
-// (valid[2] keeps priority so an older valid instruction is never overtaken.)
-// A div waiting in stage 2 is still there, so it must not look valid to MEM.
 assign out_sel[2]   = valid[2] & ~ stall_div;
 assign out_sel[1:0] = alu_no_mul_shortcut;
 
-// out_sel is one-hot, so the outputs are a plain wired-OR of masked stages
-// (no implied priority chain: the terms are mutually exclusive by construction)
 assign valid_o        = | out_sel;
 assign pc_o           = ({32{out_sel[0]}} & pc        [0]) | ({32{out_sel[1]}} & pc        [1]) | ({32{out_sel[2]}} & pc        [2]);
 assign src1_used_o    = (out_sel[0] & src1_used       [0]) | (out_sel[1] & src1_used       [1]) | (out_sel[2] & src1_used       [2]);
@@ -357,9 +335,6 @@ assign excp_cause_o   = ({ 6{out_sel[0]}} & excp_cause[0]) | ({ 6{out_sel[1]}} &
 assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]) | ({32{out_sel[2]}} & csr_wdata[2]);
 assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]) | ({32{out_sel[2]}} & csr_mask [2]);
 
-// stage 2: ALU (registered), mul (combinational CPA on top of its stage-1
-// registers) or div (registered quotient/remainder, only once ~busy).
-// Each option is qualified by out_sel[2], which makes all five terms exclusive.
 assign div_result = ({32{div_is_mod}} & div_rem) | ({32{~ div_is_mod}} & div_quot);
 assign sel_alu2   = out_sel[2] & alu_pos[2];
 assign sel_mul2   = out_sel[2] & mul_pos[2];
@@ -371,12 +346,11 @@ assign ex_result      = ({32{out_sel[0]}} & alu_result[0])   |
                         ({32{sel_mul2}}   & mul_result_wire) |
                         ({32{sel_div2}}   & div_result);
 
-
 always @(posedge clk) begin
-    if (flush_reset)             br_valid <= 1'b0;
-    else if (allow[0])            br_valid <= | br_op_i;   // a branch entered stage 0
-    else if (allow[1])            br_valid <= 1'b0;        // it left without firing
-    else if (br_taken)            br_valid <= 1'b0;        // held, but already fired
+    if (flush_reset)        br_valid <= 1'b0;
+    else if (allow[0])      br_valid <= | br_op_i;   // a branch entered stage 0
+    else if (allow[1])      br_valid <= 1'b0;        // it left without firing
+    else if (br_taken)      br_valid <= 1'b0;        // held, but already fired
 end
 
 br u_br(
@@ -403,8 +377,7 @@ assign br_target_o = br_target;
 //   data  : that value
 assign will_write = valid & gr_we;
 
-// a CSR / counter instruction produces its value at WB, not here, so it must
-// look "pending" to the instruction behind (which then waits for WB)
+// csr insts are seen as alu insts here, thus should not forward
 assign can_supply = gr_we[2:1] & ~ mem_en[2:1] & alu_pos[2:1]
                   & ~ {csr_ctl[2][CSR_WB], csr_ctl[1][CSR_WB]};
 
@@ -466,13 +439,5 @@ div u_div(
     .quot      (div_quot    ),
     .rem       (div_rem     )
 );
-
-// one div in flight at a time: a following div waits in stage 0 until this one
-// has carried its result out of EX
-always @(posedge clk) begin
-    if (flush_reset)                        div_started <= 1'b0;
-    else if (div_start & ~ allow[1])         div_started <= 1'b1;
-    else if (allow[1])                       div_started <= 1'b0;
-end
 
 endmodule
