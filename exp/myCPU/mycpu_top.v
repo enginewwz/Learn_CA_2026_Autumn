@@ -410,10 +410,17 @@ assign fake_MEM_rsp_valid = MEM_rsp_ready;
 
 assign seq_pc       = pc[IF] + 32'h4;
 
-assign nextpc       = wb_excp_ertn ? (ertn_i ? era_o : eentry_o) :
-                      br_reg       ? br_pc_reg     :
-                      br_taken_ex  ? br_target_ex  :
-                      br_taken_id  ? br_target_id  : seq_pc;
+wire sel_era    = ertn_i;                       // ertn -> era
+wire sel_eentry = wb_excp_ertn & ~ ertn_i;      // exception -> eentry (== excp_i)
+wire sel_br     = ~ wb_excp_ertn & br_reg;      // latched redirect, loses only to the WB redirect
+wire sel_seq    = ~ (wb_excp_ertn | br_reg | br_taken_ex | br_taken_id);
+
+assign nextpc       = ({32{sel_era    }} & era_o       ) |
+                      ({32{sel_eentry }} & eentry_o    ) |
+                      ({32{sel_br     }} & br_pc_reg   ) |
+                      ({32{br_taken_ex}} & br_target_ex) |
+                      ({32{br_taken_id}} & br_target_id) |
+                      ({32{sel_seq    }} & seq_pc      );
 
 assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn;
 

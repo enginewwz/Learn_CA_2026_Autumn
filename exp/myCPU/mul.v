@@ -1,11 +1,12 @@
-// 2-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
+// 4-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
 //        -> s0: Booth encode (17 digits) + partial products + Wallace L1..L2
 //        -> s1: Wallace L3..L6                              (8 -> 2 vectors)
-//        -> s2: final CPA + high/low select, registered
+//        -> s2: low-half CPA (32 bit) + carry, registered with the high halves
+//        -> s3: high-half CPA (32 bit) + high/low select, registered
 //
-// stall[2:0]: stage k is frozen while stall[k]; one bit per internal stage.
+// allow[3:0]: stage k is frozen while allow[k] is low; one bit per internal stage.
 // There is no valid here - the caller tracks positions (mul_pos).
 //
 // md_op is the one-hot mul/div select shared with the top:
@@ -27,7 +28,7 @@
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 2:0] allow,
+    input  wire [ 3:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -48,6 +49,12 @@ reg [ 4:0] nneg;
 reg [63:0] ws2, wc2;          // reduced to (sum, carry)
 reg [ 6:0] md2;
 
+// ---------------------------------------------------------------- stage 2
+reg [31:0] sum_l;             // low-half CPA result
+reg        carry_l;           // low-half carry out
+reg [31:0] ws2h, wc2h;        // high-half addends, registered with the low half
+reg [ 6:0] md3;
+
 // Booth encoding
 wire        signed_op;
 wire [63:0] Aext;
@@ -63,11 +70,12 @@ wire [63:0] L3 [0:5];
 wire [63:0] L4 [0:3];
 wire [63:0] L5 [0:2];
 wire [63:0] wsum, wcarry;
-wire [63:0] prod;
+wire [32:0] sum_l_w;           // low-half CPA with its carry out
+wire [31:0] prod_h;            // high-half CPA with the low-half carry in
 
 // output
-reg  [31:0] sel;               // combinational CPA + select
-reg  [31:0] result_r;             // registered result, aligned with EX stage 3
+reg  [31:0] sel;               // combinational high-half CPA + select
+reg  [31:0] result_r;             // registered result, aligned with EX stage 4
 
 genvar  g;
 integer k;
@@ -180,36 +188,44 @@ always @(posedge clk) begin
     end
 end
 
-// final CPA + high/low select, then one register so that the 14-level CPA ->
-// pipeline-register path is split
-assign prod = ws2 + wc2;
+// low-half CPA and the high-half addends, then one register so that the 64-bit
+// carry chain is split into two 32-bit halves (stage 2)
+assign sum_l_w = {1'b0, ws2[31:0]} + {1'b0, wc2[31:0]};
+
+always @(posedge clk) begin
+    if (reset) begin
+        sum_l   <= 32'b0;
+        carry_l <= 1'b0;
+        ws2h    <= 32'b0;
+        wc2h    <= 32'b0;
+        md3     <= 7'b0;
+    end
+    else if (allow[2]) begin
+        sum_l   <= sum_l_w[31:0];
+        carry_l <= sum_l_w[32];
+        ws2h    <= ws2[63:32];
+        wc2h    <= wc2[63:32];
+        md3     <= md2;
+    end
+end
+
+// high-half CPA + high/low select, then one register (stage 3)
+assign prod_h = ws2h + wc2h + {31'b0, carry_l};
 
 always @(*) begin
     case (1'b1)
-        md2[MUL_W]   : sel = prod[31:0];
-        md2[MULH_W]  : sel = prod[63:32];
-        md2[MULH_WU] : sel = prod[63:32];
-        default      : sel = prod[31:0];
+        md3[MUL_W]   : sel = sum_l;
+        md3[MULH_W]  : sel = prod_h;
+        md3[MULH_WU] : sel = prod_h;
+        default      : sel = sum_l;
     endcase
 end
 
 always @(posedge clk) begin
     if (reset)         result_r <= 32'b0;
-    else if (allow[2]) result_r <= sel;
+    else if (allow[3]) result_r <= sel;
 end
 
 assign result = result_r;
 
-endmodule
-
-// 3:2 carry-save compressor; a + b + c == s + co (co is already shifted left)
-module csa64(
-    input  wire [63:0] a,
-    input  wire [63:0] b,
-    input  wire [63:0] c,
-    output wire [63:0] s,
-    output wire [63:0] co
-);
-    assign s  = a ^ b ^ c;
-    assign co = ((a & b) | (a & c) | (b & c)) << 1;
 endmodule

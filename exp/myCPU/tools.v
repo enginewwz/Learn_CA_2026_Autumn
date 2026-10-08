@@ -48,3 +48,28 @@ generate for (i=0; i<64; i=i+1) begin : gen_for_dec_6_64
 end endgenerate
 
 endmodule
+
+
+// 3:2 carry-save compressor; a + b + c == s + co (co is already shifted left)
+module csa64(
+    input  wire [63:0] a,
+    input  wire [63:0] b,
+    input  wire [63:0] c,
+    output wire [63:0] s,
+    output wire [63:0] co
+);
+    assign s  = a ^ b ^ c;
+    assign co = ((a & b) | (a & c) | (b & c)) << 1;
+endmodule
+
+// 3:2 carry-save compressor; a + b + c == s + co (co is already shifted left)
+module csa34(
+    input  wire [33:0] a,
+    input  wire [33:0] b,
+    input  wire [33:0] c,
+    output wire [33:0] s,
+    output wire [33:0] co
+);
+    assign s  = a ^ b ^ c;
+    assign co = ((a & b) | (a & c) | (b & c)) << 1;
+endmodule
