@@ -63,13 +63,3 @@ module csa64(
 endmodule
 
 // 3:2 carry-save compressor; a + b + c == s + co (co is already shifted left)
-module csa34(
-    input  wire [33:0] a,
-    input  wire [33:0] b,
-    input  wire [33:0] c,
-    output wire [33:0] s,
-    output wire [33:0] co
-);
-    assign s  = a ^ b ^ c;
-    assign co = ((a & b) | (a & c) | (b & c)) << 1;
-endmodule

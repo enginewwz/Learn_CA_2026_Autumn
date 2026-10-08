@@ -1,13 +1,12 @@
-// 4-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
+// 3-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
 //        -> s0: Booth encode (17 digits) + partial products + Wallace L1..L2
 //        -> s1: Wallace L3..L6                              (8 -> 2 vectors)
-//        -> s2: low-half CPA (32 bit) + carry, registered with the high halves
-//        -> s3: high-half CPA (32 bit) + high/low select, registered
+//        -> s2: 64-bit carry-select CPA + high/low select, registered
 //
-// allow[3:0]: stage k is frozen while allow[k] is low; one bit per internal stage.
-// There is no valid here - the caller tracks positions (mul_pos).
+// allow[2:0]: stage k is frozen while allow[k] is low; one bit per internal
+// stage.  There is no valid here - the caller tracks positions (mul_pos).
 //
 // md_op is the one-hot mul/div select shared with the top:
 //   MUL_W    : low  32 bits of the product         (mul.w)
@@ -25,10 +24,19 @@
 //   000/111 -> 0 | 001/010 -> +1 | 011 -> +2 | 100 -> -2 | 101/110 -> -1
 // A negative digit is formed as ~(mag << 2i) plus a +1; the +1s of all negative
 // digits are collected into one small constant added to the tree.
+//
+// The final 64-bit CPA (ws2 + wc2) is a four-segment carry-select instead of one
+// ripple: segment 0 is a true add whose carry out picks the segment-1 copy, and
+// segments 1..3 are computed twice (carry-in 0 / carry-in 1) so no carry chain
+// is longer than 16 bits.  The segment carries are merged with a flat lookahead
+// (2 LUT levels) rather than a serial select chain, so the whole 64-bit add is
+// ~4 CARRY4 + 2 LUT levels instead of 16 CARRY4.  The duplicated adds carry
+// (* keep *)/(* dont_touch *): a full-data carry-select is exactly the shape an
+// area-first synthesizer folds back into a ripple (docs/exp13_div.md section 10).
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 3:0] allow,
+    input  wire [ 2:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -50,10 +58,8 @@ reg [63:0] ws2, wc2;          // reduced to (sum, carry)
 reg [ 6:0] md2;
 
 // ---------------------------------------------------------------- stage 2
-reg [31:0] sum_l;             // low-half CPA result
-reg        carry_l;           // low-half carry out
-reg [31:0] ws2h, wc2h;        // high-half addends, registered with the low half
-reg [ 6:0] md3;
+reg [31:0] result_r;          // registered carry-select result
+reg [31:0] sel;               // combinational high/low select
 
 // Booth encoding
 wire        signed_op;
@@ -70,12 +76,6 @@ wire [63:0] L3 [0:5];
 wire [63:0] L4 [0:3];
 wire [63:0] L5 [0:2];
 wire [63:0] wsum, wcarry;
-wire [32:0] sum_l_w;           // low-half CPA with its carry out
-wire [31:0] prod_h;            // high-half CPA with the low-half carry in
-
-// output
-reg  [31:0] sel;               // combinational high-half CPA + select
-reg  [31:0] result_r;             // registered result, aligned with EX stage 4
 
 genvar  g;
 integer k;
@@ -188,42 +188,58 @@ always @(posedge clk) begin
     end
 end
 
-// low-half CPA and the high-half addends, then one register so that the 64-bit
-// carry chain is split into two 32-bit halves (stage 2)
-assign sum_l_w = {1'b0, ws2[31:0]} + {1'b0, wc2[31:0]};
+//--------------------------------------------------------------- stage 2 CPA
+// Four 16-bit segments.  cs0 is the true low add; cs1/cs2/cs3 exist in a
+// carry-in-0 and a carry-in-1 flavour and the right one is selected by the
+// carry out of the segment below.  For a segment, carry-out(cin=0) = G and
+// carry-out(cin=1) = G|P, so the two copies also hand out G = cs_0[16] and
+// P = cs_1[16] & ~cs_0[16]; the carry chain then closes with a flat lookahead
+// instead of a serial mux chain:
+//     c1 = G0,  c2 = G1 | P1&c1,  c3 = G2 | P2&G1 | P2&P1&c1
+wire [16:0] cs0;
+(* keep = "true", dont_touch = "true" *) wire [16:0] cs1_0, cs1_1;
+(* keep = "true", dont_touch = "true" *) wire [16:0] cs2_0, cs2_1;
+// segment 3 has no carry consumer, so it stays 16 bits wide
+(* keep = "true", dont_touch = "true" *) wire [15:0] cs3_0, cs3_1;
 
-always @(posedge clk) begin
-    if (reset) begin
-        sum_l   <= 32'b0;
-        carry_l <= 1'b0;
-        ws2h    <= 32'b0;
-        wc2h    <= 32'b0;
-        md3     <= 7'b0;
-    end
-    else if (allow[2]) begin
-        sum_l   <= sum_l_w[31:0];
-        carry_l <= sum_l_w[32];
-        ws2h    <= ws2[63:32];
-        wc2h    <= wc2[63:32];
-        md3     <= md2;
-    end
-end
+assign cs0   = {1'b0, ws2[15: 0]} + {1'b0, wc2[15: 0]};
+assign cs1_0 = {1'b0, ws2[31:16]} + {1'b0, wc2[31:16]};
+assign cs1_1 = {1'b0, ws2[31:16]} + {1'b0, wc2[31:16]} + 17'd1;
+assign cs2_0 = {1'b0, ws2[47:32]} + {1'b0, wc2[47:32]};
+assign cs2_1 = {1'b0, ws2[47:32]} + {1'b0, wc2[47:32]} + 17'd1;
+assign cs3_0 = ws2[63:48] + wc2[63:48];
+assign cs3_1 = ws2[63:48] + wc2[63:48] + 16'd1;
 
-// high-half CPA + high/low select, then one register (stage 3)
-assign prod_h = ws2h + wc2h + {31'b0, carry_l};
+wire g1, p1, g2, p2;
+wire c1, c2, c3;
 
+assign c1 = cs0[16];
+assign g1 = cs1_0[16];
+assign p1 = cs1_1[16] & ~ cs1_0[16];
+assign g2 = cs2_0[16];
+assign p2 = cs2_1[16] & ~ cs2_0[16];
+assign c2 = g1 | (p1 & c1);
+assign c3 = g2 | (p2 & g1) | (p2 & p1 & c1);
+
+wire [63:0] prod;
+assign prod = { c3 ? cs3_1 : cs3_0,
+                c2 ? cs2_1[15:0] : cs2_0[15:0],
+                c1 ? cs1_1[15:0] : cs1_0[15:0],
+                cs0[15:0] };
+
+// high/low select, then one register (stage 2)
 always @(*) begin
     case (1'b1)
-        md3[MUL_W]   : sel = sum_l;
-        md3[MULH_W]  : sel = prod_h;
-        md3[MULH_WU] : sel = prod_h;
-        default      : sel = sum_l;
+        md2[MUL_W]   : sel = prod[31:0];
+        md2[MULH_W]  : sel = prod[63:32];
+        md2[MULH_WU] : sel = prod[63:32];
+        default      : sel = prod[31:0];
     endcase
 end
 
 always @(posedge clk) begin
     if (reset)         result_r <= 32'b0;
-    else if (allow[3]) result_r <= sel;
+    else if (allow[2]) result_r <= sel;
 end
 
 assign result = result_r;
