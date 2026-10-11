@@ -12,7 +12,7 @@
 
 | 测试台 | 对照什么 | 条数 | 参考版本从哪来 |
 | --- | --- | --- | --- |
-| `tb_alu_diff.v` | ALU：穷举**全部 4096 个 `alu_op`**（含所有多热组合）× 定向+随机操作数，比 `alu_result` / `lt_o` / `ltu_o` | 69536 | git 历史 或 `docs/ex_opt_attempt/alu_plain.v` |
+| `tb_alu_diff.v` | ALU：穷举**全部 4096 个 `alu_op`**（含所有多热组合）× 定向+随机操作数，比 `alu_result` / `lt_o` / `ltu_o` | 69536 | git 历史 或 `docs/ex_opt_attempt/alu_plain.v` / `alu_sep.v` |
 | `tb_mul_diff.v` | mul：**全部 128 个 `md_op`**（含多热/全零）× 定向+随机操作数，比流水寄存后的 `result` | 2488 | git 历史 或 `docs/ex_opt_attempt/*.v` |
 
 两个台都是"把参考版本的 `module` 改名成 `*_ref`，和被测版本一起 elaborate"的模式。
@@ -45,14 +45,19 @@ iverilog -g2005 -o /tmp/t exp/myCPU/tools.v /tmp/mul_ref.v exp/myCPU/mul.v exp/a
 | --- | --- | --- |
 | `mul.v`（裸 `+`）vs `b2b747f`（4×16 carry-select） | 2488 / 0 | 纯结构替换，功能零风险；随后测出裸 `+` 更快，采纳 |
 | `mul.v` vs `mul_v2_carryselect.v` / `mul_cs32.v` | 2488 / 0 | 两个候选都与工作区版本逐位等价 |
-| `alu.v` vs `alu_plain.v`（裸 `+`/`-`） | 69536 / 0 | 逐位等价，但**综合后更差**（br 被拖累），否决 |
+| `alu.v` vs `alu_plain.v`（裸 `+`/`-`，比较蹭减法链的借位） | 69536 / 0 | 逐位等价，但**综合后更差**（br 被逻辑+布线同时拖累），否决 |
+| `alu.v` vs `alu_sep.v`（加/减/有符号 `<`/无符号 `<` 各自独立成链） | 69536 / 0 | 逐位等价，**待综合** |
 
 **这里只保证"行为没变"，不保证"更快"** —— 快慢只能靠 Windows 端的综合报告，
 判读口径见 `docs/cpu_full_analysis(Oct10).md` §3 / §4。
 
+> `alu_plain.v` 与 `alu_sep.v` 的关键差别：前者**比较位是从减法链的借位里蹭出来的**
+> （一条链要同时驱动 32 位结果 + 1 位比较位）；后者四条链完全独立，综合器可以各自就近布局。
+> 上一版输在 br 那条判定链上，所以这一版重点看 `alu_src1_reg → pc_reg` 那一族的 route 占比。
+
 ## 4. 相关材料
 
-- 被否决/备选的版本：`docs/ex_opt_attempt/`（`alu_plain.v`、`div_plain.v`、`div_flat.v`、
+- 被否决/备选的版本：`docs/ex_opt_attempt/`（`alu_plain.v`、`alu_sep.v`、`div_plain.v`、`div_flat.v`、
   `mul_v2_carryselect.v`、`mul_cs32.v`）
 - 结论与实测账本：`docs/cpu_full_analysis(Oct10).md`
 - EX 阶段的两个候选改动：`docs/ex_opt_attempt/ex_stage_notes.md`

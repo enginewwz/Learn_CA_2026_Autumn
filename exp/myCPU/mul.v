@@ -25,22 +25,9 @@
 // A negative digit is formed as ~(mag << 2i) plus a +1; the +1s of all negative
 // digits are collected into one small constant added to the tree.
 //
-// The final 64-bit CPA (ws2 + wc2) is a single bare `+`: the carry chain is one
-// full-width ripple and is left entirely to the synthesizer.  Measured on
-// 7a200t-fbg676-1 at 20 ns, this beats every hand-written variant tried here:
-//
-//                        Logic Levels   logic    route
-//   bare `+` (this file)      16         3.0+     0.5~2 ns      <-- used
-//   4x16 carry-select          8         3.5      ~3 ns         (~7 ns total)
-//   32+32 carry-select        11        (not synthesized, archived)
-//
-// The reason is the per-level cost: on this device one CARRY4 level is ~0.12 ns
-// but one LUT level is ~0.75 ns (fitted from the two measured points above), so
-// swapping 10 cheap CARRY4 levels for 2 expensive LUT levels is a net loss even
-// though it halves the level count.  Level count is NOT the metric - LUT levels
-// are.  See docs/ex_opt_attempt/mul_carry_chain.md.  A hand-written LUT carry tree is
-// the same mistake in the other direction (it trades CARRY4 levels for LUT
-// levels), which is why it was never adopted.
+// The final 64-bit CPA (ws2 + wc2) is a single bare `+`, carry chain left to the
+// synthesizer.  Measured faster than every hand-written variant tried here -
+// see docs/ex_opt_attempt/mul_carry_chain.md.
 module mul(
     input  wire        clk,
     input  wire        reset,
@@ -98,14 +85,17 @@ assign bx = {sb, sb, src2, 1'b0};
 // Booth digits + partial products
 generate
     for (g = 0; g < 17; g = g + 1) begin : g_booth
-        wire p0 = bx[2*g];
-        wire p1 = bx[2*g+1];
-        wire p2 = bx[2*g+2];
-        wire dbl = (p1 & p0 & ~p2) | (~p1 & ~p0 & p2);
-        wire sgl = (p1 ^ p0) & ~dbl;
-        wire nz  = dbl | sgl;
-        wire neg = p2;
-        wire [63:0] mag = dbl ? {Aext[62:0], 1'b0} : Aext;   // 1x or 2x
+        wire        p0, p1, p2, dbl, sgl, nz, neg;
+        wire [63:0] mag;
+
+        assign p0  = bx[2*g];
+        assign p1  = bx[2*g+1];
+        assign p2  = bx[2*g+2];
+        assign dbl = (p1 & p0 & ~p2) | (~p1 & ~p0 & p2);
+        assign sgl = (p1 ^ p0) & ~dbl;
+        assign nz  = dbl | sgl;
+        assign neg = p2;
+        assign mag = dbl ? {Aext[62:0], 1'b0} : Aext;   // 1x or 2x
         assign pp[g]  = nz ? ((mag << (2*g)) ^ {64{neg}}) : 64'b0;
         assign negc[g] = neg & nz;
     end
@@ -196,13 +186,18 @@ always @(posedge clk) begin
 end
 
 //--------------------------------------------------------------- stage 2 CPA
-(* keep = "true", dont_touch = "true" *) wire [63:0] prod = ws2 + wc2;
+// bare 64-bit add; the (* keep *) keeps the tool from folding prod into the
+// select below (see docs/ex_opt_attempt/mul_carry_chain.md)
+(* keep = "true", dont_touch = "true" *) wire [63:0] prod;
+wire        hi_sel;
+wire [31:0] sel_w;
 
-// high/low select, flattened to one control bit.  This is exactly the priority
-// of the old `case (1'b1)`: mul.w wins, then mulh.w / mulh.wu, else low.
-wire hi_sel = ~md2[MUL_W] & (md2[MULH_W] | md2[MULH_WU]);
+assign prod = ws2 + wc2;
 
-wire [31:0] sel_w = hi_sel ? prod[63:32] : prod[31:0];
+// high/low select: mul.w wins, then mulh.w / mulh.wu, else low
+assign hi_sel = ~md2[MUL_W] & (md2[MULH_W] | md2[MULH_WU]);
+
+assign sel_w = hi_sel ? prod[63:32] : prod[31:0];
 
 // then one register (stage 2)
 always @(posedge clk) begin
