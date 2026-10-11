@@ -1,6 +1,4 @@
-// Blocking 32-bit divider: radix-4 restoring division with a carry-select
-// datapath.  Phase diagram, borrow chain and depth accounting live in
-// docs/exp12-13_csr.md §5.9.
+// Blocking 32-bit divider: radix-4 restoring division, 19 cycles.
 //
 //   start (1-cycle pulse) -> busy ... -> done (1-cycle pulse)
 //   quot / rem are valid in the cycle where done is high
@@ -10,16 +8,14 @@
 //   - is_signed selects div.w/mod.w (1) vs div.wu/mod.wu (0)
 //   - divisor == 0 gives quot = 32'hffffffff, rem = dividend
 //
-// 21 cycles: start (low half of |src1|/|src2|) -> CNT_MAG (high half) ->
-// CNT_D3/CNT_D3B (3*b, one half each) -> 16 iterations (2 bits each) ->
-// CNT_FIN/CNT_FIN2 (sign fix-up, one half each, + zero_div override, latch
-// quot/rem, raise done).  Every 32/34-bit add is cut into two 16/17-bit beats
-// with the carry parked in a register, so no full-width chain fits in one
-// cycle: carry-select alone gets flattened back to a ripple by the tool.
+// Phases: start (low half of |src|) -> CNT_MAG (high half of |src|) ->
+// CNT_D3 (3*b) -> 16 iterations (2 bits each) -> CNT_FIN (sign fix-up,
+// zero_div override, latch outputs, raise done).
 //
-// Depth work: 3*b is latched so it is not a second adder in series with the
-// t3 subtractor; the 34-bit subtractors are carry-select (chunks 12/12/8 + a
-// 2-bit head, final selects fused into one LUT each); d2 is pure wiring.
+// |src| is the only wide operation still cut into two 16/17-bit beats with the
+// carry parked in a register (m1_cy / m2_cy); 3*b and the sign fix-up are
+// single-cycle.  Why, and what the timing report says about this module:
+// docs/ex_opt_attempt/div_pass_through_review.md
 
 module div(
     input  wire        clk,
@@ -35,11 +31,9 @@ module div(
 );
 
 localparam CNT_MAG  = 5'd0;    // |src1| / |src2| high half (low half latched by start)
-localparam CNT_D3   = 5'd1;    // 3*b low half
-localparam CNT_D3B  = 5'd2;    // 3*b high half
-localparam CNT_LAST = 5'd18;   // last radix-4 iteration (16 iterations: 3..18)
-localparam CNT_FIN  = 5'd19;   // sign fix-up low half + carry registers
-localparam CNT_FIN2 = 5'd20;   // sign fix-up high half + zero_div, register outputs
+localparam CNT_D3   = 5'd1;    // 3*b, one 34-bit add
+localparam CNT_LAST = 5'd17;   // last radix-4 iteration (16 iterations: 2..17)
+localparam CNT_FIN  = 5'd18;   // sign fix-up + zero_div override + register outputs
 
 reg         busy_r, done_r;
 reg  [ 4:0] cnt;
@@ -47,76 +41,83 @@ reg  [31:0] a_mag, b_mag;      // |dividend|, |divisor|
 reg  [31:0] dq;                // dividend shift register (2 bits per iteration)
 reg  [31:0] rem_r;             // partial remainder, kept in [0, b_mag)
 reg  [31:0] q_acc;             // quotient, 2 bits shifted in per iteration
-reg  [33:0] d3;                // 3*b_mag, latched once (CNT_D3 / CNT_D3B)
-reg  [16:0] d3_lo;             // 3*b bits 16:0; d3_cy is the carry into bit 17
-reg         d3_cy;
+reg  [33:0] d3;                // 3*b_mag, latched once
 reg  [15:0] m1_lo, m1_hi;      // |src1| halves in flight start -> CNT_MAG
 reg  [15:0] m2_lo, m2_hi;      // |src2| halves in flight start -> CNT_MAG
 reg         m1_cy, m2_cy;      // carry out of the low-half negation
-reg  [15:0] q_lo, r_lo, a_lo;  // sign fix-up low halves
-reg         q_cy, r_cy, a_cy;  // carry into each high half
 reg         q_sign, r_sign, zero_div;
 reg  [31:0] quot_r, rem_r_out;
 
 // ---------------- start cycle: low half of the unsigned magnitudes ---------
 // Only bits 15:0 are negated here; CNT_MAG finishes the high half from the
 // registered carry, so ~src+1 is never one full-width chain in a single cycle.
-wire        s1 = is_signed & src1[31];
-wire        s2 = is_signed & src2[31];
-wire [15:0] c1l = src1[15:0] ^ {16{s1}};
-wire [16:0] l1  = {1'b0, c1l} + {16'b0, s1};
-wire [15:0] c1h = src1[31:16] ^ {16{s1}};
-wire [15:0] c2l = src2[15:0] ^ {16{s2}};
-wire [16:0] l2  = {1'b0, c2l} + {16'b0, s2};
-wire [15:0] c2h = src2[31:16] ^ {16{s2}};
+wire        s1, s2;
+wire [15:0] c1l, c1h, c2l, c2h;
+wire [16:0] l1, l2;
+
+assign s1  = is_signed & src1[31];
+assign s2  = is_signed & src2[31];
+assign c1l = src1[15:0]  ^ {16{s1}};
+assign c1h = src1[31:16] ^ {16{s1}};
+assign c2l = src2[15:0]  ^ {16{s2}};
+assign c2h = src2[31:16] ^ {16{s2}};
+assign l1  = {1'b0, c1l} + {16'b0, s1};
+assign l2  = {1'b0, c2l} + {16'b0, s2};
 
 // ---------------- CNT_MAG: high half of |src1| / |src2| --------------------
-wire [31:0] src1_mag = {m1_hi + {15'b0, m1_cy}, m1_lo};
-wire [31:0] src2_mag = {m2_hi + {15'b0, m2_cy}, m2_lo};
+wire [31:0] src1_mag, src2_mag;
 
-// ---------------- CNT_D3 / CNT_D3B: d3 = 2*b + b, one half per cycle -------
-wire [33:0] b2x  = {1'b0, b_mag, 1'b0};                         // 2*b
-wire [33:0] b1x  = {2'b0, b_mag};                               // b
-wire [17:0] d3_l = {1'b0, b1x[16:0]} + {1'b0, b2x[16:0]};       // 3*b bits 17:0
-wire [16:0] d3_h = b1x[33:17] + b2x[33:17] + {16'b0, d3_cy};    // carry in, bits 33:17
+assign src1_mag = {m1_hi + {15'b0, m1_cy}, m1_lo};
+assign src2_mag = {m2_hi + {15'b0, m2_cy}, m2_lo};
+
+// ---------------- CNT_D3: d3 = 2*b + b, one 34-bit add ---------------------
+wire [33:0] d3_w;
+
+assign d3_w = {2'b0, b_mag} + {1'b0, b_mag, 1'b0};   // b + 2*b
 
 // ---------------- iteration combinational logic ---------------------------
-wire [33:0] shifted = {rem_r, dq[31:30]};
-wire [33:0] y1      = {2'b0, b_mag};                            // b
-wire [33:0] y2      = {1'b0, b_mag, 1'b0};                      // 2*b, wiring
+wire [33:0] shifted;
+wire [33:0] y1;
+wire [33:0] y2;
+wire [32:0] cs1;
+wire [32:0] cs2;
+wire [32:0] cs3;
+wire        ge1, ge2, ge3;
+wire [ 1:0] dig;
+wire [31:0] r3;
 
-wire [32:0] cs1 = sub34_cs(shifted, y1);
-wire [32:0] cs2 = sub34_cs(shifted, y2);
-wire [32:0] cs3 = sub34_cs(shifted, d3);
+assign shifted = {rem_r, dq[31:30]};
+assign y1      = {2'b0, b_mag};                            // b
+assign y2      = {1'b0, b_mag, 1'b0};                      // 2*b, wiring
 
-wire        ge1 = ~cs1[32];
-wire        ge2 = ~cs2[32];
-wire        ge3 = ~cs3[32];
-wire [ 1:0] dig = ge3 ? 2'd3 : ge2 ? 2'd2 : ge1 ? 2'd1 : 2'd0;
-wire [31:0] r3  = (dig == 2'd3) ? cs3[31:0]
-                : (dig == 2'd2) ? cs2[31:0]
-                : (dig == 2'd1) ? cs1[31:0] : shifted[31:0];
+assign cs1 = sub34_cs(shifted, y1);
+assign cs2 = sub34_cs(shifted, y2);
+assign cs3 = sub34_cs(shifted, d3);
 
-// ---------------- CNT_FIN: low half of the sign fix-up ---------------------
-wire [31:0] qc = q_acc ^ {32{q_sign}};
-wire [16:0] ql = {1'b0, qc[15:0]} + {16'b0, q_sign};
-wire [31:0] rc = rem_r ^ {32{r_sign}};
-wire [16:0] rl = {1'b0, rc[15:0]} + {16'b0, r_sign};
+assign ge1 = ~cs1[32];
+assign ge2 = ~cs2[32];
+assign ge3 = ~cs3[32];
+assign dig = ge3 ? 2'd3 : ge2 ? 2'd2 : ge1 ? 2'd1 : 2'd0;
+assign r3  = (dig == 2'd3) ? cs3[31:0]
+           : (dig == 2'd2) ? cs2[31:0]
+           : (dig == 2'd1) ? cs1[31:0] : shifted[31:0];
+
+// ---------------- CNT_FIN: sign fix-up + output selection ------------------
+wire [31:0] qc, rc, ac;
+wire [31:0] q_mag, r_mag, a_sgn;
+wire [31:0] quot_w, rem_w;
+
+assign qc = q_acc ^ {32{q_sign}};
+assign rc = rem_r ^ {32{r_sign}};
+assign ac = a_mag ^ {32{r_sign}};
+
+assign q_mag = qc + {31'b0, q_sign};
+assign r_mag = rc + {31'b0, r_sign};
 // divisor == 0 -> rem = dividend, i.e. the sign-fixed |dividend|
-wire [31:0] ac = a_mag ^ {32{r_sign}};
-wire [16:0] al = {1'b0, ac[15:0]} + {16'b0, r_sign};
+assign a_sgn = ac + {31'b0, r_sign};
 
-// ---------------- CNT_FIN2: high half + zero_div override ------------------
-wire [15:0] qh = qc[31:16] + {15'b0, q_cy};
-wire [15:0] rh = rc[31:16] + {15'b0, r_cy};
-wire [15:0] ah = ac[31:16] + {15'b0, a_cy};
-
-wire [31:0] q_mag = {qh, q_lo};
-wire [31:0] r_mag = {rh, r_lo};
-wire [31:0] a_sgn = {ah, a_lo};
-
-wire [31:0] quot_w = zero_div ? 32'hffffffff : q_mag;
-wire [31:0] rem_w  = zero_div ? a_sgn        : r_mag;
+assign quot_w = zero_div ? 32'hffffffff : q_mag;
+assign rem_w  = zero_div ? a_sgn        : r_mag;
 
 // ---------------- control -------------------------------------------------
 always @(posedge clk) begin
@@ -144,17 +145,11 @@ always @(posedge clk) begin
                 rem_r    <= 32'd0;
             end
         end
-        else if (cnt == CNT_FIN2) begin
+        else if (cnt == CNT_FIN) begin
             busy_r    <= 1'b0;
             done_r    <= 1'b1;
             quot_r    <= quot_w;
             rem_r_out <= rem_w;
-        end
-        else if (cnt == CNT_FIN) begin
-            cnt  <= CNT_FIN2;
-            q_lo <= ql[15:0]; q_cy <= ql[16];
-            r_lo <= rl[15:0]; r_cy <= rl[16];
-            a_lo <= al[15:0]; a_cy <= al[16];
         end
         else if (cnt == CNT_MAG) begin
             cnt   <= CNT_D3;
@@ -163,13 +158,8 @@ always @(posedge clk) begin
             dq    <= src1_mag;
         end
         else if (cnt == CNT_D3) begin
-            cnt   <= CNT_D3B;
-            d3_lo <= d3_l[16:0];
-            d3_cy <= d3_l[17];
-        end
-        else if (cnt == CNT_D3B) begin
             cnt <= cnt + 5'd1;
-            d3  <= {d3_h, d3_lo};
+            d3  <= d3_w;
         end
         else begin
             cnt   <= (cnt == CNT_LAST) ? CNT_FIN : (cnt + 5'd1);
@@ -187,7 +177,8 @@ assign rem  = rem_r_out;
 
 // 34-bit carry-select borrow subtractor: chunks 12/12/8 + a 2-bit head, the
 // upper chunks computed twice (borrow-in 0/1) and selected by the lower
-// borrows, with the final selects fused into one LUT each.
+// borrows, with the final selects fused into one LUT each.  Returns the low 32
+// bits of the difference plus the borrow in bit 32.
 function [32:0] sub34_cs;
     input [33:0] x;
     input [33:0] y;
