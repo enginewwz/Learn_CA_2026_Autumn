@@ -1,6 +1,9 @@
 // Differential test: the working-tree exp/myCPU/mul.v vs a reference revision.
 // Drives identical clk/reset/allow/src1/src2/md_op into both and compares the
-// registered result.  Covers every one of the 128 md_op values (including the
+// result.  Since the 2-stage rewrite the current mul has NO output register, so
+// its combinational result is delayed one cycle here (gated by allow[2], which
+// is what clocks the old design's result register).  Covers every one of the
+// 128 md_op values (including the
 // all-zero and multi-hot encodings the top never produces) x directed+random
 // operands.
 //
@@ -25,9 +28,13 @@ reg  [ 6:0] op;
 wire [31:0] r_new, r_old;
 
 mul u_new(
-    .clk (clk), .reset(reset), .allow(allow),
+    .clk (clk), .reset(reset), .allow(allow[1:0]),   // 2 internal stages
     .src1(a), .src2(b), .md_op(op), .result(r_new)
 );
+
+// align the new (combinational) output with the old (registered) one
+reg [31:0] r_new_r;
+always @(posedge clk) if (allow[2]) r_new_r <= r_new;
 
 mul_ref u_old(
     .clk (clk), .reset(reset), .allow(allow),
@@ -48,11 +55,11 @@ task drive_and_check;
         @(posedge clk); @(posedge clk); @(posedge clk); @(posedge clk);
         #1;
         checks = checks + 1;
-        if (r_new !== r_old) begin
+        if (r_new_r !== r_old) begin
             errors = errors + 1;
             if (errors <= 20)
                 $display("MISMATCH a=%08x b=%08x op=%07b new=%08x old=%08x",
-                         x, y, o, r_new, r_old);
+                         x, y, o, r_new_r, r_old);
         end
     end
 endtask
@@ -93,10 +100,10 @@ initial begin
         allow = 3'b010; @(posedge clk);
         allow = 3'b111; @(posedge clk); @(posedge clk); @(posedge clk);
         #1; checks = checks + 1;
-        if (r_new !== r_old) begin
+        if (r_new_r !== r_old) begin
             errors = errors + 1;
             $display("MISMATCH(allow) a=%08x b=%08x op=%07b new=%08x old=%08x",
-                     a, b, op, r_new, r_old);
+                     a, b, op, r_new_r, r_old);
         end
     end
 

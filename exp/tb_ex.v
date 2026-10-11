@@ -6,9 +6,9 @@
 // Checks the parts the full CPU regression cannot reach yet:
 //   * an ALU result that is the oldest instruction short-circuits out of its
 //     own stage (1-cycle EX -> MEM latency) and carries its control fields
-//   * mul.w / mulh.w / mulh.wu take exactly 4 cycles and produce the right
+//   * mul.w / mulh.w / mulh.wu take exactly 3 cycles and produce the right
 //     low / high word, with ma/mb operands
-//   * allow_next = 0 freezes a mul at stage 3 without corrupting it
+//   * allow_next = 0 freezes a mul at stage 2 without corrupting it
 //   * an ALU behind a mul / div never overtakes it
 //   * a div is started as soon as its operands are in stage 0 -- also while the
 //     downstream is blocked -- and is started exactly once (u_ex.div_start)
@@ -280,9 +280,8 @@ initial begin
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd17);
     chk(!valid_o, "mul not ready right after entry");
     step; chk(!valid_o, "mul at stage 1");
-    step; chk(!valid_o, "mul at stage 2");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd17),
-              "mul reached stage 3");
+              "mul reached stage 2 (combinational output)");
     step; chk(!valid_o, "mul left EX for MEM (allow_next = 1)");
     step; step;
     chk(!valid_o, "nothing left in EX after the mul drained (no stage-0 copy)");
@@ -293,31 +292,30 @@ initial begin
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd9);
     chk(!valid_o, "mul.w not ready at stage 0");
     step; chk(!valid_o, "mul.w not ready at stage 1");
-    step; chk(!valid_o, "mul.w not ready at stage 2");
     step; chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd9),
-              "mul.w low word at stage 3 (registered)");
+              "mul.w low word at stage 2 (combinational)");
     repeat (2) step;
 
     // --------------------------------------------------------------- mulh.w
     A = 32'hdead_beef; B = 32'h8000_0001;
     send(12'b0, 7'b1 << MULH_W, A, B, 5'd11);
-    step; step; step;
+    step; step;
     chk(valid_o && (ex_result === mhi(A, B)), "mulh.w signed high word");
     repeat (2) step;
 
     // -------------------------------------------------------------- mulh.wu
     send(12'b0, 7'b1 << MULH_WU, A, B, 5'd11);
-    step; step; step;
+    step; step;
     chk(valid_o && (ex_result === mhiu(A, B)), "mulh.wu unsigned high word");
     repeat (2) step;
 
     // ------------------------------------------- mul frozen by allow_next=0
     A = 32'h7fff_ffff; B = 32'h7fff_ffff;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd4);
-    step; step;                 // -> stage 1, stage 2
+    step;                       // -> stage 1
     allow_next = 1'b0;
-    step;                       // held at stage 3
-    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 3 under back-pressure");
+    step;                       // -> stage 2, cannot leave
+    chk(valid_o && (ex_result === mlo(A, B)), "mul held at stage 2 under back-pressure");
     step;                       // still frozen, value must survive
     chk(valid_o && (ex_result === mlo(A, B)), "mul value stable while stalled");
     allow_next = 1'b1;
@@ -328,8 +326,8 @@ initial begin
     A = 32'h0000_ffff; B = 32'h0001_0000;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd6);          // mul, stage 0 next cycle
     send(12'b1 << 6, 7'b0, 32'hf0f0_f0f0, 32'h0f0f_0f0f, 5'd8); // ALU right behind
-    // after the two sends: mul@1, alu@0 -> 2 steps put the mul at stage 3
-    step; step;
+    // after the two sends: mul@1, alu@0 -> 1 step puts the mul at stage 2
+    step;
     chk(valid_o && (dest_o === 5'd6) && (ex_result === mlo(A, B)),
         "mul in front drives the output, not the younger ALU");
     step;
@@ -365,12 +363,11 @@ initial begin
 
     // --------------------------------------- div starts during a stalled pipe
     // The divider must be started as soon as the operands are in stage 0, even
-    // when stage 1/2 are blocked (then the division overlaps the stall), and a
+    // when stages 1/2 are blocked (then the division overlaps the stall), and a
     // div that sits in stage 0 must be started exactly once.
     A = 32'd100; B = 32'd7;
     allow_next = 1'b0;
-    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // three ands fill stage 2..0
-    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // two ands fill stage 1..0
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);
     div_starts = 0; div_watch = 1'b1;
     send(12'b0, 7'b1 << DIV_W, A, B, 5'd15);      // div lands in stage 0, blocked
@@ -454,8 +451,7 @@ initial begin
     // until the pipeline moves, but must not flush the target instruction again.
     A = 32'h1c004000; B = 32'h8;
     allow_next = 1'b0;
-    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // three ands fill stage 2..0
-    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);
+    send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);   // two ands fill stage 1..0
     send(12'b1 << 4, 7'b0, 32'd0, 32'd0, 5'd0);
     send_br(7'b1 << BEQ, 32'd7, 32'd7, A, B);     // branch lands in stage 0, held
     chk(br_taken_o && (br_target_o === (A + B)), "held branch redirects right away");
@@ -465,49 +461,49 @@ initial begin
     repeat (4) step;
 
     // ------------------------------------------------- forwarding groups
-    // An ALU result is only forwarded from stage 1/2 (registers); at stage 0 it
-    // is still the combinational ALU output, so ID must wait for it: pending.
-    // Hold allow_next low so it walks through the stages instead of
-    // short-circuiting out of stage 0.  send() points fw_raddr1_i at the dest,
-    // i.e. it pretends the instruction in ID reads what the sent one writes.
+    // An ALU result is forwarded from all three stages: stage 0 off the
+    // combinational ALU output, stages 1/2 off the registered copies.  Hold
+    // allow_next low so it walks through the stages instead of short-circuiting
+    // out of stage 0.  send() points fw_raddr1_i at the dest, i.e. it pretends
+    // the instruction in ID reads what the sent one writes.
     A = 32'h1234_5678; B = 32'h0000_00ff;
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd21);   // and
-    chk(fw1_hit_o && !fw1_valid_o, "ALU stage 0: will write but not forwardable");
+    chk(fw1_hit_o && fw1_valid_o && (fw1_data_o === (A & B)),
+        "ALU stage 0 supplies off the combinational result");
     step;
     chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 1 supplies");
     step;
-    chk(fw1_valid_o && (fw1_data_o === (A & B)), "ALU stage 2 supplies");
-    step;
     chk(fw1_valid_o && (fw1_data_o === (A & B)) && valid_o,
-        "ALU stage 3 supplies and drives the output");
+        "ALU stage 2 supplies and drives the output");
     allow_next = 1'b1;
     repeat (2) step;
 
-    // an ALU in stage 3 is the output stage, so its value is presented as soon
+    // an ALU in stage 2 is the output stage, so its value is presented as soon
     // as it is registered -- it does not wait for allow_next
     A = 32'h0f0f_0f0f; B = 32'h00ff_00ff;
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd28);
-    step; step; step;                       // -> stage 3
+    step; step;                             // -> stage 2
     chk(valid_o && (ex_result === (A & B)) && (dest_o === 5'd28) && !stall_o,
-        "alu in stage 3 drives the output (under back-pressure)");
+        "alu in stage 2 drives the output (under back-pressure)");
     allow_next = 1'b1;
     repeat (2) step;
 
-    // the mul result is registered at stage 3, which is also the output stage
+    // mul is not in the EX -> ID forwarding path: it hits (ID must wait for the
+    // MEM tap) but never supplies from inside EX
     A = 32'h0000_0003; B = 32'h0000_0005;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd22);
-    chk(fw1_hit_o && !fw1_valid_o, "mul stage 0 pending (will write, not ready)");
-    step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 1 pending");
-    step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 2 pending");
-    step; chk(fw1_hit_o && fw1_valid_o && (fw1_data_o === mlo(A, B)),
-              "mul supplies from stage 3");
+    chk(fw1_hit_o && !fw1_valid_o, "mul stage 0: hit, never supplies");
+    step; chk(fw1_hit_o && !fw1_valid_o, "mul stage 1: hit, never supplies");
+    step; chk(fw1_hit_o && !fw1_valid_o && valid_o,
+              "mul stage 2: hit, never supplies (drives the output)");
     allow_next = 1'b1;
     repeat (2) step;
 
-    // div is only forwardable once the unit is done
+    // div is not in the EX -> ID forwarding path either: it hits but never
+    // supplies, so the consumer takes it from the MEM tap
     send(12'b0, 7'b1 << DIV_W, 32'd100, 32'd7, 5'd23);
     begin : div_fwd
         integer i;
@@ -533,8 +529,8 @@ initial begin
     // the "youngest hit wins" priority cannot be dropped.
     //
     // The two writers are kept in EX without touching allow_next by putting a
-    // mul in front: it blocks the ALU short-circuit out of stage 0/1/2 (see
-    // alu_no_mul_div_shortcut), so this is a plain 4-stage walk.
+    // mul in front: it blocks the ALU short-circuit (see
+    // alu_no_mul_div_shortcut), so this is a plain 3-stage walk.
     A = 32'hff00_ff00; B = 32'h0ff0_0ff0;
     OLD   = A & B;                     // 0x0f00_0f00
     YOUNG = A ^ B;                     // 0xf0f0_f0f0, not a superset of OLD
@@ -543,25 +539,23 @@ initial begin
     send(12'b1 << 7, 7'b0, A, B, 5'd5);       // younger write to r5: xor
     // S0: younger @stage0, older @stage1, mul @stage2
     chk(fw1_hit_o && fw2_hit_o, "WAW S0: both writers hit, ID reads r5");
-    chk(!fw1_valid_o && !fw2_valid_o,
-        "WAW S0: youngest writer in stage 0 -> pending (hit && !valid)");
-    chk(!fw1_valid_o || (fw1_data_o === YOUNG), "WAW S0: fw1 must not export the older value");
-    chk(!fw2_valid_o || (fw2_data_o === YOUNG), "WAW S0: fw2 must not export the older value");
+    chk(fw1_valid_o && fw2_valid_o && (fw1_data_o === YOUNG) && (fw2_data_o === YOUNG),
+        "WAW S0: youngest writer in stage 0 supplies the combinational result");
+    chk(valid_o && (dest_o === 5'd9), "WAW S0: the mul in front still drives the output");
     step;
-    // S1: younger @stage1, older @stage2, mul @stage3
+    // S1: younger @stage1, older @stage2 (the output stage)
     chk(fw1_valid_o && (fw1_data_o === YOUNG), "WAW S1: fw1 supplies the younger writer");
     chk(fw2_valid_o && (fw2_data_o === YOUNG), "WAW S1: fw2 supplies the younger writer");
-    step;
-    // S2: younger @stage2, older @stage3 (the output stage)
-    chk(fw1_valid_o && (fw1_data_o === YOUNG), "WAW S2: fw1 stage 2 beats the older stage 3");
-    chk(fw2_valid_o && (fw2_data_o === YOUNG), "WAW S2: fw2 stage 2 beats the older stage 3");
     chk(valid_o && (dest_o === 5'd5) && (ex_result === OLD),
-        "WAW S2: EX output keeps program order (older writer first)");
+        "WAW S1: EX output keeps program order (older writer first)");
     step;
-    // S3: younger @stage3 (the output stage)
-    chk(fw1_valid_o && (fw1_data_o === YOUNG), "WAW S3: fw1 forwards the younger result3");
+    // S2: younger @stage2 (the output stage)
+    chk(fw1_valid_o && (fw1_data_o === YOUNG), "WAW S2: fw1 stage 2 supplies the younger writer");
+    chk(fw2_valid_o && (fw2_data_o === YOUNG), "WAW S2: fw2 stage 2 supplies the younger writer");
     chk(valid_o && (dest_o === 5'd5) && (ex_result === YOUNG),
-        "WAW S3: younger writer leaves EX second");
+        "WAW S2: younger writer leaves EX second");
+    step;
+    chk(!valid_o, "WAW S3: nothing left in EX");
     repeat (2) step;
 
     // The very same overlap is reachable through plain MEM back-pressure: the
@@ -570,11 +564,11 @@ initial begin
     allow_next = 1'b0;
     send(12'b1 << 4, 7'b0, A, B, 5'd5);       // older  write to r5: and
     send(12'b1 << 7, 7'b0, A, B, 5'd5);       // younger write to r5: xor
-    chk(!fw1_valid_o && !fw2_valid_o,
-        "WAW bp S0: stage 0 hit under back-pressure -> pending");
+    chk(fw1_valid_o && fw2_valid_o && (fw1_data_o === YOUNG) && (fw2_data_o === YOUNG),
+        "WAW bp S0: stage 0 supplies the younger writer under back-pressure");
     step;
     chk(fw1_valid_o && (fw1_data_o === YOUNG), "WAW bp S1: stage 1 supplies the younger writer");
-    step;                                     // younger @2, older @3, frozen by allow_next
+    step;                                     // younger @1, older @2, frozen by allow_next
     chk(fw1_valid_o && (fw1_data_o === YOUNG) && valid_o && (ex_result === OLD),
         "WAW bp S2: forward younger, output older, held by back-pressure");
     allow_next = 1'b1;
@@ -610,12 +604,12 @@ initial begin
     A = 32'h0000_ffff; B = 32'h0001_0000;
     allow_next = 1'b0;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd30);
-    step; step; step;                       // parked in stage 3, downstream held
-    chk(valid_o && u_ex.valid[3], "mul parked in stage 3 under back-pressure");
+    step; step;                             // parked in stage 2, downstream held
+    chk(valid_o && u_ex.valid[2], "mul parked in stage 2 under back-pressure");
     flush_i = 1'b1;
     step;
     flush_i = 1'b0;
-    chk(!valid_o && !u_ex.valid[3], "flush clears a held stage 3 (allow_next = 0)");
+    chk(!valid_o && !u_ex.valid[2], "flush clears a held stage 2 (allow_next = 0)");
     allow_next = 1'b1;
     repeat (2) step;
 
@@ -630,11 +624,11 @@ initial begin
     step;
     flush_i = 1'b0;
     chk(!valid_o, "flush empties EX");
-    chk(!u_ex.mul_pos[0] && !u_ex.mul_pos[1] && !u_ex.mul_pos[2] && !u_ex.mul_pos[3], "flush clears mul_pos");
+    chk(!u_ex.mul_pos[0] && !u_ex.mul_pos[1] && !u_ex.mul_pos[2], "flush clears mul_pos");
     allow_next = 1'b1;
     repeat (2) step;
     send(12'b0, 7'b1 << MUL_W, A, B, 5'd25);
-    step; step; step;
+    step; step;
     chk(valid_o && (ex_result === mlo(A, B)) && (dest_o === 5'd25),
         "a mul after the flush is clean");
     repeat (2) step;

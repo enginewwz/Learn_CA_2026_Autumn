@@ -1,4 +1,4 @@
-// Blocking 32-bit divider: radix-4 restoring division, 19 cycles.
+// Blocking 32-bit divider: radix-4 restoring division, 18 cycles.
 //
 //   start (1-cycle pulse) -> busy ... -> done (1-cycle pulse)
 //   quot / rem are valid in the cycle where done is high
@@ -8,14 +8,15 @@
 //   - is_signed selects div.w/mod.w (1) vs div.wu/mod.wu (0)
 //   - divisor == 0 gives quot = 32'hffffffff, rem = dividend
 //
-// Phases: start (low half of |src|) -> CNT_MAG (high half of |src|) ->
-// CNT_D3 (3*b) -> 16 iterations (2 bits each) -> CNT_FIN (sign fix-up,
-// zero_div override, latch outputs, raise done).
+// Phases: start (low half of |src|) -> CNT_MAG (high half of |src| AND 3*b) ->
+// 16 iterations (2 bits each) -> CNT_FIN (sign fix-up, zero_div override, latch
+// outputs, raise done).
 //
-// |src| is the only wide operation still cut into two 16/17-bit beats with the
-// carry parked in a register (m1_cy / m2_cy); 3*b and the sign fix-up are
-// single-cycle.  Why, and what the timing report says about this module:
-// docs/ex_opt_attempt/div_pass_through_review.md
+// The split is not arbitrary: the start cycle is where the operands arrive over
+// the EX -> div cross-module routing, so it keeps only the 17-bit low-half
+// negation.  The high half and the 3*b CPA that depends on it are both local
+// wiring, so they share the next cycle at no cost.
+// Depth accounting and the timing report: docs/ex_opt_attempt/div_pass_through_review.md
 
 module div(
     input  wire        clk,
@@ -30,10 +31,9 @@ module div(
     output wire [31:0] rem
 );
 
-localparam CNT_MAG  = 5'd0;    // |src1| / |src2| high half (low half latched by start)
-localparam CNT_D3   = 5'd1;    // 3*b, one 34-bit add
-localparam CNT_LAST = 5'd17;   // last radix-4 iteration (16 iterations: 2..17)
-localparam CNT_FIN  = 5'd18;   // sign fix-up + zero_div override + register outputs
+localparam CNT_MAG  = 5'd0;    // |src1| / |src2| high half + 3*b, both local
+localparam CNT_LAST = 5'd16;   // last radix-4 iteration (16 iterations: 1..16)
+localparam CNT_FIN  = 5'd17;   // sign fix-up + zero_div override + register outputs
 
 reg         busy_r, done_r;
 reg  [ 4:0] cnt;
@@ -50,7 +50,8 @@ reg  [31:0] quot_r, rem_r_out;
 
 // ---------------- start cycle: low half of the unsigned magnitudes ---------
 // Only bits 15:0 are negated here; CNT_MAG finishes the high half from the
-// registered carry, so ~src+1 is never one full-width chain in a single cycle.
+// registered carry, so ~src+1 is never one full-width chain in the cycle that
+// has to absorb the operand routing.
 wire        s1, s2;
 wire [15:0] c1l, c1h, c2l, c2h;
 wire [16:0] l1, l2;
@@ -64,16 +65,17 @@ assign c2h = src2[31:16] ^ {16{s2}};
 assign l1  = {1'b0, c1l} + {16'b0, s1};
 assign l2  = {1'b0, c2l} + {16'b0, s2};
 
-// ---------------- CNT_MAG: high half of |src1| / |src2| --------------------
+// ---------------- CNT_MAG: high halves + 3*b_mag --------------------------
 wire [31:0] src1_mag, src2_mag;
+wire [33:0] d3_w;
 
 assign src1_mag = {m1_hi + {15'b0, m1_cy}, m1_lo};
 assign src2_mag = {m2_hi + {15'b0, m2_cy}, m2_lo};
 
-// ---------------- CNT_D3: d3 = 2*b + b, one 34-bit add ---------------------
-wire [33:0] d3_w;
-
-assign d3_w = {2'b0, b_mag} + {1'b0, b_mag, 1'b0};   // b + 2*b
+// 3*b as 2*b + b: only the +2*b is wiring, so this is a single 34-bit CPA.  It
+// sits behind the 16-bit high-half add above, not behind a full-width negation,
+// which is what keeps it off the critical path.
+assign d3_w = {2'b0, src2_mag} + {1'b0, src2_mag, 1'b0};
 
 // ---------------- iteration combinational logic ---------------------------
 wire [33:0] shifted;
@@ -152,14 +154,11 @@ always @(posedge clk) begin
             rem_r_out <= rem_w;
         end
         else if (cnt == CNT_MAG) begin
-            cnt   <= CNT_D3;
+            cnt   <= cnt + 5'd1;
             a_mag <= src1_mag;
             b_mag <= src2_mag;
+            d3    <= d3_w;
             dq    <= src1_mag;
-        end
-        else if (cnt == CNT_D3) begin
-            cnt <= cnt + 5'd1;
-            d3  <= d3_w;
         end
         else begin
             cnt   <= (cnt == CNT_LAST) ? CNT_FIN : (cnt + 5'd1);

@@ -1,12 +1,16 @@
-// 3-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
+// 2-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
 //        -> s0: Booth encode (17 digits) + partial products + Wallace L1..L2
 //        -> s1: Wallace L3..L6                              (8 -> 2 vectors)
-//        -> s2: 64-bit plain `+` CPA + high/low select, registered
+//        -> final 64-bit CPA + high/low select (combinational)
 //
-// allow[2:0]: stage k is frozen while allow[k] is low; one bit per internal
+// allow[1:0]: stage k is frozen while allow[k] is low; one bit per internal
 // stage.  There is no valid here - the caller tracks positions (mul_pos).
+//
+// The result is combinational: it is ready in the same cycle the caller's
+// stage-2 registers hold the operands, and MEM registers it.  mul is therefore
+// never forwarded to ID from inside EX.
 //
 // md_op is the one-hot mul/div select shared with the top:
 //   MUL_W    : low  32 bits of the product         (mul.w)
@@ -31,7 +35,7 @@
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 2:0] allow,
+    input  wire [ 1:0] allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -52,8 +56,7 @@ reg [ 4:0] nneg;
 reg [63:0] ws2, wc2;          // reduced to (sum, carry)
 reg [ 6:0] md2;
 
-// ---------------------------------------------------------------- stage 2
-reg [31:0] result_r;          // registered carry-select result
+// ---------------------------------------------------------------- output
 
 // Booth encoding
 wire        signed_op;
@@ -185,7 +188,7 @@ always @(posedge clk) begin
     end
 end
 
-//--------------------------------------------------------------- stage 2 CPA
+//--------------------------------------------------------------- final CPA
 // bare 64-bit add; the (* keep *) keeps the tool from folding prod into the
 // select below (see docs/ex_opt_attempt/mul_carry_chain.md)
 (* keep = "true", dont_touch = "true" *) wire [63:0] prod;
@@ -199,12 +202,7 @@ assign hi_sel = ~md2[MUL_W] & (md2[MULH_W] | md2[MULH_WU]);
 
 assign sel_w = hi_sel ? prod[63:32] : prod[31:0];
 
-// then one register (stage 2)
-always @(posedge clk) begin
-    if (reset)         result_r <= 32'b0;
-    else if (allow[2]) result_r <= sel_w;
-end
-
-assign result = result_r;
+// combinational output (the caller / MEM registers it)
+assign result = sel_w;
 
 endmodule
