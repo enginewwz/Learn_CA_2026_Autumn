@@ -142,7 +142,6 @@ wire        if_adef;
 
 // exception / ertn / interrupt
 wire        mem_ale;        // this load / store is not naturally aligned
-wire        int_take;       // an interrupt is pending
 wire        mem_excp;
 wire        mem_excp_ertn;
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
@@ -382,7 +381,7 @@ end
 
 always @(posedge clk) begin
     if (reset)                          MEM_int_catch <= 1'b0;
-    else if (allow[MEM])                MEM_int_catch <= int_take;
+    else if (allow[MEM])                MEM_int_catch <= int_o;
     else                                MEM_int_catch <= 1'b0; 
 end
 
@@ -1034,7 +1033,6 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
 // MEM excp judge
 assign mem_ale   = mem_en[MEM] & (mem_half ? result[MEM][0] :
                                   mem_word ? | result[MEM][1:0] : 1'b0);
-assign int_take  = int_o;
 assign mem_excp  = csr_ctl[MEM][CSR_EXCP] | mem_ale | MEM_int_catch;
 
 assign mem_excp_ertn   = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
