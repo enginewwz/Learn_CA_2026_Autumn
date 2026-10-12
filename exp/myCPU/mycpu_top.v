@@ -143,7 +143,7 @@ wire        if_adef;
 // exception / ertn / interrupt
 wire        mem_ale;        // this load / store is not naturally aligned
 wire        int_take;       // an interrupt is pending
-wire        mem_excp;       // the instruction in MEM must not access memory
+wire        mem_excp;
 wire        mem_excp_ertn;
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
 wire        excp_i;
@@ -314,6 +314,7 @@ wire [31:0] fw1_data,     fw2_data;     // final operand
 
 // fake axi path: handshake state
 reg  IF_req_valid;
+wire IF_req_valid_noexcp;
 wire fake_IF_req_ready;
 wire IF_req_fire;
 
@@ -324,6 +325,7 @@ reg  IF_rsp_fire_reg;
 wire IF_rsp_fire;
 
 reg  MEM_req_valid;
+wire MEM_req_valid_noexcp;
 wire fake_MEM_req_ready;
 wire MEM_req_fire_wire;
 reg  MEM_req_fire_reg;
@@ -335,6 +337,8 @@ wire MEM_rsp_fire_wire;
 reg  MEM_rsp_fire_reg;
 wire MEM_rsp_fire;
 
+reg  MEM_int_catch;
+
 // fake axi path
 always @(posedge clk) begin
     if (reset)                          IF_req_valid <= 1'b0;
@@ -343,9 +347,11 @@ always @(posedge clk) begin
     else                                IF_req_valid <= IF_req_valid; 
 end
 
-assign IF_req_fire = IF_req_valid && fake_IF_req_ready;
+assign IF_req_valid_noexcp = IF_req_valid & ~ if_adef;
 
-assign fake_IF_req_ready = IF_req_valid;
+assign IF_req_fire = IF_req_valid_noexcp && fake_IF_req_ready;
+
+assign fake_IF_req_ready = IF_req_valid_noexcp;
 
 always @(posedge clk) begin
     if (reset)                          IF_rsp_fire_reg <= 1'b1;    // to start without stalling IF
@@ -375,17 +381,25 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
+    if (reset)                          MEM_int_catch <= 1'b0;
+    else if (allow[MEM])                MEM_int_catch <= int_take;
+    else                                MEM_int_catch <= 1'b0; 
+end
+
+always @(posedge clk) begin
     if (reset)                          MEM_req_fire_reg <= 1'b0;
     else if (allow[MEM])                MEM_req_fire_reg <= 1'b0;
     else if (MEM_req_fire_wire)         MEM_req_fire_reg <= 1'b1;
     else                                MEM_req_fire_reg <= MEM_req_fire_reg;
 end
 
-assign MEM_req_fire_wire = MEM_req_valid && fake_MEM_req_ready;
+assign MEM_req_valid_noexcp = MEM_req_valid & ~ mem_excp;
+
+assign MEM_req_fire_wire = MEM_req_valid_noexcp && fake_MEM_req_ready;
 
 assign MEM_req_fire = MEM_req_fire_reg | MEM_req_fire_wire;
 
-assign fake_MEM_req_ready = MEM_req_valid;
+assign fake_MEM_req_ready = MEM_req_valid_noexcp;
 
 always @(posedge clk) begin
     if (reset)                          MEM_rsp_fire_reg <= 1'b0;
@@ -492,7 +506,7 @@ assign allow[IF]  = ~ stall[IF] && allow[ID];
 assign src_wait = | (fw1_pending | fw2_pending);
 
 // stall for IF & MEM
-assign stall[IF]  = ~ IF_rsp_fire | mem_excp_ertn;  // should not include valid[IF]
+assign stall[IF]  = (~ IF_rsp_fire & ~ if_adef) | mem_excp_ertn;  // should not include valid[IF]
 assign stall[ID] = src_wait && cur_valid[ID];
 assign stall[EX] = ex_stall;
 assign stall[MEM] = valid[MEM] && mem_en[MEM] && ~ mem_excp && (mem_we[MEM] ? ~MEM_req_fire : ~MEM_rsp_fire);
@@ -528,7 +542,7 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o) |
                   ({32{fw2_rf_sel}}  & rf_rdata2);
 
 // IF stage
-assign inst_sram_en    = IF_req_valid & ~ if_adef;
+assign inst_sram_en    = IF_req_valid_noexcp;
 assign inst_sram_we    = 4'b0;
 assign inst_sram_addr  = pc[IF];
 assign inst_sram_wdata = 32'b0;
@@ -778,7 +792,7 @@ always @(posedge clk) begin
         // ALE / interrupt / ertn are judged in MEM
         excp_cause[WB] <= excp_cause[MEM]
                           | (mem_ale  ? (6'h1 << EXCP_ALE) : 6'h0)
-                          | (int_take ? (6'h1 << EXCP_INT) : 6'h0);
+                          | (MEM_int_catch ? (6'h1 << EXCP_INT) : 6'h0);
         excp_badv_wb   <= mem_ale ? result[MEM] : pc[MEM];
     end
 end
@@ -981,7 +995,7 @@ always @(posedge clk) begin
     if (allow[WB])  result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
-assign data_sram_en    = mem_en[MEM] && valid[MEM] && MEM_req_valid && ~ mem_excp;
+assign data_sram_en    = MEM_req_valid_noexcp;
 assign data_sram_addr  = result[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
@@ -998,7 +1012,7 @@ assign st_we_word = 4'b1111;
 
 assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
 
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
+assign data_sram_we    = {4{mem_we[MEM] && MEM_req_valid_noexcp}} & st_we;
 assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
                          ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
                          ({32{mem_word}} &    mem_wdata[MEM]);
@@ -1021,7 +1035,7 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
 assign mem_ale   = mem_en[MEM] & (mem_half ? result[MEM][0] :
                                   mem_word ? | result[MEM][1:0] : 1'b0);
 assign int_take  = int_o;
-assign mem_excp  = csr_ctl[MEM][CSR_EXCP] | mem_ale | int_take;
+assign mem_excp  = csr_ctl[MEM][CSR_EXCP] | mem_ale | MEM_int_catch;
 
 assign mem_excp_ertn   = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
 

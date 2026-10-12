@@ -1,45 +1,3 @@
-//===========================================================================
-// alu.v -- "compute every candidate in parallel, then select once"
-//===========================================================================
-//
-// Every candidate is evaluated straight from the registered operands and the
-// result register is fed by a single one-hot OR stage.  Nothing is chained
-// through a shared adder and no operand mux sits in front of an adder.
-//
-// Level budget of the worst path (one LUT = 1 level, one CARRY4 = 1 level):
-//
-//   old (14 levels, `alu_src2_reg[0] -> alu_result_reg[..][0]`):
-//       L1      operand mux   adder_b = (sub|slt|sltu) ? ~src2 : src2
-//       L2      S = a ^ adder_b
-//       L3..L11 9x CARRY4    33-bit a + adder_b + cin (bit 32 = adder_cout)
-//       L12..13 slt/sltu      ~cout / (a31,b31,sum31) + one-hot mask
-//       L14     final mux     first of the two 10:1 OR levels
-//
-//   new (about 7 levels):
-//       L1      S = a ^ b     (and the level-1 generate/propagate LUTs)
-//       L2..L5  4x CARRY4     both 16-bit high halves of add/sub in parallel
-//               (the explicit carry tree gives the low-half carry at L4)
-//       L6      carry select  pick the high half
-//       L7      final stage   (add_sel & add) | (sub_sel & sub) | cmp | early
-//
-//   signed/unsigned compare (also 7 levels):
-//       L1..L5  explicit 2-bit-group borrow prefix tree -> (a <u b)
-//       L6      slt sign correction / one-hot compare mask
-//       L7      final stage
-//
-// The eight-deep full-width ripple is gone: `a + b` is only ever 16 bits wide,
-// the high halves are computed twice and selected, and the compare no longer
-// waits for a 32-bit ~cout.  The operand "subtract form" mux of the old adder
-// now lives in the early group selects add_grp_sel / sub_grp_sel, off the data
-// path.
-//
-// NOTE (structure, not behaviour): the 16-bit carry-select halves are the part
-// that relies on the synthesizer keeping what is written here.  The nets that
-// pin the structure carry (* keep *)/(* dont_touch *); if a tool folds them
-// back into a full-width ripple the path is ~10 levels, which is still shorter
-// than the old 14.
-//===========================================================================
-
 module alu(
   input  wire [11:0] alu_op,
   input  wire [31:0] alu_src1,
@@ -88,9 +46,6 @@ endfunction
 
 genvar g;
 
-//---------------------------------------------------------------------------
-// 1. candidates that are one or two LUTs away from the raw operands
-//---------------------------------------------------------------------------
 wire [31:0] and_result;
 wire [31:0] nor_result;
 wire [31:0] or_result;
@@ -113,11 +68,6 @@ assign sll_result = alu_src1 << alu_src2[4:0];                                  
 assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0]; //rj >> i5
 assign sr_result   = sr64_result[31:0];
 
-// The early candidates are masked and pre-ORed here, while the adders work.
-// By the time an adder/comparator result arrives this is a single net per bit,
-// so the final stage below is one LUT5/LUT6 and not a two level OR tree.
-// (The OR-of-masked-candidates form is kept exactly, so a non one-hot alu_op
-// still produces the same value as before.)
 wire [31:0] early_result =
       ({32{op_and         }} & and_result)
     | ({32{op_nor         }} & nor_result)
@@ -127,8 +77,7 @@ wire [31:0] early_result =
     | ({32{op_sll         }} & sll_result)
     | ({32{op_srl | op_sra}} & sr_result);
 
-//---------------------------------------------------------------------------
-// 2. unsigned compare tree (a <u b), and the low-half borrow of sub
+// unsigned compare tree (a <u b), and the low-half borrow of sub
 //
 // For bit i of a subtraction let
 //     g_i = ~a_i & b_i     (this bit generates a borrow)
@@ -137,9 +86,7 @@ wire [31:0] early_result =
 //     G(0..15) = borrow out of the low 16 bits
 //     G(0..31) = borrow out of all 32 bits = (a <u b)
 // The tree starts from 2-bit groups (one LUT each) and combines
-// 2 -> 4 -> 8 -> 16 -> 32, i.e. five LUT levels, instead of waiting for the
-// 32-bit carry chain of a subtract (`CARRY4=9` on the old critical path).
-//---------------------------------------------------------------------------
+// 2 -> 4 -> 8 -> 16 -> 32, i.e. five LUT levels
 wire [1:0] brw2 [0:15];    //aligned 2-bit groups
 wire [1:0] brw4 [0: 7];
 wire [1:0] brw8 [0: 3];
@@ -169,13 +116,7 @@ assign brw_lo16 = brw8[1][1] | (brw8[1][0] & brw8[0][1]);
 assign brw16_1  = cla(brw8[3][1], brw8[3][0], brw8[2][1], brw8[2][0]);
 assign ltu32    = brw16_1[1] | (brw16_1[0] & brw_lo16);
 
-//---------------------------------------------------------------------------
-// 3. add and sub: two independent 16+16 carry-select adders, fed with the raw
-//    operands (no operand mux in front).  The low halves are plain 16-bit
-//    adds, both high halves are computed for carry/borrow 0 and 1 in parallel.
-//    The low-half carry comes out of its own 16-bit generate tree (level 4),
-//    the low-half borrow is brw_lo16 from the tree above.
-//---------------------------------------------------------------------------
+// add and sub
 wire [1:0] car2 [0:7];
 wire [1:0] car4 [0:3];
 wire       car_lo8;
@@ -227,48 +168,16 @@ assign sub_hi1 = alu_src1[31:16] - alu_src2[31:16] - 16'd1;
 assign sub_hi  = brw_lo16 ? sub_hi1 : sub_hi0;
 assign sum_sub = {sub_hi, sub_lo};
 
-//---------------------------------------------------------------------------
-// 4. one-hot OR stage
-//
-// The old shared adder computed a - b whenever (op_sub|op_slt|op_sltu) was set,
-// and masked the adder output with (op_add|op_sub).  Both selects are folded
-// into add_grp_sel / sub_grp_sel here, which keeps the ALU bit-exact for every
-// alu_op value while taking that mux off the data path.
-//---------------------------------------------------------------------------
-wire sub_form;
-wire addsub_grp;
-wire add_grp_sel;
-wire sub_grp_sel;
 wire cmp_bit;
 
-assign sub_form    = op_sub | op_slt | op_sltu;   //old adder_b / adder_cin select
-assign addsub_grp  = op_add | op_sub;             //old add/sub output mask
-assign add_grp_sel = addsub_grp & ~sub_form;
-assign sub_grp_sel = addsub_grp &  sub_form;
-
-// Compare result, contributing to bit 0 only.  Both compares come out of ltu32:
-//   * sltu was ~adder_cout, and ~cout of a + ~b + 1 is exactly the borrow out
-//     of a - b, i.e. (a <u b) = ltu32
-//   * slt was (a31 & ~b31) | ((a31 ~^ b31) & sum31) with sum31 the sign bit of
-//     a - b; whenever the sign bits are equal sum31 == (a[30:0] <u b[30:0]),
-//     which is the same as (a <u b) there, so sum31 can be replaced by ltu32
-// The slt sign correction and the two one-hot masks are written as a single
-// 5-input expression (a31, b31, ltu32, op_slt, op_sltu) so this is one LUT.
-assign cmp_bit = (op_slt  & ((alu_src1[31] & ~alu_src2[31])
-                          | ((alu_src1[31] ~^ alu_src2[31]) & ltu32)))
-               | (op_sltu & ltu32);
-
-// The branch unit consumes exactly these two compares.  They are not new logic:
-// ltu_o is the root of the borrow prefix tree, lt_o is the same sign fold that
-// cmp_bit already contains, so the only "cost" is one tap on an existing net
-// (cmp_bit keeps its flat 5-input form above, so the ALU's own slt does not get
-// a level deeper).
 assign lt_o  = (alu_src1[31] & ~alu_src2[31])
              | ((alu_src1[31] ~^ alu_src2[31]) & ltu32);
 assign ltu_o = ltu32;
 
-assign alu_result = ({32{add_grp_sel}} & sum_add)
-                  | ({32{sub_grp_sel}} & sum_sub)
+assign cmp_bit = (op_slt & lt_o) | (op_sltu & ltu32);
+
+assign alu_result = ({32{op_add}} & sum_add)
+                  | ({32{op_sub}} & sum_sub)
                   | {31'b0, cmp_bit}
                   | early_result;
 

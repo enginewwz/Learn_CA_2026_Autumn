@@ -1,7 +1,9 @@
 // Differential test: the working-tree exp/myCPU/alu.v vs a reference revision.
 // Both are combinational, so this is a straight wire-for-wire compare of
-// alu_result / lt_o / ltu_o over EVERY one of the 4096 alu_op values
-// (including every multi-hot combination) x directed+random operand pairs.
+// alu_result / lt_o / ltu_o over every ONE-HOT alu_op value (plus the all-zero
+// vector) x directed+random operand pairs.  alu_op is one-hot by construction
+// (mycpu_top's alu_op_id comes from the one-hot instruction decode), so
+// multi-hot vectors are out of contract and are not compared.
 //
 // Build the reference from git or from docs/ex_opt_attempt (module renamed so both can
 // be elaborated):
@@ -54,19 +56,19 @@ initial begin
     av[15]=32'hf0000000;
     for (i = 16; i < 24; i = i + 1) av[i] = $random(seed);
 
-    // exhaustive alu_op x directed operand pairs
-    for (k = 0; k < 4096; k = k + 1) begin
-        op = k[11:0];
+    // every one-hot alu_op (and the all-zero vector) x directed operand pairs
+    for (k = -1; k < 12; k = k + 1) begin
+        op = (k < 0) ? 12'b0 : (12'b1 << k);
         for (i = 0; i < 16; i = i + 1) begin
             a = av[i]; b = av[(i*5+3) % 16];
             chk;
         end
     end
 
-    // random operand pairs, one-hot and random alu_op
+    // random operand pairs, one-hot alu_op
     for (i = 0; i < 4000; i = i + 1) begin
         a = $random(seed); b = $random(seed);
-        op = (i % 3 == 0) ? $random(seed) : (12'b1 << (i % 12));
+        op = (i % 3 == 0) ? 12'b0 : (12'b1 << (i % 12));
         chk;
     end
 

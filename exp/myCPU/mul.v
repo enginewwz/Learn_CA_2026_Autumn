@@ -189,8 +189,6 @@ always @(posedge clk) begin
 end
 
 //--------------------------------------------------------------- final CPA
-// bare 64-bit add; the (* keep *) keeps the tool from folding prod into the
-// select below (see docs/ex_opt_attempt/mul_carry_chain.md)
 (* keep = "true", dont_touch = "true" *) wire [63:0] prod;
 wire        hi_sel;
 wire [31:0] sel_w;
