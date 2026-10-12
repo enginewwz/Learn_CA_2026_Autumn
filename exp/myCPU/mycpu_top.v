@@ -1,24 +1,81 @@
+// exp16: the core is an AXI master.  The SoC side (exp/soc_verify/soc_axi) hooks
+// axi_wrap onto these ports and turns them into the memory's sram timing, so the
+// core itself must speak the full AXI handshake (AR / R / AW / W / B).
 module mycpu_top(
-    input  wire        clk,
-    input  wire        resetn,
-    // inst sram interface
-    output wire        inst_sram_en,
-    output wire [3:0]  inst_sram_we,
-    output wire [31:0] inst_sram_addr,
-    output wire [31:0] inst_sram_wdata,
-    input  wire [31:0] inst_sram_rdata,
-    // data sram interface
-    output wire        data_sram_en,
-    output wire [3:0]  data_sram_we,
-    output wire [31:0] data_sram_addr,
-    output wire [31:0] data_sram_wdata,
-    input  wire [31:0] data_sram_rdata,
+    input  wire        aclk,
+    input  wire        aresetn,      // low active
+
+    // AXI read address channel
+    output wire [ 3:0] arid,
+    output wire [31:0] araddr,
+    output wire [ 7:0] arlen,
+    output wire [ 2:0] arsize,
+    output wire [ 1:0] arburst,
+    output wire [ 1:0] arlock,
+    output wire [ 3:0] arcache,
+    output wire [ 2:0] arprot,
+    output wire        arvalid,
+    input  wire        arready,
+
+    // AXI read data channel
+    input  wire [ 3:0] rid,
+    input  wire [31:0] rdata,
+    input  wire [ 1:0] rresp,
+    input  wire        rlast,
+    input  wire        rvalid,
+    output wire        rready,
+
+    // AXI write address channel
+    output wire [ 3:0] awid,
+    output wire [31:0] awaddr,
+    output wire [ 7:0] awlen,
+    output wire [ 2:0] awsize,
+    output wire [ 1:0] awburst,
+    output wire [ 1:0] awlock,
+    output wire [ 3:0] awcache,
+    output wire [ 2:0] awprot,
+    output wire        awvalid,
+    input  wire        awready,
+
+    // AXI write data channel
+    output wire [ 3:0] wid,
+    output wire [31:0] wdata,
+    output wire [ 3:0] wstrb,
+    output wire        wlast,
+    output wire        wvalid,
+    input  wire        wready,
+
+    // AXI write response channel
+    input  wire [ 3:0] bid,
+    input  wire [ 1:0] bresp,
+    input  wire        bvalid,
+    output wire        bready,
+
     // trace debug interface
     output wire [31:0] debug_wb_pc,
     output wire [ 3:0] debug_wb_rf_we,
     output wire [ 4:0] debug_wb_rf_wnum,
     output wire [31:0] debug_wb_rf_wdata
 );
+
+// internal clock / reset names kept as before
+wire clk    = aclk;
+wire resetn = aresetn;
+
+// CPU-side memory port: the AXI master to be written hangs off these.
+// inst_sram_rdata / data_sram_rdata must be driven by the AXI read data path,
+// and the *_en / *_we / *_addr / *_wdata below are what the AR/AW/W channels
+// have to be generated from.
+wire        inst_sram_en;
+wire [ 3:0] inst_sram_we;
+wire [31:0] inst_sram_addr;
+wire [31:0] inst_sram_wdata;
+wire [31:0] inst_sram_rdata;
+wire        data_sram_en;
+wire [ 3:0] data_sram_we;
+wire [31:0] data_sram_addr;
+wire [31:0] data_sram_wdata;
+wire [31:0] data_sram_rdata;
 
 // pipeline: IF -> ID -> EX -> MEM -> WB
 

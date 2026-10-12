@@ -1,17 +1,26 @@
+set ProjectDir "./project"
+
+if {[file exists $ProjectDir]} {
+    file delete -force $ProjectDir
+    puts "Folder deleted: $ProjectDir"
+}
+
 create_project -force loongson ./project -part xc7a200tfbg676-1
 
 # Add conventional sources
 add_files -scan_for_includes [glob -nocomplain ../rtl/*.v]
-add_files -scan_for_includes [glob -nocomplain ../rtl/*/*.v]
+add_files -scan_for_includes ../rtl/axi_wrap
+add_files -scan_for_includes ../rtl/CONFREG
+add_files -scan_for_includes ../rtl/ram_wrap
 
 # Add IPs
 add_files -quiet [glob -nocomplain ../rtl/xilinx_ip/*/*.xci]
 
 # Add simulation files
-add_files -fileset sim_1 ../testbench/mycpu_tb.v
+add_files -fileset sim_1 ../testbench
 
 # Add myCPU
-add_files -quiet -scan_for_includes ../../../myCPU
+add_files -scan_for_includes ../../../myCPU
 
 # Add constraints
 add_files -fileset constrs_1 -quiet ./constraints
