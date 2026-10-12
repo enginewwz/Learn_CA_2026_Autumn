@@ -3,10 +3,9 @@
 //   iverilog -g2005 -o /tmp/tb_alu exp/myCPU/alu.v exp/tb_alu.v
 //   timeout 60 vvp /tmp/tb_alu
 //
-// The reference model is written from the ALU/LoongArch semantics, not from the
-// RTL: a 33-bit  a + (sub ? ~b : b) + sub  adder plus an explicit OR of every
-// candidate masked by its one-hot opcode bit.  For one-hot opcodes that is
-// exactly what alu.v computes.
+// The reference model is written with plain Verilog operators from the
+// LoongArch semantics, one term per opcode, OR-ed under its one-hot bit:
+// that is exactly what alu.v computes.
 //
 // Coverage:
 //   * all 12 one-hot opcodes (add/sub/slt/sltu/and/nor/or/xor/lui/sll/srl/sra)
@@ -60,27 +59,21 @@ integer i, j, k;
 function [31:0] ref_alu;
     input [11:0] o;
     input [31:0] x, z;
-    reg   [32:0] diff;
-    reg   [63:0] sr;
-    reg   [31:0] r;
-    reg          sub;
+    reg signed [31:0] r;          // signed so that >>> stays arithmetic (r | shift context)
     begin
-        sub  = o[SUB] | o[SLT] | o[SLTU];
-        diff = {1'b0, x} + {1'b0, (sub ? ~z : z)} + {32'b0, sub};
         r = 32'b0;
-        if (o[ADD] | o[SUB]) r = r | diff[31:0];
-        if (o[SLT])  r = r | {31'b0, (x[31] & ~z[31]) | ((x[31] ~^ z[31]) & diff[31])};
-        if (o[SLTU]) r = r | {31'b0, ~diff[32]};
+        if (o[ADD])  r = r | (x + z);
+        if (o[SUB])  r = r | (x - z);
+        if (o[SLT])  r = r | {31'b0, ($signed(x) <  $signed(z))};
+        if (o[SLTU]) r = r | {31'b0, (x < z)};
         if (o[AND])  r = r | (x & z);
         if (o[NOR])  r = r | ~(x | z);
         if (o[OR])   r = r | (x | z);
         if (o[XOR])  r = r | (x ^ z);
         if (o[LUI])  r = r | z;
         if (o[SLL])  r = r | (x << z[4:0]);
-        if (o[SRL] | o[SRA]) begin
-            sr = {{32{o[SRA] & x[31]}}, x} >> z[4:0];
-            r  = r | sr[31:0];
-        end
+        if (o[SRL])  r = r | (x >> z[4:0]);
+        if (o[SRA])  r = r | ($signed(x) >>> z[4:0]);
         ref_alu = r;
     end
 endfunction
