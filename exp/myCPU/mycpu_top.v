@@ -31,10 +31,9 @@ localparam pre_IF            = 0;
 localparam IF                = 1;
 localparam ID                = 2;
 localparam EX                = 3;
-localparam pre_MEM           = 4;
-localparam MEM               = 5;
-localparam WB                = 6;
-localparam TOTAL_STAGE_WIDTH = 7;
+localparam MEM               = 4;
+localparam WB                = 5;
+localparam TOTAL_STAGE_WIDTH = 6;
 
 // md_op bit positions: one-hot mul/div operation select
 localparam MUL_W             = 0;
@@ -116,6 +115,8 @@ reg         mem_zext [MEM:ID] /* verilator split_var */;   // the load zero-exte
 reg         gr_we [WB:ID] /* verilator split_var */;
 reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
+reg         fake_mem_read_rsp_valid;   // fake stall for mem read
+
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
 reg  [ 7:0] csr_ctl [WB:IF] /* verilator split_var */;
@@ -144,6 +145,7 @@ wire        pre_if_adef;    // same judgement one stage earlier, gates inst_sram
 // exception / ertn / interrupt
 wire        mem_excp;
 wire        mem_excp_ertn;
+
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
 wire        excp_i;
 wire        ertn_i;
@@ -151,9 +153,8 @@ wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
 
-wire [31:0] pre_mem_addr;   // address presented to the data BRAM
-wire        pre_mem_ale;    // load / store alignment, judged in pre_MEM
-wire        pre_mem_excp;
+wire        ex_mem_ale;     // load / store alignment, judged in EX (before MEM)
+wire        ex_mem_excp;    // ALE / interrupt: folded into the slot at the EX -> MEM edge
 wire        int_take;
 
 // EX.v outputs, aliased into the [EX] elements of the stage fields above
@@ -183,7 +184,7 @@ wire [31:0] ex_result;      // EX.v combinational output (this is the [EX] resul
 wire        fw1_ex_hit_o, fw1_ex_valid_o, fw2_ex_hit_o, fw2_ex_valid_o;
 wire [31:0] fw1_ex_data_o, fw2_ex_data_o;
 
-reg  [31:0] result [WB:pre_MEM];
+reg  [31:0] result [WB:MEM];
 
 wire        load_op;    // not used
 
@@ -299,20 +300,19 @@ wire        src_wait;
 
 // byte / halfword / word memory access helpers (used in the MEM section)
 wire        mem_byte, mem_half, mem_word;
-wire        pre_mem_byte, pre_mem_half, pre_mem_word;
+wire        ex_mem_byte, ex_mem_half, ex_mem_word;
 wire [ 3:0] st_we_byte, st_we_half, st_we_word, st_we;
 wire [ 7:0] ld_byte;
 wire [15:0] ld_half;
 wire [31:0] ld_byte_ext, ld_half_ext;
 
 // forwarding
-wire [MEM:EX] fw1_hit     ;      // index 3..5: EX / pre_MEM / MEM taps
+wire [MEM:EX] fw1_hit     ;      // index 3..4: EX / MEM taps
 wire [MEM:EX] fw2_hit     ;
 wire [MEM:EX] fw1_valid   ;
 wire [MEM:EX] fw2_valid   ;
 wire [MEM:EX] fw1_pending ;
 wire [MEM:EX] fw2_pending ;
-wire        fw1_pre_mem_sel, fw2_pre_mem_sel;
 wire        fw1_mem_sel,  fw2_mem_sel;
 wire        fw1_rf_sel,   fw2_rf_sel;
 wire [31:0] fw1_data,     fw2_data;
@@ -362,8 +362,7 @@ always @(posedge clk) begin
         if (allow[pre_IF])  pc[pre_IF] <= nextpc;
         if (allow[IF] )     pc[IF]     <= pc[pre_IF];
         if (allow[ID] )     pc[ID]     <= pc[IF];
-        if (allow[pre_MEM]) pc[pre_MEM] <= pc[EX];
-        if (allow[MEM])     pc[MEM]    <= pc[pre_MEM];
+        if (allow[MEM])     pc[MEM]    <= pc[EX];
         if (allow[WB] )     pc[WB]     <= pc[MEM];
     end
 end
@@ -378,7 +377,6 @@ always @(posedge clk) begin
         valid[pre_IF]  <= 1'b0;
         valid[IF]      <= 1'b0;
         valid[ID]      <= 1'b0;
-        valid[pre_MEM] <= 1'b0;
         valid[MEM]     <= 1'b0;
         valid[WB]      <= 1'b0;
     end
@@ -386,20 +384,18 @@ always @(posedge clk) begin
         valid[pre_IF]  <= next_valid[pre_IF];
         valid[IF]      <= next_valid[IF];
         valid[ID]      <= next_valid[ID];
-        valid[pre_MEM] <= next_valid[pre_MEM];
         valid[MEM]     <= next_valid[MEM];
         valid[WB]      <= next_valid[WB];
     end
 end
 
-assign flush = mem_excp_ertn ? 7'b0011111 :
-               br_taken_ex   ? 7'b0000111 :
-               br_taken_id   ? 7'b0000011 :
-                               7'b0000000;
+assign flush = mem_excp_ertn ? 6'b001111 :
+               br_taken_ex   ? 6'b000111 :
+               br_taken_id   ? 6'b000011 :
+                               6'b000000;
 
 assign allow[WB]      = 1'b1;
 assign allow[MEM]     = ~ (| stall[WB:MEM]);
-assign allow[pre_MEM] = ~ (| stall[WB:pre_MEM]);
 assign allow[EX]      = ~ (| stall[WB:EX]);
 assign allow[ID]      = ~ (| stall[WB:ID]);
 assign allow[IF]      = ~ (| stall[WB:IF]);
@@ -412,8 +408,9 @@ assign stall[pre_IF]  = mem_excp_ertn;
 assign stall[IF]      = 1'b0;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
-assign stall[pre_MEM] = 1'b0;
-assign stall[MEM]     = 1'b0;
+// a load waits one cycle for the BRAM's registered output; a store does not
+assign stall[MEM]     = valid[MEM] & mem_en[MEM] & ~ mem_excp
+                      & ~ mem_we[MEM] & ~ fake_mem_read_rsp_valid;
 assign stall[WB]      = 1'b0;
 
 // forwarding
@@ -422,12 +419,6 @@ assign fw1_hit[EX]   = fw1_ex_hit_o;
 assign fw2_hit[EX]   = fw2_ex_hit_o;
 assign fw1_valid[EX] = fw1_ex_valid_o;
 assign fw2_valid[EX] = fw2_ex_valid_o;
-
-// pre_MEM part: the result has left EX but has not reached MEM yet
-assign fw1_hit[pre_MEM]   = valid[pre_MEM] && gr_we[pre_MEM] && src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[pre_MEM]);
-assign fw2_hit[pre_MEM]   = valid[pre_MEM] && gr_we[pre_MEM] && src2_used[ID] && (rf_raddr2 != 5'd0) && (rf_raddr2 == dest[pre_MEM]);
-assign fw1_valid[pre_MEM] = fw1_hit[pre_MEM] && ~ mem_en[pre_MEM] && ~ csr_ctl[pre_MEM][CSR_WB];
-assign fw2_valid[pre_MEM] = fw2_hit[pre_MEM] && ~ mem_en[pre_MEM] && ~ csr_ctl[pre_MEM][CSR_WB];
 
 // MEM part
 assign fw1_hit[MEM]   = valid[MEM] && gr_we[MEM] && src1_used[ID] && (rf_raddr1 != 5'd0) && (rf_raddr1 == dest[MEM]);
@@ -438,20 +429,16 @@ assign fw2_valid[MEM] = fw2_hit[MEM] && ~ mem_en[MEM] && ~ csr_ctl[MEM][CSR_WB];
 assign fw1_pending  = fw1_hit & ~ fw1_valid;
 assign fw2_pending  = fw2_hit & ~ fw2_valid;
 
-assign fw1_pre_mem_sel  = ~ fw1_valid[EX] &   fw1_valid[pre_MEM];
-assign fw1_mem_sel      = ~ fw1_valid[EX] & ~ fw1_valid[pre_MEM] &   fw1_valid[MEM];
-assign fw1_rf_sel       = ~ fw1_valid[EX] & ~ fw1_valid[pre_MEM] & ~ fw1_valid[MEM];
-assign fw2_pre_mem_sel  = ~ fw2_valid[EX] &   fw2_valid[pre_MEM];
-assign fw2_mem_sel      = ~ fw2_valid[EX] & ~ fw2_valid[pre_MEM] &   fw2_valid[MEM];
-assign fw2_rf_sel       = ~ fw2_valid[EX] & ~ fw2_valid[pre_MEM] & ~ fw2_valid[MEM];
+assign fw1_mem_sel      = ~ fw1_valid[EX] &   fw1_valid[MEM];
+assign fw1_rf_sel       = ~ fw1_valid[EX] & ~ fw1_valid[MEM];
+assign fw2_mem_sel      = ~ fw2_valid[EX] &   fw2_valid[MEM];
+assign fw2_rf_sel       = ~ fw2_valid[EX] & ~ fw2_valid[MEM];
 
 assign fw1_data = ({32{fw1_valid[EX]}} & fw1_ex_data_o)     |
-                  ({32{fw1_pre_mem_sel}} & result[pre_MEM]) |
                   ({32{fw1_mem_sel}}  & result[MEM])        |
                   ({32{fw1_rf_sel}}   & rf_rdata1);
 
 assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o)     |
-                  ({32{fw2_pre_mem_sel}} & result[pre_MEM]) |
                   ({32{fw2_mem_sel}}  & result[MEM])        |
                   ({32{fw2_rf_sel}}   & rf_rdata2);
 
@@ -693,22 +680,15 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (allow[pre_MEM]) begin
-        csr_num[pre_MEM]    <= csr_num[EX];
-        csr_ctl[pre_MEM]    <= csr_ctl[EX];
-        csr_wdata[pre_MEM]  <= csr_wdata[EX];
-        csr_mask[pre_MEM]   <= csr_mask[EX];
-        excp_cause[pre_MEM] <= excp_cause[EX];
-    end
     if (allow[MEM]) begin
-        csr_num[MEM]    <= csr_num[pre_MEM];
-        // ALE / interrupt are born in pre_MEM and carried like any other cause
-        csr_ctl[MEM]    <= csr_ctl[pre_MEM] | (pre_mem_excp ? (8'h1 << CSR_EXCP) : 8'h0);
-        csr_wdata[MEM]  <= csr_wdata[pre_MEM];
-        csr_mask[MEM]   <= csr_mask[pre_MEM];
-        excp_cause[MEM] <= excp_cause[pre_MEM]
-                           | (pre_mem_ale ? (6'h1 << EXCP_ALE) : 6'h0)
-                           | (int_take    ? (6'h1 << EXCP_INT) : 6'h0);
+        csr_num[MEM]    <= csr_num[EX];
+        // ALE / interrupt are born in EX and carried like any other cause
+        csr_ctl[MEM]    <= csr_ctl[EX] | (ex_mem_excp ? (8'h1 << CSR_EXCP) : 8'h0);
+        csr_wdata[MEM]  <= csr_wdata[EX];
+        csr_mask[MEM]   <= csr_mask[EX];
+        excp_cause[MEM] <= excp_cause[EX]
+                           | (ex_mem_ale ? (6'h1 << EXCP_ALE) : 6'h0)
+                           | (int_take   ? (6'h1 << EXCP_INT) : 6'h0);
     end
     if (allow[WB]) begin
         csr_num[WB]    <= csr_num[MEM];
@@ -729,23 +709,13 @@ assign excp_cause_id[EXCP_ALE]  = 1'b0;      // ALE / interrupt are judged in ME
 assign excp_cause_id[EXCP_INT]  = 1'b0;
 
 always @(posedge clk) begin
-    if (allow[pre_MEM]) begin
-        res_from_mem[pre_MEM] <= res_from_mem[EX];
-        mem_we[pre_MEM]       <= mem_we[EX];
-        mem_en[pre_MEM]       <= mem_en[EX];
-        mem_wdata[pre_MEM]    <= mem_wdata[EX];
-        mem_size[pre_MEM]     <= mem_size[EX];
-        mem_zext[pre_MEM]     <= mem_zext[EX];
-        src1_used[pre_MEM]    <= src1_used[EX];
-        src2_used[pre_MEM]    <= src2_used[EX];
-    end
     if (allow[MEM]) begin
-        res_from_mem[MEM] <= res_from_mem[pre_MEM];
-        mem_we[MEM]       <= mem_we[pre_MEM];
-        mem_en[MEM]       <= mem_en[pre_MEM];
-        mem_wdata[MEM]    <= mem_wdata[pre_MEM];
-        mem_size[MEM]     <= mem_size[pre_MEM];
-        mem_zext[MEM]     <= mem_zext[pre_MEM];
+        res_from_mem[MEM] <= res_from_mem[EX];
+        mem_we[MEM]       <= mem_we[EX];
+        mem_en[MEM]       <= mem_en[EX];
+        mem_wdata[MEM]    <= mem_wdata[EX];
+        mem_size[MEM]     <= mem_size[EX];
+        mem_zext[MEM]     <= mem_zext[EX];
     end
 end
 
@@ -759,13 +729,9 @@ always @(*) begin
 end
 
 always @(posedge clk) begin
-    if (allow[pre_MEM]) begin
-        gr_we[pre_MEM] <= gr_we[EX];
-        dest[pre_MEM]  <= dest[EX];
-    end
     if (allow[MEM]) begin
-        gr_we[MEM] <= gr_we[pre_MEM];
-        dest[MEM]  <= dest[pre_MEM];
+        gr_we[MEM] <= gr_we[EX];
+        dest[MEM]  <= dest[EX];
     end
     if (allow[WB]) begin
         gr_we[WB] <= gr_we[MEM];
@@ -845,7 +811,7 @@ EX u_ex(
     .clk            (clk              ),
     .reset          (reset            ),
     .flush_i        (flush[EX]        ),
-    .allow_next     (allow[pre_MEM]   ),
+    .allow_next     (allow[MEM]       ),
   
     .valid_i        (next_valid[EX]   ),
     .pc_i           (pc[ID]           ),
@@ -926,27 +892,30 @@ always @(*) begin
     valid[EX]        = ex_valid_o;
 end
 
-// pre_MEM stage
+// ALE and the interrupt are still *captured* one stage earlier, in EX, and ride
+// into MEM inside csr_ctl[MEM]/excp_cause[MEM]; that folded bit is what
+// suppresses the access below, so the request, the stall and the write enable
+// all look at the same criterion.
+assign ex_mem_ale  = mem_en[EX] & (ex_mem_half ? ex_result[0] :
+                                   ex_mem_word ? | ex_result[1:0] : 1'b0);
+assign int_take    = int_o;
 
-assign pre_mem_addr = result[pre_MEM];
-
-assign pre_mem_ale = mem_en[pre_MEM] & (pre_mem_half ? result[pre_MEM][0] :
-                                        pre_mem_word ? | result[pre_MEM][1:0] : 1'b0);
-assign int_take = int_o;
-
-assign pre_mem_excp    = pre_mem_ale | int_take | csr_ctl[pre_MEM][CSR_EXCP];
+assign ex_mem_excp = ex_mem_ale | int_take | csr_ctl[EX][CSR_EXCP];
 
 // MEM stage
 always @(posedge clk) begin
-    if (allow[pre_MEM]) result[pre_MEM] <= ex_result;
-    if (allow[MEM])     result[MEM]     <= result[pre_MEM];
-    if (allow[WB])      result[WB]      <= res_from_mem[MEM] ? mem_result : result[MEM];
+    if (reset)          fake_mem_read_rsp_valid <= 1'b0;
+    else if (allow[MEM]) fake_mem_read_rsp_valid <= 1'b0;   // this cycle's access is issued
+    else if (valid[MEM] & mem_en[MEM] & ~ mem_we[MEM]) fake_mem_read_rsp_valid <= 1'b1;
 end
 
-// the access is presented one stage early: the BRAM latches the word at the
-// pre_MEM -> MEM edge, so data_sram_rdata is this instruction's data in MEM.
-assign data_sram_en    = cur_valid[pre_MEM] & mem_en[pre_MEM] & ~ pre_mem_excp;
-assign data_sram_addr  = pre_mem_addr;
+always @(posedge clk) begin
+    if (allow[MEM])     result[MEM] <= ex_result;
+    if (allow[WB])      result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
+end
+
+assign data_sram_en    = valid[MEM] & mem_en[MEM] & ~ mem_excp;
+assign data_sram_addr  = result[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
 // and let the write-enable mask pick the addressed lane(s).
@@ -956,20 +925,20 @@ assign mem_byte = mem_size[MEM][SIZE_BYTE];
 assign mem_half = mem_size[MEM][SIZE_HALF];
 assign mem_word = mem_size[MEM][SIZE_WORD];
 
-assign pre_mem_byte = mem_size[pre_MEM][SIZE_BYTE];
-assign pre_mem_half = mem_size[pre_MEM][SIZE_HALF];
-assign pre_mem_word = mem_size[pre_MEM][SIZE_WORD];
+assign ex_mem_byte = mem_size[EX][SIZE_BYTE];   // size as seen in EX (ALE judge)
+assign ex_mem_half = mem_size[EX][SIZE_HALF];
+assign ex_mem_word = mem_size[EX][SIZE_WORD];
 
-assign st_we_byte = 4'b0001 << result[pre_MEM][1:0];
-assign st_we_half = result[pre_MEM][1] ? 4'b1100 : 4'b0011;
+assign st_we_byte = 4'b0001 << result[MEM][1:0];
+assign st_we_half = result[MEM][1] ? 4'b1100 : 4'b0011;
 assign st_we_word = 4'b1111;
 
-assign st_we = ({4{pre_mem_byte}} & st_we_byte) | ({4{pre_mem_half}} & st_we_half) | ({4{pre_mem_word}} & st_we_word);
+assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
 
-assign data_sram_we    = {4{mem_we[pre_MEM] && ~ pre_mem_excp & cur_valid[pre_MEM]}} & st_we;
-assign data_sram_wdata = ({32{pre_mem_byte}} & {4{mem_wdata[pre_MEM][ 7: 0]}}) |
-                         ({32{pre_mem_half}} & {2{mem_wdata[pre_MEM][15: 0]}}) |
-                         ({32{pre_mem_word}} &    mem_wdata[pre_MEM]);
+assign data_sram_we    = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
+assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
+                         ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
+                         ({32{mem_word}} &    mem_wdata[MEM]);
 
 // byte / halfword / word load: take the addressed lane and extend it
 assign ld_byte = (result[MEM][1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
