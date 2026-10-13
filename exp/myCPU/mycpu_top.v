@@ -1,6 +1,3 @@
-// exp16: the core is an AXI master.  The SoC side (exp/soc_verify/soc_axi) hooks
-// axi_wrap onto these ports and turns them into the memory's sram timing, so the
-// core itself must speak the full AXI handshake (AR / R / AW / W / B).
 module mycpu_top(
     input  wire        aclk,
     input  wire        aresetn,      // low active
@@ -62,20 +59,16 @@ module mycpu_top(
 wire clk    = aclk;
 wire resetn = aresetn;
 
-// CPU-side memory port: the AXI master to be written hangs off these.
-// inst_sram_rdata / data_sram_rdata must be driven by the AXI read data path,
-// and the *_en / *_we / *_addr / *_wdata below are what the AR/AW/W channels
-// have to be generated from.
-wire        inst_sram_en;
-wire [ 3:0] inst_sram_we;
-wire [31:0] inst_sram_addr;
-wire [31:0] inst_sram_wdata;
-wire [31:0] inst_sram_rdata;
-wire        data_sram_en;
-wire [ 3:0] data_sram_we;
-wire [31:0] data_sram_addr;
-wire [31:0] data_sram_wdata;
-wire [31:0] data_sram_rdata;
+// sram_axi_bridge: the core keeps its sram-like request/response view, the
+// bridge turns it into the single AXI master port below.
+wire        inst_req;          // pre_IF has a word to fetch at pc[pre_IF]
+wire [31:0] inst_rdata;        // returns after an arbitrary latency
+wire        data_req;          // MEM issues an access
+wire [ 3:0] data_we;           // byte strobes; 4'b0 means read
+wire [31:0] data_wdata;
+wire [31:0] data_rdata;
+wire        inst_pending;    // from the bridge: this fetch should wait
+wire        mem_pending;     // from the bridge: this access should wait
 
 // pipeline: IF -> ID -> EX -> MEM -> WB
 
@@ -147,7 +140,7 @@ wire        br_redirect;    // a redirect is being issued this cycle
 wire [31:0] inst_rd;    // receive in ID stage
 
 // should be stored between stages.
-// The [EX] elements are combinational aliases of the EX.v outputs
+// The [EX] elements are combinational aliases of the EX outputs
 reg  [31:0] pc [WB:pre_IF] /* verilator split_var */;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
@@ -160,7 +153,7 @@ reg  [31:0] src1_id;
 reg  [31:0] src2_id;
 reg  [MOD_WU:0] md_op_id;
 
-// stage fields: [ID] combinational, [EX] aliases EX.v, [MEM]/[WB] registered
+// stage fields: [ID] combinational, [EX] aliases EX, [MEM]/[WB] registered
 reg         src1_used [MEM:ID] /* verilator split_var */;
 reg         src2_used [MEM:ID] /* verilator split_var */;
 reg         res_from_mem [MEM:ID] /* verilator split_var */;
@@ -172,7 +165,6 @@ reg         mem_zext [MEM:ID] /* verilator split_var */;   // the load zero-exte
 reg         gr_we [WB:ID] /* verilator split_var */;
 reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
-reg         fake_mem_read_rsp_valid;   // fake stall for mem read
 
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
@@ -197,7 +189,7 @@ wire [ 1:0] crmd_plv_o;
 wire        crmd_ie_o;
 /* verilator lint_on UNUSEDSIGNAL */
 wire        int_o;
-wire        pre_if_adef;    // same judgement one stage earlier, gates inst_sram_en
+wire        pre_if_adef;    // same judgement one stage earlier, gates the fetch request
 
 // exception / ertn / interrupt
 wire        mem_excp;
@@ -214,7 +206,7 @@ wire        ex_mem_ale;     // load / store alignment, judged in EX (before MEM)
 wire        ex_mem_excp;    // ALE / interrupt: folded into the slot at the EX -> MEM edge
 wire        int_take;
 
-// EX.v outputs, aliased into the [EX] elements of the stage fields above
+// EX outputs, aliased into the [EX] elements of the stage fields above
 wire [31:0] ex_pc_o;
 wire        ex_src1_used_o;
 wire        ex_src2_used_o;
@@ -235,9 +227,9 @@ wire [31:0] ex_csr_mask_o;
 wire        ex_valid_o;
 wire        ex_stall;
 
-wire [31:0] ex_result;      // EX.v combinational output (this is the [EX] result)
+wire [31:0] ex_result;      // EX combinational output (this is the [EX] result)
 
-// EX.v forwarding
+// EX forwarding
 wire        fw1_ex_hit_o, fw1_ex_valid_o, fw2_ex_hit_o, fw2_ex_valid_o;
 wire [31:0] fw1_ex_data_o, fw2_ex_data_o;
 
@@ -428,7 +420,7 @@ end
 assign cur_valid = valid & ~ flush;
 assign next_valid = {cur_valid[MEM:pre_IF] & ~stall[MEM:pre_IF], 1'b1} & allow | (~ allow & cur_valid);
 
-// valid[EX] is registered inside EX.v
+// valid[EX] is registered inside EX
 always @(posedge clk) begin
     if (reset) begin
         valid[pre_IF]  <= 1'b0;
@@ -462,12 +454,10 @@ assign allow[pre_IF]  = ~ (| stall[WB:pre_IF]);
 assign src_wait = | (fw1_pending | fw2_pending);
 
 assign stall[pre_IF]  = mem_excp_ertn;
-assign stall[IF]      = 1'b0;
+assign stall[IF]      = inst_pending;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
-// a load waits one cycle for the BRAM's registered output; a store does not
-assign stall[MEM]     = valid[MEM] & mem_en[MEM] & ~ mem_excp
-                      & ~ mem_we[MEM] & ~ fake_mem_read_rsp_valid;
+assign stall[MEM]     = mem_pending;
 assign stall[WB]      = 1'b0;
 
 // forwarding
@@ -503,16 +493,13 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o)     |
 // masks the enable on a misaligned address.  The BRAM answers one cycle later.
 assign pre_if_adef = | pc[pre_IF][1:0];
 
-assign inst_sram_en    = cur_valid[pre_IF] & allow[IF] & ~ pre_if_adef; // when designing axi: this signal should be registered
-assign inst_sram_we    = 4'b0;
-assign inst_sram_addr  = pc[pre_IF];
-assign inst_sram_wdata = 32'b0;
-assign inst_rd         = inst_sram_rdata;
+assign inst_req        = cur_valid[pre_IF] & ~ pre_if_adef;
+assign inst_rd         = inst_rdata;
 
 always @(posedge clk) begin
     if (allow[ID]) begin
         if (csr_ctl[IF][CSR_EXCP])  inst <= 32'h0340_0000; // nop = andi $r0, $r0, 0
-        else                        inst <= inst_sram_rdata;
+        else                        inst <= inst_rdata;
     end
 end
 
@@ -844,16 +831,6 @@ assign src2_is_imm   = inst_slli_w |
 
 assign rf_raddr1 = rj;
 assign rf_raddr2 = src_reg_is_rd ? rd :rk;
-regfile u_regfile(
-    .clk    (clk      ),
-    .raddr1 (rf_raddr1),
-    .rdata1 (rf_rdata1),
-    .raddr2 (rf_raddr2),
-    .rdata2 (rf_rdata2),
-    .we     (rf_we    ),
-    .waddr  (rf_waddr ),
-    .wdata  (rf_wdata )
-    );
 
 assign rj_value  = fw1_data;
 
@@ -864,6 +841,122 @@ assign br_op_id   = {inst_jirl, inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_b
 assign br_base_id = inst_jirl ? rj_value : pc[ID];
 
 // EX stage
+// [EX] stage view comes straight from EX
+always @(*) begin
+    pc[EX]           = ex_pc_o;
+    src1_used[EX]    = ex_src1_used_o;
+    src2_used[EX]    = ex_src2_used_o;
+    res_from_mem[EX] = ex_res_from_mem_o;
+    mem_we[EX]       = ex_mem_we_o;
+    mem_en[EX]       = ex_mem_en_o;
+    mem_wdata[EX]    = ex_mem_wdata_o;
+    mem_size[EX]     = ex_mem_size_o;
+    mem_zext[EX]     = ex_mem_zext_o;
+    gr_we[EX]        = ex_gr_we_o;
+    dest[EX]         = ex_dest_o;
+    csr_num[EX]      = ex_csr_num_o;
+    csr_ctl[EX]      = ex_csr_ctl_o;
+    excp_cause[EX]   = ex_excp_cause_o;
+    csr_wdata[EX]    = ex_csr_wdata_o;
+    csr_mask[EX]     = ex_csr_mask_o;
+    valid[EX]        = ex_valid_o;
+end
+
+assign ex_mem_ale  = mem_en[EX] & (ex_mem_half ? ex_result[0] :
+                                   ex_mem_word ? | ex_result[1:0] : 1'b0);
+assign int_take    = int_o;
+
+assign ex_mem_excp = ex_mem_ale | int_take | csr_ctl[EX][CSR_EXCP];
+
+// MEM stage
+always @(posedge clk) begin
+    if (allow[MEM])     result[MEM] <= ex_result;
+    if (allow[WB])      result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
+end
+
+assign data_req = valid[MEM] & mem_en[MEM] & ~ mem_excp;
+
+// byte / halfword / word store: broadcast the stored data to every byte lane
+// and let the write-enable mask pick the addressed lane(s).
+// mem_byte / mem_half / mem_word are exclusive, so every select below is a flat
+// masked-OR instead of a priority chain.
+assign mem_byte = mem_size[MEM][SIZE_BYTE];
+assign mem_half = mem_size[MEM][SIZE_HALF];
+assign mem_word = mem_size[MEM][SIZE_WORD];
+
+assign ex_mem_byte = mem_size[EX][SIZE_BYTE];   // size as seen in EX (ALE judge)
+assign ex_mem_half = mem_size[EX][SIZE_HALF];
+assign ex_mem_word = mem_size[EX][SIZE_WORD];
+
+assign st_we_byte = 4'b0001 << result[MEM][1:0];
+assign st_we_half = result[MEM][1] ? 4'b1100 : 4'b0011;
+assign st_we_word = 4'b1111;
+
+assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
+
+assign data_we      = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
+assign data_wdata   = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
+                      ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
+                      ({32{mem_word}} &    mem_wdata[MEM]);
+
+// byte / halfword / word load: take the addressed lane and extend it
+assign ld_byte = (result[MEM][1:0] == 2'd0) ? data_rdata[ 7: 0] :
+                 (result[MEM][1:0] == 2'd1) ? data_rdata[15: 8] :
+                 (result[MEM][1:0] == 2'd2) ? data_rdata[23:16] :
+                                              data_rdata[31:24];
+assign ld_half = result[MEM][1] ? data_rdata[31:16] : data_rdata[15:0];
+
+assign ld_byte_ext = mem_zext[MEM] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte};
+assign ld_half_ext = mem_zext[MEM] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half};
+
+assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
+                    ({32{mem_half}} & ld_half_ext)  |
+                    ({32{mem_word}} & data_rdata);
+
+assign mem_excp = csr_ctl[MEM][CSR_EXCP];
+
+assign mem_excp_ertn = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
+
+// WB stage
+assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
+assign rf_waddr = dest[WB];
+assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
+                  csr_ctl[WB][CSR_RDCNTID] ? csr_rdata      :
+                  csr_ctl[WB][CSR_RDCNTVL] ? timer_o[31: 0] :
+                  csr_ctl[WB][CSR_RDCNTVH] ? timer_o[63:32] :
+                                             result[WB];
+
+// redirect signal at WB stage
+assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
+assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN];
+assign wb_excp_ertn = excp_i | ertn_i;
+
+assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
+                       excp_cause[WB][EXCP_ALE]  ? 6'h9 :
+                       excp_cause[WB][EXCP_ADEF] ? 6'h8 :
+                       excp_cause[WB][EXCP_INE]  ? 6'hd :
+                       excp_cause[WB][EXCP_BRK]  ? 6'hc :
+                                                   6'hb;   // syscall
+
+assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
+                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
+
+assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
+assign csr_raddr = csr_num[WB];
+assign csr_waddr = csr_num[WB];
+assign csr_wdata_w = csr_wdata[WB];
+
+regfile u_regfile(
+    .clk    (clk      ),
+    .raddr1 (rf_raddr1),
+    .rdata1 (rf_rdata1),
+    .raddr2 (rf_raddr2),
+    .rdata2 (rf_rdata2),
+    .we     (rf_we    ),
+    .waddr  (rf_waddr ),
+    .wdata  (rf_wdata )
+);
+
 EX u_ex(
     .clk            (clk              ),
     .reset          (reset            ),
@@ -926,123 +1019,7 @@ EX u_ex(
     .fw2_hit_o      (fw2_ex_hit_o     ),
     .fw2_valid_o    (fw2_ex_valid_o   ),
     .fw2_data_o     (fw2_ex_data_o    )
-    );
-
-// [EX] stage view comes straight from EX.v
-always @(*) begin
-    pc[EX]           = ex_pc_o;
-    src1_used[EX]    = ex_src1_used_o;
-    src2_used[EX]    = ex_src2_used_o;
-    res_from_mem[EX] = ex_res_from_mem_o;
-    mem_we[EX]       = ex_mem_we_o;
-    mem_en[EX]       = ex_mem_en_o;
-    mem_wdata[EX]    = ex_mem_wdata_o;
-    mem_size[EX]     = ex_mem_size_o;
-    mem_zext[EX]     = ex_mem_zext_o;
-    gr_we[EX]        = ex_gr_we_o;
-    dest[EX]         = ex_dest_o;
-    csr_num[EX]      = ex_csr_num_o;
-    csr_ctl[EX]      = ex_csr_ctl_o;
-    excp_cause[EX]   = ex_excp_cause_o;
-    csr_wdata[EX]    = ex_csr_wdata_o;
-    csr_mask[EX]     = ex_csr_mask_o;
-    valid[EX]        = ex_valid_o;
-end
-
-// ALE and the interrupt are still *captured* one stage earlier, in EX, and ride
-// into MEM inside csr_ctl[MEM]/excp_cause[MEM]; that folded bit is what
-// suppresses the access below, so the request, the stall and the write enable
-// all look at the same criterion.
-assign ex_mem_ale  = mem_en[EX] & (ex_mem_half ? ex_result[0] :
-                                   ex_mem_word ? | ex_result[1:0] : 1'b0);
-assign int_take    = int_o;
-
-assign ex_mem_excp = ex_mem_ale | int_take | csr_ctl[EX][CSR_EXCP];
-
-// MEM stage
-always @(posedge clk) begin
-    if (reset)          fake_mem_read_rsp_valid <= 1'b0;
-    else if (allow[MEM]) fake_mem_read_rsp_valid <= 1'b0;   // this cycle's access is issued
-    else if (valid[MEM] & mem_en[MEM] & ~ mem_we[MEM]) fake_mem_read_rsp_valid <= 1'b1;
-end
-
-always @(posedge clk) begin
-    if (allow[MEM])     result[MEM] <= ex_result;
-    if (allow[WB])      result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
-end
-
-assign data_sram_en    = valid[MEM] & mem_en[MEM] & ~ mem_excp;
-assign data_sram_addr  = result[MEM];
-
-// byte / halfword / word store: broadcast the stored data to every byte lane
-// and let the write-enable mask pick the addressed lane(s).
-// mem_byte / mem_half / mem_word are exclusive, so every select below is a flat
-// masked-OR instead of a priority chain.
-assign mem_byte = mem_size[MEM][SIZE_BYTE];
-assign mem_half = mem_size[MEM][SIZE_HALF];
-assign mem_word = mem_size[MEM][SIZE_WORD];
-
-assign ex_mem_byte = mem_size[EX][SIZE_BYTE];   // size as seen in EX (ALE judge)
-assign ex_mem_half = mem_size[EX][SIZE_HALF];
-assign ex_mem_word = mem_size[EX][SIZE_WORD];
-
-assign st_we_byte = 4'b0001 << result[MEM][1:0];
-assign st_we_half = result[MEM][1] ? 4'b1100 : 4'b0011;
-assign st_we_word = 4'b1111;
-
-assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
-
-assign data_sram_we    = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
-assign data_sram_wdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
-                         ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
-                         ({32{mem_word}} &    mem_wdata[MEM]);
-
-// byte / halfword / word load: take the addressed lane and extend it
-assign ld_byte = (result[MEM][1:0] == 2'd0) ? data_sram_rdata[ 7: 0] :
-                 (result[MEM][1:0] == 2'd1) ? data_sram_rdata[15: 8] :
-                 (result[MEM][1:0] == 2'd2) ? data_sram_rdata[23:16] :
-                                              data_sram_rdata[31:24];
-assign ld_half = result[MEM][1] ? data_sram_rdata[31:16] : data_sram_rdata[15:0];
-
-assign ld_byte_ext = mem_zext[MEM] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte};
-assign ld_half_ext = mem_zext[MEM] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half};
-
-assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
-                    ({32{mem_half}} & ld_half_ext)  |
-                    ({32{mem_word}} & data_sram_rdata);
-
-assign mem_excp  = csr_ctl[MEM][CSR_EXCP];
-
-assign mem_excp_ertn   = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
-
-// WB stage
-assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
-assign rf_waddr = dest[WB];
-assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
-                  csr_ctl[WB][CSR_RDCNTID] ? csr_rdata      :
-                  csr_ctl[WB][CSR_RDCNTVL] ? timer_o[31: 0] :
-                  csr_ctl[WB][CSR_RDCNTVH] ? timer_o[63:32] :
-                                             result[WB];
-
-// redirect signal at WB stage
-assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
-assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN];
-assign wb_excp_ertn = excp_i | ertn_i;
-
-assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
-                       excp_cause[WB][EXCP_ALE]  ? 6'h9 :
-                       excp_cause[WB][EXCP_ADEF] ? 6'h8 :
-                       excp_cause[WB][EXCP_INE]  ? 6'hd :
-                       excp_cause[WB][EXCP_BRK]  ? 6'hc :
-                                                   6'hb;   // syscall
-
-assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
-                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
-
-assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
-assign csr_raddr = csr_num[WB];
-assign csr_waddr = csr_num[WB];
-assign csr_wdata_w = csr_wdata[WB];
+);
 
 csr u_csr(
     .clk             (clk          ),
@@ -1068,6 +1045,67 @@ csr u_csr(
     .era_o           (era_o        ),
     .int_o           (int_o        ),
     .timer_o         (timer_o      )
+);
+
+sram_axi_bridge u_bridge(
+    .clk          (clk         ),
+    .reset        (reset      ),
+    
+    .inst_req     (inst_req    ),
+    .inst_addr    (pc[pre_IF]  ),
+    .allow_if     (allow[IF]   ),
+    .inst_rdata   (inst_rdata  ),
+    .inst_pending (inst_pending),
+
+    .data_req     (data_req    ),
+    .data_we      (data_we     ),
+    .data_addr    (result[MEM] ),
+    .data_wdata   (data_wdata  ),
+    .data_rdata   (data_rdata  ),
+    .mem_pending  (mem_pending ),
+
+    .crmd_plv     (crmd_plv_o  ),
+
+    .arid         (arid        ),
+    .araddr       (araddr      ),
+    .arlen        (arlen       ),
+    .arsize       (arsize      ),
+    .arburst      (arburst     ),
+    .arlock       (arlock      ),
+    .arcache      (arcache     ),
+    .arprot       (arprot      ),
+    .arvalid      (arvalid     ),
+    .arready      (arready     ),
+
+    .rid          (rid         ),
+    .rdata        (rdata       ),
+    .rresp        (rresp       ),
+    .rlast        (rlast       ),
+    .rvalid       (rvalid      ),
+    .rready       (rready      ),
+
+    .awid         (awid        ),
+    .awaddr       (awaddr      ),
+    .awlen        (awlen       ),
+    .awsize       (awsize      ),
+    .awburst      (awburst     ),
+    .awlock       (awlock      ),
+    .awcache      (awcache     ),
+    .awprot       (awprot      ),
+    .awvalid      (awvalid     ),
+    .awready      (awready     ),
+
+    .wid          (wid         ),
+    .wdata        (wdata       ),
+    .wstrb        (wstrb       ),
+    .wlast        (wlast       ),
+    .wvalid       (wvalid      ),
+    .wready       (wready      ),
+
+    .bid          (bid         ),
+    .bresp        (bresp       ),
+    .bvalid       (bvalid      ),
+    .bready       (bready      )
 );
 
 assign debug_wb_pc       = pc[WB];
