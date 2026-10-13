@@ -66,7 +66,7 @@ reg [31:0] mem [0:MEM_WORDS-1];
 
 //------------------------------------------------------------------ wait states
 reg [7:0] lfsr;
-wire [7:0] jit = JITTER ? {5'b0, lfsr[2:0]} : 8'h0;
+wire [7:0] jit = JITTER ? {4'b0, lfsr[3:0]} : 8'h0;
 
 always @(posedge aclk) begin
     if (!aresetn) lfsr <= 8'h1;
@@ -74,38 +74,89 @@ always @(posedge aclk) begin
 end
 
 //------------------------------------------------------------------ read channel
-reg  [ 3:0] rd_id_q;
-reg  [31:0] rd_addr_q;
-reg         rd_busy;
-reg  [ 7:0] rd_wait;
-reg         rd_err;
+// Two outstanding reads, so responses can come back OUT OF ORDER: AXI only
+// orders beats per ID, and the crossbar / axi_ram in the real SoC are free to
+// reorder, which a single-slot model would never exercise.
+integer si;
 
-wire [ADDR_W-1:0] rd_index = rd_addr_q[ADDR_W+1:2];
+reg  [ 3:0] rd_id_q   [0:1];
+reg  [31:0] rd_addr_q [0:1];
+reg         rd_busy   [0:1];
+reg  [ 7:0] rd_wait   [0:1];
+reg         rd_err    [0:1];
 
-assign arready = ~ rd_busy;
-assign rvalid  = rd_busy & (rd_wait == 8'h0);
-assign rid     = rd_id_q;
-assign rlast   = 1'b1;
-assign rresp   = rd_err ? 2'b10 : 2'b00;                  // SLVERR for an unmapped word
-assign rdata   = rd_err ? 32'hdead_beef : mem[rd_index];  // live read, mirrors a RAM
+wire [ADDR_W-1:0] rd_idx0 = rd_addr_q[0][ADDR_W+1:2];
+wire [ADDR_W-1:0] rd_idx1 = rd_addr_q[1][ADDR_W+1:2];
+
+// The accept side is delayed too (JITTER arms a wait after every accepted
+// request), which is what the random mask in axi_wrap_ram does to arready /
+// awready / wready.
+reg [7:0] ar_acc_wait, aw_acc_wait, w_acc_wait;
 
 always @(posedge aclk) begin
     if (!aresetn) begin
-        rd_busy <= 1'b0;
-        rd_wait <= 8'h0;
+        ar_acc_wait <= 8'h0; aw_acc_wait <= 8'h0; w_acc_wait <= 8'h0;
     end
-    else if (arvalid & arready) begin
-        rd_busy   <= 1'b1;
-        rd_id_q   <= arid;
-        rd_addr_q <= araddr;
-        rd_err    <= (araddr[31:ADDR_W+2] != 0);
-        rd_wait   <= LAT + jit;
+    else begin
+        if (arvalid & arready) ar_acc_wait <= LAT + jit;
+        else if (ar_acc_wait != 8'h0) ar_acc_wait <= ar_acc_wait - 8'h1;
+
+        if (awvalid & awready) aw_acc_wait <= LAT + jit;
+        else if (aw_acc_wait != 8'h0) aw_acc_wait <= aw_acc_wait - 8'h1;
+
+        if (wvalid & wready) w_acc_wait <= LAT + jit;
+        else if (w_acc_wait != 8'h0) w_acc_wait <= w_acc_wait - 8'h1;
     end
-    else if (rd_busy & (rd_wait != 8'h0)) begin
-        rd_wait <= rd_wait - 8'h1;
+end
+
+wire rd_ready0  = rd_busy[0] & (rd_wait[0] == 8'h0);
+wire rd_ready1  = rd_busy[1] & (rd_wait[1] == 8'h0);
+wire rd_pick0   = rd_ready0;                             // slot 0 wins a tie
+wire rd_err_sel = rd_pick0 ? rd_err[0] : rd_err[1];
+
+assign arready = (ar_acc_wait == 8'h0) & ~ (rd_busy[0] & rd_busy[1]);
+assign rvalid  = rd_ready0 | rd_ready1;
+assign rid     = rd_pick0 ? rd_id_q[0] : rd_id_q[1];
+assign rlast   = 1'b1;
+assign rresp   = rd_err_sel ? 2'b10 : 2'b00;             // SLVERR for an unmapped word
+assign rdata   = rd_err_sel ? 32'hdead_beef              // live read, mirrors a RAM
+                            : mem[rd_pick0 ? rd_idx0 : rd_idx1];
+
+always @(posedge aclk) begin
+    if (!aresetn) begin
+        for (si = 0; si < 2; si = si + 1) begin
+            rd_busy[si] <= 1'b0;
+            rd_wait[si] <= 8'h0;
+        end
     end
-    else if (rd_busy & rready) begin
-        rd_busy <= 1'b0;
+    else begin
+        if (arvalid & arready) begin
+            if (~ rd_busy[0]) begin
+                rd_busy[0]   <= 1'b1;
+                rd_id_q[0]   <= arid;
+                rd_addr_q[0] <= araddr;
+                rd_err[0]    <= (araddr[31:ADDR_W+2] != 0);
+                rd_wait[0]   <= LAT + jit;
+            end
+            else begin
+                rd_busy[1]   <= 1'b1;
+                rd_id_q[1]   <= arid;
+                rd_addr_q[1] <= araddr;
+                rd_err[1]    <= (araddr[31:ADDR_W+2] != 0);
+                rd_wait[1]   <= LAT + jit;
+            end
+        end
+
+        for (si = 0; si < 2; si = si + 1) begin
+            if (rd_busy[si]) begin
+                if (rd_wait[si] != 8'h0) begin
+                    rd_wait[si] <= rd_wait[si] - 8'h1;
+                end
+                else if (rvalid & rready & (si == 0 ? rd_pick0 : ~ rd_pick0)) begin
+                    rd_busy[si] <= 1'b0;
+                end
+            end
+        end
     end
 end
 
@@ -126,8 +177,8 @@ reg  [ 7:0] b_wait;
 
 wire [ADDR_W-1:0] wr_index = aw_addr_q[ADDR_W+1:2];
 
-assign awready = ~ aw_busy & (aw_wait == 8'h0);
-assign wready  = ~ w_busy  & (w_wait  == 8'h0);
+assign awready = ~ aw_busy & (aw_acc_wait == 8'h0);
+assign wready  = ~ w_busy  & (w_acc_wait == 8'h0);
 assign bid     = wr_id_q;
 assign bresp   = 2'b00;
 assign bvalid  = b_busy & (b_wait == 8'h0);

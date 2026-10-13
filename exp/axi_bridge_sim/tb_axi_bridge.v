@@ -185,7 +185,51 @@ integer sim_cycles = 0;
 
 always @(posedge clk) sim_cycles = sim_cycles + 1;
 
+// ---- monitor: the AXI write payload must not move while a store is in flight
+reg [31:0] mon_addr_q, mon_wdata_q;
+reg [ 3:0] mon_we_q;
+reg        mon_busy_q;
+always @(posedge clk) begin
+    if (!reset) begin
+        if (mon_busy_q &&
+            ((u_bridge.awaddr_r  !== mon_addr_q) ||
+             (u_bridge.wdata_r !== mon_wdata_q) ||
+             (u_bridge.wstrb_r    !== mon_we_q))) begin
+            errors = errors + 1;
+            $display("MON: write payload changed while a store was in flight (t=%0t): addr %h->%h wdata %h->%h we %b->%b awvalid=%b wvalid=%b",
+                     $time, mon_addr_q, u_bridge.awaddr_r, mon_wdata_q, u_bridge.wdata_r,
+                     mon_we_q, u_bridge.wstrb_r, awvalid, wvalid);
+        end
+        mon_busy_q  <= u_bridge.mem_write_state[1] |
+                       (u_bridge.mem_write_state[2] & ~ u_bridge.write_rsp_done);
+        mon_addr_q  <= u_bridge.awaddr_r;
+        mon_wdata_q <= u_bridge.wdata_r;
+        mon_we_q    <= u_bridge.wstrb_r;
+    end
+end
+
+// ---- white-box monitors on the bridge -------------------------------------
+// 1. the two read requesters must never be in REQ together (shared AR channel)
+// 2. a beat accepted by rready must belong to a requester whose FSM is in RSP
 reg dbg_on = 1'b0;
+always @(posedge clk) begin
+    if (!reset) begin
+        if (u_bridge.inst_state[1] & u_bridge.mem_read_state[1]) begin
+            errors = errors + 1;
+            $display("MON: both read requesters in REQ (t=%0t)", $time);
+        end
+        if (rvalid & rready & !((u_bridge.inst_state[2] & (rid == 4'b0)) |
+                                (u_bridge.mem_read_state[2] & (rid == 4'b1)))) begin
+            errors = errors + 1;
+            $display("MON: beat consumed with no FSM in RSP: rid=%h t=%0t", rid, $time);
+        end
+        if (u_bridge.mem_read_state[2] & rvalid & (rid == 4'b1) & (rdata === 32'h0)) begin
+            errors = errors + 1;
+            $display("MON: data read got 0 from the slave, araddr was %h (t=%0t)",
+                     u_bridge.araddr, $time);
+        end
+    end
+end
 always @(posedge clk) begin
     if (dbg_on) $display("t=%0t pend=%b mstate=%b arv=%b araddr=%h arready=%b rv=%b rid=%h rdata=%h drdata=%h dreq=%b dwe=%b daddr=%h",
         $time, mem_pending, u_bridge.mem_read_state, arvalid, araddr, arready,
@@ -301,6 +345,8 @@ endtask
 
 //------------------------------------------------------------------ tests
 integer k;
+integer seed   = 32'h1234_5678;
+integer nrand  = 400;
 reg [31:0] addr, wd, rd;
 reg [ 3:0] we;
 
@@ -310,6 +356,10 @@ initial begin
         $dumpvars(0, tb_axi_bridge);
     end
 
+    if (!$value$plusargs("seed=%d", seed)) seed  = 32'h1234_5678;
+    if (!$value$plusargs("n=%d",    nrand)) nrand = 400;
+    $display("[cfg] seed=%0d n=%0d", seed, nrand);
+
     pc_fe = CODE_BASE; pc_if = 32'b0; if_valid = 1'b0; fe_enable = 1'b0;
     data_req = 1'b0; data_we = 4'b0; data_addr = 32'b0; data_wdata = 32'b0;
     crmd_plv = 2'b00;
@@ -317,6 +367,17 @@ initial begin
     repeat (8) @(posedge clk);
     resetn = 1'b1;
     repeat (4) @(posedge clk);
+
+    //------------------------------- 0. the FIRST memory access is a store
+    // (in the real program tests 1..13 are alu/shift only, so the very first
+    // data access of the whole run is a store, followed by the load that reads
+    // it back)
+    fe_enable = 1'b0;
+    addr = DATA_BASE + 32'h10;
+    do_store(addr, 4'hf, 32'h0bad_f00d);
+    ref[addr >> 2] = 32'h0bad_f00d;
+    do_load(addr, rd);
+    chk32(32'h0bad_f00d, rd, "first ever access is a store");
 
     //-------------------------------------------------- 1. instruction fetch
     fe_enable = 1'b1;
@@ -326,6 +387,9 @@ initial begin
     $display("[1] fetch    : %0d instructions, fe_count=%0d", CODE_WORDS, fe_count);
 
     //-------------------------------------------------- 2. plain load
+    // keep the instruction fetch running: in the real soc the first ld.w of a
+    // test happens while fetches are in flight on the shared AR/R channel
+    fe_enable = 1'b1;
     dbg_on = $test$plusargs("dbg");
     do_load(DATA_BASE + 32'h40, rd);
     dbg_on = 1'b0;
@@ -375,6 +439,39 @@ initial begin
     do_load(addr, rd);                                // issued while the write drains
     chk32(wd, rd, "read after write");
 
+    //------------------------------- 6b. mirror of TEST_LD_W's instruction mix
+    // three stores back to back, then a load of the FIRST store's word: the load
+    // must wait for the whole write chain (RAW) and read the stored data
+    fe_enable = 1'b1;
+    addr = DATA_BASE + 32'h200;
+    @(posedge clk); #1;
+    data_req = 1'b1; data_we = 4'hf; data_addr = addr; data_wdata = 32'hc822c7e8;
+    @(negedge clk); while (mem_pending) @(negedge clk);
+    @(posedge clk); #1;                                   // store 1 taken
+    data_addr = addr + 4; data_wdata = addr + 4;           // store 2 right behind
+    @(negedge clk); while (mem_pending) @(negedge clk);
+    @(posedge clk); #1;
+    data_addr = addr - 8; data_wdata = addr - 8;           // store 3
+    @(negedge clk); while (mem_pending) @(negedge clk);
+    @(posedge clk); #1;
+    data_we = 4'b0; data_addr = addr; data_wdata = 32'b0;  // and now the load
+    @(negedge clk); while (mem_pending) @(negedge clk);
+    rd = data_rdata;
+    @(posedge clk); #1;
+    data_req = 1'b0; data_we = 4'b0; data_addr = 32'b0; data_wdata = 32'b0;
+    fe_enable = 1'b0;
+    ref[addr >> 2] = 32'hc822c7e8;
+    ref[(addr + 4) >> 2] = addr + 4;
+    ref[(addr - 8) >> 2] = addr - 8;
+    chk32(32'hc822c7e8, rd, "three stores then load the first word");
+
+    // and every one of the three stores must have landed with ITS OWN payload:
+    // a read taken while the write is still in flight must not clobber it
+    do_load(addr + 4, rd);
+    chk32(addr + 4, rd, "store 2 payload intact");
+    do_load(addr - 8, rd);
+    chk32(addr - 8, rd, "store 3 payload intact");
+
     //-------------------------------------------------- 7. fetch with a store in flight
     fe_enable = 1'b1;
     @(posedge clk); #1;
@@ -390,11 +487,14 @@ initial begin
     chk32(32'h1234_abcd, rd, "store landed while fetching");
 
     //-------------------------------------------------- 8. random mix
-    for (k = 0; k < 200; k = k + 1) begin
-        addr = DATA_BASE + (($unsigned($random) % 512) * 4);
+    // background fetches run the whole time, so the two read requesters fight
+    // over the shared AR/R channel
+    fe_enable = 1'b1;
+    for (k = 0; k < nrand; k = k + 1) begin
+        addr = DATA_BASE + (($unsigned($random(seed)) % 512) * 4);
         we   = 4'hf;                                    // full words in the mix
-        wd   = $random;
-        if (($random % 2) == 0) begin
+        wd   = $random(seed);
+        if (($random(seed) % 2) == 0) begin
             do_store(addr, we, wd);
             ref_store(addr, we, wd);
         end
@@ -403,7 +503,9 @@ initial begin
             chk32(ref[addr >> 2], rd, "random load");
         end
     end
-    $display("[8] random   : 200 mixed accesses done");
+    fe_enable = 1'b0;
+    repeat (20) @(posedge clk);
+    $display("[8] random   : %0d mixed accesses done", nrand);
 
     //-------------------------------------------------- done
     $display("==========================================");

@@ -85,8 +85,9 @@ reg         write_data_req_fire_reg;
 
 reg  [31:0] inst_addr_r;
 reg  [31:0] inst_rdata_r, data_rdata_r;
-reg  [31:0] data_addr_r, data_wdata_r;
-reg  [ 3:0] data_we_r;
+reg  [31:0] rd_addr_r;                 // AR address of a data read
+reg  [31:0] awaddr_r, wdata_r;         // AW / W payload of a store
+reg  [ 3:0] wstrb_r;
 reg         inst_arprot0_r;
 reg         mem_arprot0_r;
 reg         awprot0_r;
@@ -159,32 +160,41 @@ assign inst_rdata = inst_state[rsp]     ? rdata : inst_rdata_r;
 assign data_rdata = mem_read_state[rsp] ? rdata : data_rdata_r;
 
 assign arid   = inst_state[req] ? inst_rid : mem_rid;
-assign araddr = inst_state[req] ? inst_addr_r : data_addr_r;
+assign araddr = inst_state[req] ? inst_addr_r : rd_addr_r;
 
 assign mem_read_take  = mem_read_req  & mem_read_state[ret];
 assign mem_write_take = mem_write_req & write_slot_free;
-assign mem_take       = mem_read_take | mem_write_take;
 
+// The read capture must NOT touch the write payload
 always @(posedge clk) begin
     if (reset) begin
-        data_addr_r  <= 32'b0;
-        data_wdata_r <= 32'b0;
-        data_we_r    <= 4'b0;
+        rd_addr_r   <= 32'b0;
         mem_arprot0_r <= 1'b0;
-        awprot0_r    <= 1'b0;
     end
-    else if (mem_take) begin
-        data_addr_r  <= data_addr;
-        data_wdata_r <= data_wdata;
-        data_we_r    <= data_we;
+    else if (mem_read_take) begin
+        rd_addr_r   <= data_addr;
         mem_arprot0_r <= (crmd_plv == 2'b00);
-        awprot0_r    <= (crmd_plv == 2'b00);
     end
 end
 
-assign awaddr    = data_addr_r;
-assign wdata     = data_wdata_r;
-assign wstrb     = data_we_r;
+always @(posedge clk) begin
+    if (reset) begin
+        awaddr_r  <= 32'b0;
+        wdata_r   <= 32'b0;
+        wstrb_r   <= 4'b0;
+        awprot0_r <= 1'b0;
+    end
+    else if (mem_write_take) begin
+        awaddr_r  <= data_addr;
+        wdata_r   <= data_wdata;
+        wstrb_r   <= data_we;
+        awprot0_r <= (crmd_plv == 2'b00);
+    end
+end
+
+assign awaddr    = awaddr_r;
+assign wdata     = wdata_r;
+assign wstrb     = wstrb_r;
 assign awprot[0] = awprot0_r;
 
 assign arprot[2] = inst_state[req];

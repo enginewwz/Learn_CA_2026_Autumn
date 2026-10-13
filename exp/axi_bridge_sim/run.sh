@@ -8,6 +8,8 @@
 set -e
 LAT=${1:-1}
 JIT=${2:-0}
+shift 2 2>/dev/null || true
+ARGS="$*"
 DIR=$(cd "$(dirname "$0")" && pwd)
 OUT=$(mktemp -d)
 EXTRA=""
@@ -17,4 +19,4 @@ iverilog -g2005 -o "$OUT/tb" \
     "$DIR/../myCPU/sram_axi_bridge.v" "$DIR/axi_slave_model.v" "$DIR/tb_axi_bridge.v"
 echo "--- LAT=$LAT JITTER=$JIT ---"
 cd "$DIR"
-vvp "$OUT/tb" $EXTRA
+vvp "$OUT/tb" $EXTRA $ARGS
