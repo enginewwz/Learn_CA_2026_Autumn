@@ -206,7 +206,12 @@ wire        excp_i;
 wire        ertn_i;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
-reg  [31:0] excp_badv_wb;   // BADV of the instruction now in WB
+reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
+
+wire [31:0] pre_mem_addr;   // address presented to the data BRAM
+wire        pre_mem_ale;    // load / store alignment, judged in pre_MEM
+wire        pre_mem_excp;
+wire        int_take;
 
 // EX.v outputs, aliased into the [EX] elements of the stage fields above
 wire [31:0] ex_pc_o;
@@ -449,14 +454,13 @@ assign flush = mem_excp_ertn ? 7'b0011111 :
                br_taken_id   ? 7'b0000011 :
                                7'b0000000;
 
-// allow logic --> generate with stall logic
 assign allow[WB]      = 1'b1;
-assign allow[MEM]     = ~ stall[MEM];
-assign allow[pre_MEM] = ~ stall[pre_MEM]    && allow[MEM];
-assign allow[EX]      = ~ stall[EX]         && allow[pre_MEM];
-assign allow[ID]      = ~ stall[ID]         && allow[EX];
-assign allow[IF]      = ~ stall[IF]         && allow[ID];
-assign allow[pre_IF]  = ~ stall[pre_IF]     && allow[IF];
+assign allow[MEM]     = ~ (| stall[WB:MEM]);
+assign allow[pre_MEM] = ~ (| stall[WB:pre_MEM]);
+assign allow[EX]      = ~ (| stall[WB:EX]);
+assign allow[ID]      = ~ (| stall[WB:ID]);
+assign allow[IF]      = ~ (| stall[WB:IF]);
+assign allow[pre_IF]  = ~ (| stall[WB:pre_IF]);
 
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
@@ -761,7 +765,7 @@ always @(posedge clk) begin
         csr_mask[MEM]   <= csr_mask[pre_MEM];
         excp_cause[MEM] <= excp_cause[pre_MEM]
                            | (pre_mem_ale ? (6'h1 << EXCP_ALE) : 6'h0)
-                           | (int_o       ? (6'h1 << EXCP_INT) : 6'h0);
+                           | (int_take    ? (6'h1 << EXCP_INT) : 6'h0);
     end
     if (allow[WB]) begin
         csr_num[WB]    <= csr_num[MEM];
@@ -769,7 +773,7 @@ always @(posedge clk) begin
         csr_wdata[WB]  <= csr_wdata[MEM];
         csr_mask[WB]   <= csr_mask[MEM];
         excp_cause[WB] <= excp_cause[MEM];
-        excp_badv_wb   <= excp_cause[MEM][EXCP_ALE] ? result[MEM] : pc[MEM];
+        wb_excp_badv   <= excp_cause[MEM][EXCP_ALE] ? result[MEM] : pc[MEM];
     end
 end
 
@@ -980,15 +984,14 @@ always @(*) begin
 end
 
 // pre_MEM stage
-wire [31:0] pre_mem_addr;   // address presented to the data BRAM
-wire        pre_mem_ale;    // load / store alignment, judged in pre_MEM
-wire        pre_mem_excp;
 
 assign pre_mem_addr = result[pre_MEM];
 
 assign pre_mem_ale = mem_en[pre_MEM] & (pre_mem_half ? result[pre_MEM][0] :
                                         pre_mem_word ? | result[pre_MEM][1:0] : 1'b0);
-assign pre_mem_excp    = pre_mem_ale | int_o | csr_ctl[pre_MEM][CSR_EXCP];
+assign int_take = int_o;
+
+assign pre_mem_excp    = pre_mem_ale | int_take | csr_ctl[pre_MEM][CSR_EXCP];
 
 // MEM stage
 always @(posedge clk) begin
@@ -1086,7 +1089,7 @@ csr u_csr(
     .excp_ecode_i    (excp_ecode   ),
     .excp_esubcode_i (9'h0         ),
     .excp_badv_en_i  (excp_badv_en ),
-    .excp_badv_i     (excp_badv_wb ),
+    .excp_badv_i     (wb_excp_badv ),
     .ertn_i          (ertn_i       ),
     .hwi_i           (8'h0         ),
     .ipi_i           (1'b0         ),
