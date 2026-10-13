@@ -28,13 +28,17 @@ reg  [ 6:0] op;
 wire [31:0] r_new, r_old;
 
 mul u_new(
-    .clk (clk), .reset(reset), .allow(allow[1:0]),   // 2 internal stages
+    .clk (clk), .reset(reset), .allow(allow[0]),     // one internal register stage
     .src1(a), .src2(b), .md_op(op), .result(r_new)
 );
 
-// align the new (combinational) output with the old (registered) one
-reg [31:0] r_new_r;
-always @(posedge clk) if (allow[2]) r_new_r <= r_new;
+// align the new output (tree registered once, CPA combinational) with the old
+// 3-stage one: two more register stages clocked by the old design's allow bits.
+reg [31:0] r_new_r, r_new_r2;
+always @(posedge clk) begin
+    if (allow[1]) r_new_r  <= r_new;
+    if (allow[2]) r_new_r2 <= r_new_r;
+end
 
 mul_ref u_old(
     .clk (clk), .reset(reset), .allow(allow),
@@ -55,7 +59,7 @@ task drive_and_check;
         @(posedge clk); @(posedge clk); @(posedge clk); @(posedge clk);
         #1;
         checks = checks + 1;
-        if (r_new_r !== r_old) begin
+        if (r_new_r2 !== r_old) begin
             errors = errors + 1;
             if (errors <= 20)
                 $display("MISMATCH a=%08x b=%08x op=%07b new=%08x old=%08x",

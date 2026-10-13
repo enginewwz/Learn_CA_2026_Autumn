@@ -50,7 +50,7 @@ localparam SIZE_BYTE         = 0;
 localparam SIZE_HALF         = 1;
 localparam SIZE_WORD         = 2;
 
-// csr_ctl bit positions (exp12/13)
+// csr_ctl bit positions
 localparam CSR_RD            = 0;   // csrrd/csrwr/csrxchg: rd <- CSR[csr_num]
 localparam CSR_WE            = 1;   // csrwr/csrxchg: write the CSR
 localparam CSR_ERTN          = 2;   // ertn

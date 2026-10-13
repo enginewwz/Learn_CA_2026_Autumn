@@ -16,7 +16,7 @@ reg         m_valid_in, m_stall;
 reg  [31:0] m_a, m_b;
 reg  [ 1:0] m_op;
 wire [ 6:0] m_md_op  = 7'b1 << m_op;      // one-hot: 0=mul.w 1=mulh.w 2=mulh.wu
-wire [ 1:0] m_allow  = m_stall ? 2'b00 : 2'b11;  // mul.v takes allow[1:0]
+wire        m_allow  = m_stall ? 1'b0 : 1'b1;   // mul.v has one internal register stage
 wire [31:0] m_sel;
 
 mul u_mul(
@@ -64,31 +64,30 @@ function [31:0] mul_exp;
     end
 endfunction
 
-// mirrored expectation pipeline: 2 internal stages, frozen by stall.
-// mul.v has no valid and its output is combinational, so the expected result
-// lines up 2 cycles after the inputs are presented.
-reg        ev0, ev1;
-reg [31:0] eq0, eq1;
+// mirrored expectation pipeline: the tree is registered once and the CPA hangs
+// combinationally off it, so the expected result lines up 1 cycle after the
+// inputs are presented (frozen by stall).
+reg        ev0;
+reg [31:0] eq0;
 always @(posedge clk) begin
     if (reset) begin
-        ev0 <= 1'b0; ev1 <= 1'b0;
+        ev0 <= 1'b0;
+        eq0 <= 32'b0;
     end
     else if (!m_stall) begin
         ev0 <= m_valid_in;
         eq0 <= mul_exp(m_a, m_b, m_op);
-        ev1 <= ev0;
-        eq1 <= eq0;
     end
 end
 
 always @(posedge clk) begin
     #1;
-    if (!reset && ev1) begin
+    if (!reset && ev0) begin
         checks = checks + 1;
-        if (m_sel !== eq1) begin
+        if (m_sel !== eq0) begin
             errors = errors + 1;
             $display("MUL ERROR t=%0t exp=%h got=%h (a=%h b=%h op=%0d)",
-                     $time, eq1, m_sel, m_a, m_b, m_op);
+                     $time, eq0, m_sel, m_a, m_b, m_op);
         end
     end
 end
