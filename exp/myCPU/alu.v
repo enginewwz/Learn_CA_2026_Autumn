@@ -1,10 +1,10 @@
 module alu(
   input  wire [11:0] alu_op,
-  input  wire [31:0] alu_src1,
-  input  wire [31:0] alu_src2,
+  input  wire [31:0] src1,
+  input  wire [31:0] src2,
   output wire [31:0] alu_result,
-  output wire        lt_o,       // signed   alu_src1 < alu_src2, tapped off the borrow tree
-  output wire        ltu_o       // unsigned alu_src1 < alu_src2, = ltu32 (borrow tree root)
+  output wire        lt_o,       // signed   src1 < src2, tapped off the borrow tree
+  output wire        ltu_o       // unsigned src1 < src2, = ltu32 (borrow tree root)
 );
 
 // control code decomposition: one bit per operation
@@ -55,17 +55,17 @@ wire [31:0] sll_result;
 wire [63:0] sr64_result;   //only [31:0] is used below
 wire [31:0] sr_result;
 
-assign and_result = alu_src1 & alu_src2;
-assign or_result  = alu_src1 | alu_src2;
+assign and_result = src1 & src2;
+assign or_result  = src1 | src2;
 assign nor_result = ~or_result;
-assign xor_result = alu_src1 ^ alu_src2;
-assign lui_result = alu_src2;
+assign xor_result = src1 ^ src2;
+assign lui_result = src2;
 
 // SLL result
-assign sll_result = alu_src1 << alu_src2[4:0];                                    //rj << i5
+assign sll_result = src1 << src2[4:0];                                    //rj << i5
 
 // SRL, SRA result
-assign sr64_result = {{32{op_sra & alu_src1[31]}}, alu_src1[31:0]} >> alu_src2[4:0]; //rj >> i5
+assign sr64_result = {{32{op_sra & src1[31]}}, src1[31:0]} >> src2[4:0]; //rj >> i5
 assign sr_result   = sr64_result[31:0];
 
 wire [31:0] early_result =
@@ -94,10 +94,10 @@ wire [1:0] brw16_1;
 
 generate
     for (g = 0; g < 16; g = g + 1) begin : g_brw2
-        assign brw2[g] = cla(~alu_src1[2*g+1] & alu_src2[2*g+1],
-                              alu_src1[2*g+1] ~^ alu_src2[2*g+1],
-                             ~alu_src1[2*g  ] & alu_src2[2*g  ],
-                              alu_src1[2*g  ] ~^ alu_src2[2*g  ]);
+        assign brw2[g] = cla(~src1[2*g+1] & src2[2*g+1],
+                              src1[2*g+1] ~^ src2[2*g+1],
+                             ~src1[2*g  ] & src2[2*g  ],
+                              src1[2*g  ] ~^ src2[2*g  ]);
     end
     for (g = 0; g < 8; g = g + 1) begin : g_brw4
         assign brw4[g] = cla(brw2[2*g+1][1], brw2[2*g+1][0],
@@ -126,10 +126,10 @@ wire       carry16;
 
 generate
     for (g = 0; g < 8; g = g + 1) begin : g_car2
-        assign car2[g] = cla(alu_src1[2*g+1] & alu_src2[2*g+1],
-                             alu_src1[2*g+1] ^ alu_src2[2*g+1],
-                             alu_src1[2*g  ] & alu_src2[2*g  ],
-                             alu_src1[2*g  ] ^ alu_src2[2*g  ]);
+        assign car2[g] = cla(src1[2*g+1] & src2[2*g+1],
+                             src1[2*g+1] ^ src2[2*g+1],
+                             src1[2*g  ] & src2[2*g  ],
+                             src1[2*g  ] ^ src2[2*g  ]);
     end
     for (g = 0; g < 4; g = g + 1) begin : g_car4
         assign car4[g] = cla(car2[2*g+1][1], car2[2*g+1][0],
@@ -149,9 +149,9 @@ wire [15:0] add_hi;
 (* keep = "true", dont_touch = "true" *) wire [15:0] add_hi1;   //high half with carry
 wire [31:0] sum_add;
 
-assign add_lo  = alu_src1[15:0]  + alu_src2[15:0];
-assign add_hi0 = alu_src1[31:16] + alu_src2[31:16];
-assign add_hi1 = alu_src1[31:16] + alu_src2[31:16] + 16'd1;
+assign add_lo  = src1[15:0]  + src2[15:0];
+assign add_hi0 = src1[31:16] + src2[31:16];
+assign add_hi1 = src1[31:16] + src2[31:16] + 16'd1;
 assign add_hi  = carry16 ? add_hi1 : add_hi0;
 assign sum_add = {add_hi, add_lo};
 
@@ -162,16 +162,16 @@ wire [15:0] sub_hi;
 (* keep = "true", dont_touch = "true" *) wire [15:0] sub_hi1;   //high half with borrow
 wire [31:0] sum_sub;
 
-assign sub_lo  = alu_src1[15:0]  - alu_src2[15:0];
-assign sub_hi0 = alu_src1[31:16] - alu_src2[31:16];
-assign sub_hi1 = alu_src1[31:16] - alu_src2[31:16] - 16'd1;
+assign sub_lo  = src1[15:0]  - src2[15:0];
+assign sub_hi0 = src1[31:16] - src2[31:16];
+assign sub_hi1 = src1[31:16] - src2[31:16] - 16'd1;
 assign sub_hi  = brw_lo16 ? sub_hi1 : sub_hi0;
 assign sum_sub = {sub_hi, sub_lo};
 
 wire cmp_bit;
 
-assign lt_o  = (alu_src1[31] & ~alu_src2[31])
-             | ((alu_src1[31] ~^ alu_src2[31]) & ltu32);
+assign lt_o  = (src1[31] & ~src2[31])
+             | ((src1[31] ~^ src2[31]) & ltu32);
 assign ltu_o = ltu32;
 
 assign cmp_bit = (op_slt & lt_o) | (op_sltu & ltu32);

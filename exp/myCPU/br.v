@@ -2,7 +2,7 @@
 //
 // The branch conditions do NOT re-implement a comparator.  The ALU already
 // evaluates its borrow prefix tree on the very same operand pair
-// (alu_src1 / alu_src2 == br src1 / src2), so blt/bge/bltu/bgeu read the two
+// (src1 / src2 == br src1 / src2), so blt/bge/bltu/bgeu read the two
 // compare taps the ALU exports (lt_i = signed <, ltu_i = unsigned <) and only
 // invert them for the "or equal" forms.  Equality has no such tap, so beq/bne
 // still fold src1 ^ src2 here (one XOR per bit + a reduction OR: 3 LUT levels

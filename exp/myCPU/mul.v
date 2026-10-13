@@ -1,16 +1,22 @@
-// 2-stage pipelined 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
+// 2-cycle 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
-//        -> s0: Booth encode (17 digits) + partial products + Wallace L1..L2
-//        -> s1: Wallace L3..L6                              (8 -> 2 vectors)
-//        -> final 64-bit CPA + high/low select (combinational)
+//        -> s0: Booth encode (17 digits) + partial products + the WHOLE Wallace
+//               tree L1..L6 (18 -> 2 vectors), registered as (ws, wc)
+//        -> combinational tail: 64-bit CPA + high/low select
 //
-// allow[1:0]: stage k is frozen while allow[k] is low; one bit per internal
-// stage.  There is no valid here - the caller tracks positions (mul_pos).
+// The tree is nothing but wide XOR/OR LUT chains, so it fits in the same cycle
+// as the operand registers; the only deep structure left is the final carry
+// chain.  Keeping that CPA combinational after the (ws, wc) register is what
+// lets EX be two stages: the tree is computed in the stage-0 cycle and the CPA
+// in the stage-1 cycle, the last one before MEM.
 //
-// The result is combinational: it is ready in the same cycle the caller's
-// stage-2 registers hold the operands, and MEM registers it.  mul is therefore
-// never forwarded to ID from inside EX.
+// allow: the single internal register stage is frozen while allow is low.
+// There is no valid here - the caller tracks positions (mul_pos).
+//
+// The result is combinational: it is ready while the caller's stage-1 registers
+// hold the instruction, and MEM registers it.  mul is therefore never forwarded
+// to ID from inside EX.
 //
 // md_op is the one-hot mul/div select shared with the top:
 //   MUL_W    : low  32 bits of the product         (mul.w)
@@ -29,13 +35,13 @@
 // A negative digit is formed as ~(mag << 2i) plus a +1; the +1s of all negative
 // digits are collected into one small constant added to the tree.
 //
-// The final 64-bit CPA (ws2 + wc2) is a single bare `+`, carry chain left to the
+// The final 64-bit CPA (ws + wc) is a single bare `+`, carry chain left to the
 // synthesizer.  Measured faster than every hand-written variant tried here -
 // see docs/ex_opt_attempt/mul_carry_chain.md.
 module mul(
     input  wire        clk,
     input  wire        reset,
-    input  wire [ 1:0] allow,
+    input  wire        allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
     input  wire [ 6:0] md_op,
@@ -47,14 +53,10 @@ localparam MUL_W   = 0;
 localparam MULH_W  = 1;
 localparam MULH_WU = 2;
 
-// ---------------------------------------------------------------- stage 0
-reg [63:0] L2r [0:7];         // 18 vectors reduced to 8
-reg [ 6:0] md1;
+// the single internal register stage: the tree collapsed to two vectors
+reg [63:0] ws, wc;
+reg [ 6:0] md1;               // mul/div select, delayed with the tree
 reg [ 4:0] nneg;
-
-// ---------------------------------------------------------------- stage 1
-reg [63:0] ws2, wc2;          // reduced to (sum, carry)
-reg [ 6:0] md2;
 
 // ---------------------------------------------------------------- output
 
@@ -104,14 +106,18 @@ generate
     end
 endgenerate
 
-// +1 per negative digit completes its two's complement
+// +1 per negative digit completes its two's complement.  Sum the 17 bits as a
+// balanced tree: the serial `nneg = nneg + bit` form is a 17-deep carry chain
+// and stage 0 is now the busy cycle.
 always @(*) begin
-    nneg = 5'd0;
-    for (k = 0; k < 17; k = k + 1)
-        nneg = nneg + {4'b0, negc[k]};
+    nneg = ({4'b0, negc[ 0]} + {4'b0, negc[ 1]}) + ({4'b0, negc[ 2]} + {4'b0, negc[ 3]})
+         + ({4'b0, negc[ 4]} + {4'b0, negc[ 5]}) + ({4'b0, negc[ 6]} + {4'b0, negc[ 7]})
+         + ({4'b0, negc[ 8]} + {4'b0, negc[ 9]}) + ({4'b0, negc[10]} + {4'b0, negc[11]})
+         + ({4'b0, negc[12]} + {4'b0, negc[13]}) + ({4'b0, negc[14]} + {4'b0, negc[15]})
+         + {4'b0, negc[16]};
 end
 
-// Wallace levels L1..L2: 18 -> 12 -> 8   (stage 0)
+// Wallace levels L1..L6: 18 -> 12 -> 8 -> 6 -> 4 -> 3 -> 2 (all combinational)
 generate
     for (g = 0; g < 5; g = g + 1) begin : g_l1
         csa64 u(.a(pp[3*g]), .b(pp[3*g+1]), .c(pp[3*g+2]),
@@ -128,40 +134,15 @@ generate
     end
 endgenerate
 
-always @(posedge clk) begin
-    if (reset) begin
-        L2r[0] <= 64'b0;
-        L2r[1] <= 64'b0;
-        L2r[2] <= 64'b0;
-        L2r[3] <= 64'b0;
-        L2r[4] <= 64'b0;
-        L2r[5] <= 64'b0;
-        L2r[6] <= 64'b0;
-        L2r[7] <= 64'b0;
-        md1    <= 7'b0;
-    end
-    else if (allow[0]) begin
-        L2r[0] <= L2[0];
-        L2r[1] <= L2[1];
-        L2r[2] <= L2[2];
-        L2r[3] <= L2[3];
-        L2r[4] <= L2[4];
-        L2r[5] <= L2[5];
-        L2r[6] <= L2[6];
-        L2r[7] <= L2[7];
-        md1    <= md_op;
-    end
-end
-
-// Wallace levels L3..L6: 8 -> 6 -> 4 -> 3 -> 2   (stage 1)
+// L3..L6, all in the same cycle as L1/L2
 generate
     for (g = 0; g < 2; g = g + 1) begin : g_l3
-        csa64 u(.a(L2r[3*g]), .b(L2r[3*g+1]), .c(L2r[3*g+2]),
+        csa64 u(.a(L2[3*g]), .b(L2[3*g+1]), .c(L2[3*g+2]),
                 .s(L3[2*g]), .co(L3[2*g+1]));
     end
 endgenerate
-assign L3[4] = L2r[6];
-assign L3[5] = L2r[7];
+assign L3[4] = L2[6];
+assign L3[5] = L2[7];
 
 generate
     for (g = 0; g < 2; g = g + 1) begin : g_l4
@@ -175,16 +156,17 @@ assign L5[2] = L4[3];
 
 csa64 u_l6(.a(L5[0]), .b(L5[1]), .c(L5[2]), .s(wsum), .co(wcarry));
 
+// the only register stage: the two vectors the tree collapsed to
 always @(posedge clk) begin
     if (reset) begin
-        ws2 <= 64'b0;
-        wc2 <= 64'b0;
-        md2 <= 7'b0;
+        ws  <= 64'b0;
+        wc  <= 64'b0;
+        md1 <= 7'b0;
     end
-    else if (allow[1]) begin
-        ws2 <= wsum;
-        wc2 <= wcarry;
-        md2 <= md1;
+    else if (allow) begin
+        ws  <= wsum;
+        wc  <= wcarry;
+        md1 <= md_op;
     end
 end
 
@@ -193,10 +175,10 @@ end
 wire        hi_sel;
 wire [31:0] sel_w;
 
-assign prod = ws2 + wc2;
+assign prod = ws + wc;
 
 // high/low select: mul.w wins, then mulh.w / mulh.wu, else low
-assign hi_sel = ~md2[MUL_W] & (md2[MULH_W] | md2[MULH_WU]);
+assign hi_sel = ~md1[MUL_W] & (md1[MULH_W] | md1[MULH_WU]);
 
 assign sel_w = hi_sel ? prod[63:32] : prod[31:0];
 
