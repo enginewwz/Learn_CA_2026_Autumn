@@ -53,7 +53,7 @@ iverilog -g2005 -o /tmp/t exp/myCPU/tools.v /tmp/mul_ref.v exp/myCPU/mul.v exp/a
 
 > `alu_plain.v` 与 `alu_sep.v` 的关键差别：前者**比较位是从减法链的借位里蹭出来的**
 > （一条链要同时驱动 32 位结果 + 1 位比较位）；后者四条链完全独立，综合器可以各自就近布局。
-> 上一版输在 br 那条判定链上，所以这一版重点看 `alu_src1_reg → pc_reg` 那一族的 route 占比。
+> 上一版输在 br 那条判定链上，所以这一版重点看 `src1_reg → pc_reg` 那一族的 route 占比。
 
 ## 4. 相关材料
 

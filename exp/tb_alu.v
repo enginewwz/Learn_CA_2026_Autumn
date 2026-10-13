@@ -31,8 +31,8 @@ wire [31:0] y;
 
 alu u_alu(
     .alu_op     (op),
-    .alu_src1   (a ),
-    .alu_src2   (b ),
+    .src1   (a ),
+    .src2   (b ),
     .alu_result (y )
 );
 

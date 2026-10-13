@@ -30,7 +30,7 @@ reg         reset    = 1'b1;
 reg         valid_i   = 1'b0;   // this cycle really has an instruction for EX
 reg         allow_next = 1'b1;
 reg  [11:0] alu_op_i;
-reg  [31:0] alu_src1_i, alu_src2_i;
+reg  [31:0] src1_i, src2_i;
 reg         src1_used_i, src2_used_i;
 reg  [31:0] pc_i;
 reg  [ 6:0] md_op_i;
@@ -72,8 +72,8 @@ EX u_ex(
     .valid_i        (valid_i        ),
     .allow_next     (allow_next     ),
     .alu_op_i       (alu_op_i       ),
-    .alu_src1_i     (alu_src1_i     ),
-    .alu_src2_i     (alu_src2_i     ),
+    .src1_i     (src1_i     ),
+    .src2_i     (src2_i     ),
     .br_op_i        (br_op_i        ),
     .br_base_i      (br_base_i      ),
     .br_offs_i      (br_offs_i      ),
@@ -163,7 +163,7 @@ task send;
     begin
         @(negedge clk);
         valid_i = 1'b1; alu_op_i = op; md_op_i = md;
-        alu_src1_i = a; alu_src2_i = b; dest_i = d;
+        src1_i = a; src2_i = b; dest_i = d;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         fw_raddr1_i = d; fw_raddr2_i = d;   // the instruction behind it reads the same register
         br_op_i = 7'b0; br_base_i = 32'b0; br_offs_i = 32'b0;
@@ -197,7 +197,7 @@ task send_br;
     begin
         @(negedge clk);
         valid_i = 1'b1;
-        alu_op_i = 12'b0; md_op_i = 7'b0; alu_src1_i = a; alu_src2_i = b;
+        alu_op_i = 12'b0; md_op_i = 7'b0; src1_i = a; src2_i = b;
         br_op_i = op; br_base_i = base; br_offs_i = offs;
         src1_used_i = 1'b1; src2_used_i = 1'b1;
         fw_raddr1_i = 5'd0; fw_raddr2_i = 5'd0;   // the instruction behind reads nothing
@@ -238,7 +238,7 @@ reg [31:0] A, B;
 reg [31:0] OLD, YOUNG;      // older / younger writer of the WAW forwarding case
 
 initial begin
-    allow_next = 1; alu_op_i = 0; alu_src1_i = 0; alu_src2_i = 0;
+    allow_next = 1; alu_op_i = 0; src1_i = 0; src2_i = 0;
     src1_used_i = 0; src2_used_i = 0; pc_i = 0; md_op_i = 0;
     br_op_i = 0; br_base_i = 0; br_offs_i = 0;
     res_from_mem_i = 0; mem_we_i = 0; mem_en_i = 0; mem_wdata_i = 0; mem_size_i = 0; mem_zext_i = 0; gr_we_i = 0; dest_i = 0;
@@ -267,7 +267,7 @@ initial begin
     @(negedge clk);
     valid_i = 1'b0;
     alu_op_i = 12'b1 << 0; md_op_i = 7'b1 << MUL_W;
-    alu_src1_i = 32'hdead_beef; alu_src2_i = 32'h1234_5678; dest_i = 5'd31;
+    src1_i = 32'hdead_beef; src2_i = 32'h1234_5678; dest_i = 5'd31;
     src1_used_i = 1'b1; src2_used_i = 1'b1; gr_we_i = 1'b1;
     step;
     chk(!valid_o, "a bubble (valid_i = 0) leaves EX empty");
@@ -550,7 +550,7 @@ initial begin
     // output (here the ALU short-circuits straight out of stage 0).
     @(negedge clk);
     valid_i = 1'b1;
-    alu_op_i = 12'b1 << 6; md_op_i = 7'b0; alu_src1_i = 32'd0; alu_src2_i = 32'd0;
+    alu_op_i = 12'b1 << 6; md_op_i = 7'b0; src1_i = 32'd0; src2_i = 32'd0;
     dest_i = 5'd5; src1_used_i = 1'b0; src2_used_i = 1'b0; gr_we_i = 1'b1;
     res_from_mem_i = 1'b0; mem_we_i = 1'b0; mem_en_i = 1'b0; mem_wdata_i = 32'b0;
     mem_size_i = 3'b0; mem_zext_i = 1'b0;

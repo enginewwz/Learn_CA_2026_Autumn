@@ -6,8 +6,8 @@ module EX(
     
     // ID -> EX: combinational at ID
     input  wire [11:0] alu_op_i,
-    input  wire [31:0] alu_src1_i,
-    input  wire [31:0] alu_src2_i,
+    input  wire [31:0] src1_i,
+    input  wire [31:0] src2_i,
     input  wire [ 6:0] br_op_i,         // branch payload
     input  wire [31:0] br_base_i,
     input  wire [31:0] br_offs_i,
@@ -114,8 +114,8 @@ wire       div_hold;        // the stage-0 div cannot start yet, so it must stay
 
 // ID -> EX payload, registered in stage 0
 reg  [11:0] alu_op;
-reg  [31:0] alu_src1;
-reg  [31:0] alu_src2;
+reg  [31:0] src1;
+reg  [31:0] src2;
 reg  [ 6:0] br_op;
 reg  [31:0] br_base;
 reg  [31:0] br_offs;
@@ -227,8 +227,8 @@ assign valid_o = | out_sel;
 always @(posedge clk) begin
     if (allow[0]) begin
         alu_op           <= alu_op_i;
-        alu_src1         <= alu_src1_i;
-        alu_src2         <= alu_src2_i;
+        src1         <= src1_i;
+        src2         <= src2_i;
         br_op            <= br_op_i;
         br_base          <= br_base_i;
         br_offs          <= br_offs_i;
@@ -327,8 +327,8 @@ always @(posedge clk) begin
 end
 
 br u_br(
-    .src1   (alu_src1  ),
-    .src2   (alu_src2  ),
+    .src1   (src1  ),
+    .src2   (src2  ),
     .lt_i   (alu_lt    ),
     .ltu_i  (alu_ltu   ),
     .base   (br_base   ),
@@ -387,8 +387,8 @@ assign fw2_data_o  = ({32{fw2_sel[0]}} & alu_result[0]) |
 //--------------------------------------------------------------- units
 alu u_alu(
     .alu_op     (alu_op         ),
-    .alu_src1   (alu_src1       ),
-    .alu_src2   (alu_src2       ),
+    .src1   (src1       ),
+    .src2   (src2       ),
     .alu_result (alu_result_wire),
     .lt_o       (alu_lt         ),
     .ltu_o      (alu_ltu        )
@@ -402,8 +402,8 @@ mul u_mul(
     .clk    (clk                ),
     .reset  (reset              ),
     .allow  (allow[0]           ),
-    .src1   (alu_src1           ),
-    .src2   (alu_src2           ),
+    .src1   (src1           ),
+    .src2   (src2           ),
     .md_op  (md_op[0]           ),
     .result (mul_result_wire    )
 );
@@ -415,8 +415,8 @@ div u_div(
     .reset     (flush_reset ),
     .start     (div_start   ),
     .is_signed (div_is_signed),
-    .src1      (alu_src1    ),
-    .src2      (alu_src2    ),
+    .src1      (src1    ),
+    .src2      (src2    ),
     .busy      (div_busy    ),
     .done      (            ),
     .quot      (div_quot    ),

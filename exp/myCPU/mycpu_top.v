@@ -99,8 +99,8 @@ reg  [31:0] inst;
 
 // ID: combinational, generated from inst; these only exist at ID
 reg  [11:0] alu_op_id;
-reg  [31:0] alu_src1_id;
-reg  [31:0] alu_src2_id;
+reg  [31:0] src1_id;
+reg  [31:0] src2_id;
 reg  [MOD_WU:0] md_op_id;
 
 // stage fields: [ID] combinational, [EX] aliases EX.v, [MEM]/[WB] registered
@@ -642,8 +642,8 @@ end
 
 // operands
 always @(*) begin
-    alu_src1_id = src1_is_pc  ? pc[ID] : fw1_data;
-    alu_src2_id = src2_is_imm ? imm    : fw2_data;
+    src1_id = src1_is_pc  ? pc[ID] : fw1_data;
+    src2_id = src2_is_imm ? imm    : fw2_data;
 end
 
 // memory control and store data
@@ -818,8 +818,8 @@ EX u_ex(
     .src1_used_i    (src1_used[ID]    ),
     .src2_used_i    (src2_used[ID]    ),
     .alu_op_i       (alu_op_id        ),
-    .alu_src1_i     (alu_src1_id      ),
-    .alu_src2_i     (alu_src2_id      ),
+    .src1_i         (src1_id          ),
+    .src2_i         (src2_id          ),
     .br_op_i        (br_op_id         ),
     .br_base_i      (br_base_id       ),
     .br_offs_i      (br_offs_i16      ),
@@ -838,22 +838,22 @@ EX u_ex(
     .gr_we_i        (gr_we[ID]        ),
     .dest_i         (dest[ID]         ),
  
-    .pc_o           (ex_pc_o             ),
-    .src1_used_o    (ex_src1_used_o      ),
-    .src2_used_o    (ex_src2_used_o      ),
-    .res_from_mem_o (ex_res_from_mem_o   ),
-    .mem_we_o       (ex_mem_we_o         ),
-    .mem_en_o       (ex_mem_en_o         ),
-    .mem_wdata_o    (ex_mem_wdata_o      ),
-    .mem_size_o     (ex_mem_size_o       ),
-    .mem_zext_o     (ex_mem_zext_o       ),
-    .gr_we_o        (ex_gr_we_o          ),
-    .dest_o         (ex_dest_o           ),
-    .csr_num_o      (ex_csr_num_o        ),
-    .csr_ctl_o      (ex_csr_ctl_o        ),
-    .excp_cause_o   (ex_excp_cause_o     ),
-    .csr_wdata_o    (ex_csr_wdata_o      ),
-    .csr_mask_o     (ex_csr_mask_o       ),
+    .pc_o           (ex_pc_o          ),
+    .src1_used_o    (ex_src1_used_o   ),
+    .src2_used_o    (ex_src2_used_o   ),
+    .res_from_mem_o (ex_res_from_mem_o),
+    .mem_we_o       (ex_mem_we_o      ),
+    .mem_en_o       (ex_mem_en_o      ),
+    .mem_wdata_o    (ex_mem_wdata_o   ),
+    .mem_size_o     (ex_mem_size_o    ),
+    .mem_zext_o     (ex_mem_zext_o    ),
+    .gr_we_o        (ex_gr_we_o       ),
+    .dest_o         (ex_dest_o        ),
+    .csr_num_o      (ex_csr_num_o     ),
+    .csr_ctl_o      (ex_csr_ctl_o     ),
+    .excp_cause_o   (ex_excp_cause_o  ),
+    .csr_wdata_o    (ex_csr_wdata_o   ),
+    .csr_mask_o     (ex_csr_mask_o    ),
  
     .ex_result      (ex_result        ),
     .valid_o        (ex_valid_o       ),
@@ -861,14 +861,14 @@ EX u_ex(
     .br_taken_o     (br_taken_ex      ),
     .br_target_o    (br_target_ex     ),
 
-    .fw_raddr1_i    (rf_raddr1       ),
-    .fw_raddr2_i    (rf_raddr2       ),
-    .fw1_hit_o      (fw1_ex_hit_o    ),
-    .fw1_valid_o    (fw1_ex_valid_o  ),
-    .fw1_data_o     (fw1_ex_data_o   ),
-    .fw2_hit_o      (fw2_ex_hit_o    ),
-    .fw2_valid_o    (fw2_ex_valid_o  ),
-    .fw2_data_o     (fw2_ex_data_o   )
+    .fw_raddr1_i    (rf_raddr1        ),
+    .fw_raddr2_i    (rf_raddr2        ),
+    .fw1_hit_o      (fw1_ex_hit_o     ),
+    .fw1_valid_o    (fw1_ex_valid_o   ),
+    .fw1_data_o     (fw1_ex_data_o    ),
+    .fw2_hit_o      (fw2_ex_hit_o     ),
+    .fw2_valid_o    (fw2_ex_valid_o   ),
+    .fw2_data_o     (fw2_ex_data_o    )
     );
 
 // [EX] stage view comes straight from EX.v

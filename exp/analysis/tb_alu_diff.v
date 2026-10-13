@@ -21,11 +21,11 @@ wire [31:0] r_new, r_old;
 wire        lt_new, lt_old, ltu_new, ltu_old;
 
 alu u_new(
-    .alu_op(op), .alu_src1(a), .alu_src2(b),
+    .alu_op(op), .src1(a), .src2(b),
     .alu_result(r_new), .lt_o(lt_new), .ltu_o(ltu_new)
 );
 
-alu_ref u_old(
+alu_ref u_old(   // the reference keeps the old port names alu_src1/alu_src2
     .alu_op(op), .alu_src1(a), .alu_src2(b),
     .alu_result(r_old), .lt_o(lt_old), .ltu_o(ltu_old)
 );
