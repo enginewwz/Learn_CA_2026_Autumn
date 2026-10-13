@@ -181,6 +181,7 @@ end
 integer checks = 0;
 integer errors = 0;
 integer fe_count = 0;
+integer c_fetch0 = 0;
 integer sim_cycles = 0;
 
 always @(posedge clk) sim_cycles = sim_cycles + 1;
@@ -381,10 +382,14 @@ initial begin
 
     //-------------------------------------------------- 1. instruction fetch
     fe_enable = 1'b1;
+    c_fetch0  = sim_cycles;
     wait (fe_count >= CODE_WORDS);
     fe_enable = 1'b0;
     repeat (4) @(posedge clk);
-    $display("[1] fetch    : %0d instructions, fe_count=%0d", CODE_WORDS, fe_count);
+    $display("[1] fetch    : %0d instructions in %0d cycles  -> %0d.%02d cycles/inst",
+             CODE_WORDS, sim_cycles - c_fetch0,
+             (sim_cycles - c_fetch0) / CODE_WORDS,
+             ((sim_cycles - c_fetch0) * 100 / CODE_WORDS) % 100);
 
     //-------------------------------------------------- 2. plain load
     // keep the instruction fetch running: in the real soc the first ld.w of a
