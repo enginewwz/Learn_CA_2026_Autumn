@@ -31,8 +31,8 @@ always @(posedge clk) reset <= ~ resetn;
 
 //------------------------------------------------------------------ cpu side
 reg  [31:0] pc_fe;
+reg         if_valid;          // the instruction currently in IF is a real one
 reg  [31:0] pc_if;
-reg         if_valid;
 reg         fe_enable;
 
 reg         data_req;
@@ -53,8 +53,10 @@ wire        inst_pending;
 wire [31:0] data_rdata;
 wire        mem_pending;
 
+// new protocol: the request is presented while the instruction sits in IF and
+// the bridge latches pc_if itself on the cycle it takes the request
 assign inst_req  = fe_enable;
-assign inst_addr = pc_fe;
+assign inst_addr = pc_if + 32'h4;      // the instruction ENTERING IF
 
 //------------------------------------------------------------------ axi
 wire [ 3:0] arid;
@@ -100,6 +102,7 @@ sram_axi_bridge u_bridge(
     .inst_req    (inst_req   ),
     .inst_addr   (inst_addr  ),
     .allow_if    (allow_if   ),
+    .flush_if    (1'b0       ),
     .inst_rdata  (inst_rdata ),
     .inst_pending(inst_pending),
     .crmd_plv    (crmd_plv   ),
@@ -263,13 +266,12 @@ task chk32;
 endtask
 
 //------------------------------------------------------------------ front end
-// an instruction leaves pre_IF on a cycle where allow_if (& inst_req) is high:
-// the next pc is fetched and the one that was in pre_IF lands in IF.  Its data
-// is taken one cycle later, i.e. on the cycle the fetch completes.
+// One IF stage, like the top after pre_IF was removed.  Start one pc *before*
+// the first instruction: that slot is the pseudo one whose only job is to have
+// its successor (CODE_BASE) requested on entry, so it is never consumed.
 always @(posedge clk) begin
     if (reset) begin
-        pc_fe    <= CODE_BASE;
-        pc_if    <= 32'b0;
+        pc_if    <= CODE_BASE - 32'h4;
         if_valid <= 1'b0;
     end
     else if (allow_if & inst_req) begin
@@ -282,8 +284,7 @@ always @(posedge clk) begin
             end
             fe_count <= fe_count + 1;
         end
-        pc_if    <= pc_fe;
-        pc_fe    <= pc_fe + 32'h4;
+        pc_if    <= pc_if + 32'h4;
         if_valid <= 1'b1;
     end
 end

@@ -6,6 +6,7 @@ module sram_axi_bridge(
     input  wire        inst_req,     // a fetch is pending in pre_IF
     input  wire [31:0] inst_addr,    // = pc[pre_IF]
     input  wire        allow_if,     // allow[IF]
+    input  wire        flush_if,     // the IF stage is being flushed this cycle
     output wire [31:0] inst_rdata,
     output wire        inst_pending, // the fetch should wait
 
@@ -241,7 +242,8 @@ assign write_slot_free = mem_write_state[ret] | write_rsp_done;
 always @(*) begin
     case (inst_state)
         QUE: begin
-            if (~ read_req_occupy & ~ mem_read_takes_req) next_inst_state = REQ;
+            if (flush_if) next_inst_state = RET;      // pc redirected: drop the queued fetch
+            else if (~ read_req_occupy & ~ mem_read_takes_req) next_inst_state = REQ;
             else next_inst_state = QUE;
         end
         REQ: begin

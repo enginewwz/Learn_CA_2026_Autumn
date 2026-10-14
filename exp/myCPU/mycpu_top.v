@@ -61,7 +61,7 @@ wire resetn = aresetn;
 
 // sram_axi_bridge: the core keeps its sram-like request/response view, the
 // bridge turns it into the single AXI master port below.
-wire        inst_req;          // pre_IF has a word to fetch at pc[pre_IF]
+wire        inst_req;          // the IF stage has a word to fetch at pc[IF]
 wire [31:0] inst_rdata;        // returns after an arbitrary latency
 wire        data_req;          // MEM issues an access
 wire [ 3:0] data_we;           // byte strobes; 4'b0 means read
@@ -77,13 +77,12 @@ wire        mem_pending;     // from the bridge: this access should wait
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
 
-localparam pre_IF            = 0;
-localparam IF                = 1;
-localparam ID                = 2;
-localparam EX                = 3;
-localparam MEM               = 4;
-localparam WB                = 5;
-localparam TOTAL_STAGE_WIDTH = 6;
+localparam IF                = 0;
+localparam ID                = 1;
+localparam EX                = 2;
+localparam MEM               = 3;
+localparam WB                = 4;
+localparam TOTAL_STAGE_WIDTH = 5;
 
 // md_op bit positions: one-hot mul/div operation select
 localparam MUL_W             = 0;
@@ -141,7 +140,7 @@ wire [31:0] inst_rd;    // receive in ID stage
 
 // should be stored between stages.
 // The [EX] elements are combinational aliases of the EX outputs
-reg  [31:0] pc [WB:pre_IF] /* verilator split_var */;
+reg  [31:0] pc [WB:IF] /* verilator split_var */;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
 
@@ -189,7 +188,7 @@ wire [ 1:0] crmd_plv_o;
 wire        crmd_ie_o;
 /* verilator lint_on UNUSEDSIGNAL */
 wire        int_o;
-wire        pre_if_adef;    // same judgement one stage earlier, gates the fetch request
+wire        next_if_adef;        // misaligned fetch address, gates the request
 
 // exception / ertn / interrupt
 wire        mem_excp;
@@ -366,7 +365,7 @@ wire        fw1_mem_sel,  fw2_mem_sel;
 wire        fw1_rf_sel,   fw2_rf_sel;
 wire [31:0] fw1_data,     fw2_data;
 
-assign seq_pc       = pc[pre_IF] + 32'h4;
+assign seq_pc       = pc[IF] + 32'h4;
 
 wire sel_era    = ertn_i;                       // ertn -> era
 wire sel_eentry = wb_excp_ertn & ~ ertn_i;      // exception -> eentry (== excp_i)
@@ -388,11 +387,11 @@ always @(posedge clk) begin
         br_pc_reg <= 32'b0;
     end
     else begin
-        if (allow[pre_IF]) begin
+        if (allow[IF]) begin
             br_reg <= 1'b0;
             br_pc_reg <= 32'b0;
         end
-        else if (br_redirect && ~ allow[pre_IF]) begin
+        else if (br_redirect && ~ allow[IF]) begin
             br_reg <= 1'b1;
             br_pc_reg <= nextpc;
         end
@@ -401,15 +400,13 @@ end
 
 always @(posedge clk) begin
     if (reset) begin
-        pc[pre_IF] <= 32'h1bfffffc; // trick: to make nextpc be 0x1c000000 during reset
-        pc[IF]  <= 32'h0;
+        pc[IF]  <= 32'h1bfffffc; // trick: to make nextpc be 0x1c000000 during reset
         pc[ID]  <= 32'h0;
         pc[MEM] <= 32'h0;
         pc[WB]  <= 32'h0;
     end
     else begin
-        if (allow[pre_IF])  pc[pre_IF] <= nextpc;
-        if (allow[IF] )     pc[IF]     <= pc[pre_IF];
+        if (allow[IF] )     pc[IF]     <= nextpc;
         if (allow[ID] )     pc[ID]     <= pc[IF];
         if (allow[MEM])     pc[MEM]    <= pc[EX];
         if (allow[WB] )     pc[WB]     <= pc[MEM];
@@ -418,19 +415,17 @@ end
 
 // hazard unit
 assign cur_valid = valid & ~ flush;
-assign next_valid = {cur_valid[MEM:pre_IF] & ~stall[MEM:pre_IF], 1'b1} & allow | (~ allow & cur_valid);
+assign next_valid = {cur_valid[MEM:IF] & ~stall[MEM:IF], 1'b1} & allow | (~ allow & cur_valid);
 
 // valid[EX] is registered inside EX
 always @(posedge clk) begin
     if (reset) begin
-        valid[pre_IF]  <= 1'b0;
         valid[IF]      <= 1'b0;
         valid[ID]      <= 1'b0;
         valid[MEM]     <= 1'b0;
         valid[WB]      <= 1'b0;
     end
     else begin
-        valid[pre_IF]  <= next_valid[pre_IF];
         valid[IF]      <= next_valid[IF];
         valid[ID]      <= next_valid[ID];
         valid[MEM]     <= next_valid[MEM];
@@ -438,23 +433,21 @@ always @(posedge clk) begin
     end
 end
 
-assign flush = mem_excp_ertn ? 6'b001111 :
-               br_taken_ex   ? 6'b000111 :
-               br_taken_id   ? 6'b000011 :
-                               6'b000000;
+assign flush = mem_excp_ertn ? 5'b00111 :
+               br_taken_ex   ? 5'b00011 :
+               br_taken_id   ? 5'b00001 :
+                               5'b00000;
 
 assign allow[WB]      = 1'b1;
 assign allow[MEM]     = ~ (| stall[WB:MEM]);
 assign allow[EX]      = ~ (| stall[WB:EX]);
 assign allow[ID]      = ~ (| stall[WB:ID]);
 assign allow[IF]      = ~ (| stall[WB:IF]);
-assign allow[pre_IF]  = ~ (| stall[WB:pre_IF]);
 
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
 
-assign stall[pre_IF]  = mem_excp_ertn;
-assign stall[IF]      = inst_pending;
+assign stall[IF]      = inst_pending | mem_excp_ertn;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
 assign stall[MEM]     = mem_pending;
@@ -489,11 +482,13 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o)     |
                   ({32{fw2_mem_sel}}  & result[MEM])        |
                   ({32{fw2_rf_sel}}   & rf_rdata2);
 
-// pre_IF stage: latches nextpc, drives the instruction BRAM address, and
-// masks the enable on a misaligned address.  The BRAM answers one cycle later.
-assign pre_if_adef = | pc[pre_IF][1:0];
+// IF stage: no pre_IF any more.  The instruction that ENTERS this stage is the
+// one being requested, so the request and the pc handed to the bridge are the
+// entering ones (nextpc); the instruction already in IF is the one whose word
+// arrives now and is consumed as it leaves.
+assign next_if_adef  = | nextpc[1:0];
 
-assign inst_req        = cur_valid[pre_IF] & ~ pre_if_adef;
+assign inst_req        = ~ next_if_adef;
 assign inst_rd         = inst_rdata;
 
 always @(posedge clk) begin
@@ -509,8 +504,8 @@ always @(posedge clk) begin
         csr_ctl[IF]    <= 8'b0;
     end          
     else if (allow[IF]) begin
-        excp_cause[IF] <= pre_if_adef ? (6'h1 << EXCP_ADEF) : 6'h0;
-        csr_ctl[IF]    <= pre_if_adef ? (8'h1 << CSR_EXCP ) : 8'h0;
+        excp_cause[IF] <= next_if_adef ? (6'h1 << EXCP_ADEF) : 6'h0;
+        csr_ctl[IF]    <= next_if_adef ? (8'h1 << CSR_EXCP ) : 8'h0;
     end 
 end
 
@@ -1052,8 +1047,9 @@ sram_axi_bridge u_bridge(
     .reset        (reset      ),
     
     .inst_req     (inst_req    ),
-    .inst_addr    (pc[pre_IF]  ),
+    .inst_addr    (nextpc      ),
     .allow_if     (allow[IF]   ),
+    .flush_if     (flush[IF]   ),
     .inst_rdata   (inst_rdata  ),
     .inst_pending (inst_pending),
 
