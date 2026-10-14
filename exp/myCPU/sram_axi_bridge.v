@@ -157,16 +157,6 @@ always @(posedge clk) begin
     if (mem_read_rsp_done ) data_rdata_r <= rdata;
 end
 
-assign inst_rdata = inst_state[rsp]     ? rdata : inst_rdata_r;
-assign data_rdata = mem_read_state[rsp] ? rdata : data_rdata_r;
-
-assign arid   = inst_state[req] ? inst_rid : mem_rid;
-assign araddr = inst_state[req] ? inst_addr_r : rd_addr_r;
-
-assign mem_read_take  = mem_read_req  & mem_read_state[ret];
-assign mem_write_take = mem_write_req & write_slot_free;
-
-// The read capture must NOT touch the write payload
 always @(posedge clk) begin
     if (reset) begin
         rd_addr_r   <= 32'b0;
@@ -192,6 +182,15 @@ always @(posedge clk) begin
         awprot0_r <= (crmd_plv == 2'b00);
     end
 end
+
+assign inst_rdata = inst_state[rsp]     ? rdata : inst_rdata_r;
+assign data_rdata = mem_read_state[rsp] ? rdata : data_rdata_r;
+
+assign arid   = inst_state[req] ? inst_rid : mem_rid;
+assign araddr = inst_state[req] ? inst_addr_r : rd_addr_r;
+
+assign mem_read_take  = mem_read_req  & mem_read_state[ret];
+assign mem_write_take = mem_write_req & write_slot_free;
 
 assign awaddr    = awaddr_r;
 assign wdata     = wdata_r;
@@ -341,8 +340,6 @@ always @(posedge clk) begin
 end
 
 assign inst_pending = inst_state[que] | inst_state[req] | (inst_state[rsp] & ~ inst_read_rsp_done);
-assign mem_pending = (mem_read_req  & ~ mem_read_rsp_done)
-                    | (mem_write_req & ~ write_slot_free);
-
+assign mem_pending = (mem_read_req  & ~ mem_read_rsp_done) | (mem_write_req & ~ write_slot_free);
 
 endmodule
