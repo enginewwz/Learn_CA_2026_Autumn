@@ -2,9 +2,9 @@ module sram_axi_bridge(
     input  wire        clk,
     input  wire        reset,
 
-    // register at pre_IF & fetch at IF
-    input  wire        inst_req,     // a fetch is pending in pre_IF
-    input  wire [31:0] inst_addr,    // = pc[pre_IF]
+    // fetch side: the request appears when the instruction enters IF
+    input  wire        inst_req,     // a valid pc entering IF
+    input  wire [31:0] inst_addr,    // address of the instruction entering IF
     input  wire        allow_if,     // allow[IF]
     input  wire        flush_if,     // the IF stage is being flushed this cycle
     output wire [31:0] inst_rdata,

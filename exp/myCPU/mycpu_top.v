@@ -482,10 +482,6 @@ assign fw2_data = ({32{fw2_valid[EX]}} & fw2_ex_data_o)     |
                   ({32{fw2_mem_sel}}  & result[MEM])        |
                   ({32{fw2_rf_sel}}   & rf_rdata2);
 
-// IF stage: no pre_IF any more.  The instruction that ENTERS this stage is the
-// one being requested, so the request and the pc handed to the bridge are the
-// entering ones (nextpc); the instruction already in IF is the one whose word
-// arrives now and is consumed as it leaves.
 assign next_if_adef  = | nextpc[1:0];
 
 assign inst_req        = ~ next_if_adef;
