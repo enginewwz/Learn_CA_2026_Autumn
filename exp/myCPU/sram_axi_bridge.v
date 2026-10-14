@@ -85,7 +85,7 @@ reg         write_addr_req_fire_reg;
 reg         write_data_req_fire_reg;
 
 reg  [31:0] inst_addr_r;
-reg  [31:0] inst_rdata_r, data_rdata_r;
+reg  [31:0] inst_rdata_r;
 reg  [31:0] rd_addr_r;                 // AR address of a data read
 reg  [31:0] awaddr_r, wdata_r;         // AW / W payload of a store
 reg  [ 3:0] wstrb_r;
@@ -154,7 +154,6 @@ end
 
 always @(posedge clk) begin
     if (inst_read_rsp_done) inst_rdata_r <= rdata;
-    if (mem_read_rsp_done ) data_rdata_r <= rdata;
 end
 
 always @(posedge clk) begin
@@ -184,7 +183,7 @@ always @(posedge clk) begin
 end
 
 assign inst_rdata = inst_state[rsp]     ? rdata : inst_rdata_r;
-assign data_rdata = mem_read_state[rsp] ? rdata : data_rdata_r;
+assign data_rdata = rdata;
 
 assign arid   = inst_state[req] ? inst_rid : mem_rid;
 assign araddr = inst_state[req] ? inst_addr_r : rd_addr_r;
