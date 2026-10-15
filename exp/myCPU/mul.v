@@ -1,8 +1,9 @@
 // 2-cycle 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
 //   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
-//        -> s0: Booth encode (17 digits) + partial products + the WHOLE Wallace
-//               tree L1..L6 (18 -> 2 vectors), registered as (ws, wc)
+//        -> s0: Booth encode (17 digits) + partial products + the correction
+//               constant + the WHOLE Wallace tree L1..L6 (18 -> 2 vectors),
+//               registered as (ws, wc)
 //        -> combinational tail: 64-bit CPA + high/low select
 //
 // The tree is nothing but wide XOR/OR LUT chains, so it fits in the same cycle
@@ -32,8 +33,13 @@
 //
 // Modified Booth digit (group of 3 overlapping bits p2 p1 p0):
 //   000/111 -> 0 | 001/010 -> +1 | 011 -> +2 | 100 -> -2 | 101/110 -> -1
-// A negative digit is formed as ~(mag << 2i) plus a +1; the +1s of all negative
-// digits are collected into one small constant added to the tree.
+// A negative digit inverts the operand FIRST and then shifts it, so its
+// two's-complement +1 rides up with the operand and lands on that digit's own
+// weight column (2i).  The +1s of the 17 digits therefore occupy 17 distinct
+// columns and never collide: they are ORed into one 64-bit constant, with no
+// adder and no carry chain.  (Inverting after the shift instead pins every +1
+// to bit 0, which then has to be summed - that version needed a 5-bit adder
+// tree here.)
 //
 // The final 64-bit CPA (ws + wc) is a single bare `+`, carry chain left to the
 // synthesizer.  Measured faster than every hand-written variant tried here -
@@ -56,7 +62,7 @@ localparam MULH_WU = 2;
 // the single internal register stage: the tree collapsed to two vectors
 reg [63:0] ws, wc;
 reg [ 6:0] md1;               // mul/div select, delayed with the tree
-reg [ 4:0] nneg;
+reg [63:0] nneg;
 
 // ---------------------------------------------------------------- output
 
@@ -101,20 +107,15 @@ generate
         assign nz  = dbl | sgl;
         assign neg = p2;
         assign mag = dbl ? {Aext[62:0], 1'b0} : Aext;   // 1x or 2x
-        assign pp[g]  = nz ? ((mag << (2*g)) ^ {64{neg}}) : 64'b0;
+        // invert first, then shift: the +1 rides up to column 2*g
+        assign pp[g]  = nz ? (neg ? ((~mag) << (2*g)) : (mag << (2*g))) : 64'b0;
         assign negc[g] = neg & nz;
     end
 endgenerate
 
-// +1 per negative digit completes its two's complement.  Sum the 17 bits as a
-// balanced tree: the serial `nneg = nneg + bit` form is a 17-deep carry chain
-// and stage 0 is now the busy cycle.
 always @(*) begin
-    nneg = ({4'b0, negc[ 0]} + {4'b0, negc[ 1]}) + ({4'b0, negc[ 2]} + {4'b0, negc[ 3]})
-         + ({4'b0, negc[ 4]} + {4'b0, negc[ 5]}) + ({4'b0, negc[ 6]} + {4'b0, negc[ 7]})
-         + ({4'b0, negc[ 8]} + {4'b0, negc[ 9]}) + ({4'b0, negc[10]} + {4'b0, negc[11]})
-         + ({4'b0, negc[12]} + {4'b0, negc[13]}) + ({4'b0, negc[14]} + {4'b0, negc[15]})
-         + {4'b0, negc[16]};
+    nneg = 64'b0;
+    for (k = 0; k < 17; k = k + 1) nneg[2*k] = negc[k];
 end
 
 // Wallace levels L1..L6: 18 -> 12 -> 8 -> 6 -> 4 -> 3 -> 2 (all combinational)
@@ -124,7 +125,7 @@ generate
                 .s(L1[2*g]), .co(L1[2*g+1]));
     end
 endgenerate
-csa64 u_l1f(.a(pp[15]), .b(pp[16]), .c({59'b0, nneg}),
+csa64 u_l1f(.a(pp[15]), .b(pp[16]), .c(nneg),
             .s(L1[10]), .co(L1[11]));
 
 generate
