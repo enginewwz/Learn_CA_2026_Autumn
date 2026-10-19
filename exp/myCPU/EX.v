@@ -29,8 +29,8 @@ module EX(
 
     // CSR / exception payload
     input  wire [13:0] csr_num_i,
-    input  wire [ 7:0] csr_ctl_i,
-    input  wire [ 5:0] excp_cause_i,
+    input  wire [ 8:0] csr_ctl_i,
+    input  wire [ 6:0] excp_cause_i,
     input  wire [31:0] csr_wdata_i,
     input  wire [31:0] csr_mask_i,
 
@@ -49,8 +49,8 @@ module EX(
 
     // payload, aligned with the stage that drives EX -> MEM
     output wire [13:0] csr_num_o,
-    output wire [ 7:0] csr_ctl_o,
-    output wire [ 5:0] excp_cause_o,
+    output wire [ 8:0] csr_ctl_o,
+    output wire [ 6:0] excp_cause_o,
     output wire [31:0] csr_wdata_o,
     output wire [31:0] csr_mask_o,
 
@@ -139,8 +139,8 @@ reg         gr_we        [1:0];
 reg  [ 4:0] dest         [1:0];
 
 reg  [13:0] csr_num      [1:0];
-reg  [ 7:0] csr_ctl      [1:0];
-reg  [ 5:0] excp_cause   [1:0];
+reg  [ 8:0] csr_ctl      [1:0];
+reg  [ 6:0] excp_cause   [1:0];
 reg  [31:0] csr_wdata    [1:0];
 reg  [31:0] csr_mask     [1:0];
 
@@ -313,8 +313,8 @@ assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} &
 
 // payload rides along with whichever stage drives the output
 assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]);
-assign csr_ctl_o      = ({ 8{out_sel[0]}} & csr_ctl  [0]) | ({ 8{out_sel[1]}} & csr_ctl  [1]);
-assign excp_cause_o   = ({ 6{out_sel[0]}} & excp_cause[0]) | ({ 6{out_sel[1]}} & excp_cause[1]);
+assign csr_ctl_o      = ({ 9{out_sel[0]}} & csr_ctl  [0]) | ({ 9{out_sel[1]}} & csr_ctl  [1]);
+assign excp_cause_o   = ({ 7{out_sel[0]}} & excp_cause[0]) | ({ 7{out_sel[1]}} & excp_cause[1]);
 assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]);
 assign csr_mask_o     = ({32{out_sel[0]}} & csr_mask [0]) | ({32{out_sel[1]}} & csr_mask [1]);
 

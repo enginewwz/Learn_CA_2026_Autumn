@@ -107,6 +107,7 @@ localparam CSR_RDCNTVL       = 4;   // rdcntvl.w
 localparam CSR_RDCNTVH       = 5;   // rdcntvh.w
 localparam CSR_RDCNTID       = 6;   // rdcntid
 localparam CSR_WB            = 7;   // rd comes from csr.v at WB
+localparam CSR_PRIV          = 8;   // csrrd/csrwr/csrxchg/ertn/idle: IPE when PLV != 0
 
 // excp_cause bit positions: one-hot, registered from IF (ADEF is born there) all
 // the way to WB.  WB is where the exception entry ports are driven from, i.e. the
@@ -117,6 +118,9 @@ localparam EXCP_INE          = 2;   // instruction not exist
 localparam EXCP_ADEF         = 3;   // fetch address not 4-byte aligned
 localparam EXCP_ALE          = 4;   // load / store not naturally aligned (judged in MEM)
 localparam EXCP_INT          = 5;   // interrupt (judged in MEM)
+localparam EXCP_IPE          = 6;   // privileged instruction at PLV != 0 (judged in MEM)
+
+localparam [13:0] CSR_CRMD   = 14'h000;
 
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
@@ -167,8 +171,8 @@ reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
-reg  [ 7:0] csr_ctl [WB:IF] /* verilator split_var */;
-reg  [ 5:0] excp_cause [WB:IF] /* verilator split_var */;
+reg  [ 8:0] csr_ctl [WB:IF] /* verilator split_var */;
+reg  [ 6:0] excp_cause [WB:IF] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
 
@@ -182,7 +186,8 @@ wire [31:0] eentry_o;
 wire [31:0] era_o;
 wire [63:0] timer_o;
 
-// write-first CRMD view
+// CRMD view for the *next* slot: software write + exception/ertn override.  This
+// is what both the IPE compare (MEM) and the fetch's arprot (bridge) need.
 /* verilator lint_off UNUSEDSIGNAL */
 wire [ 1:0] crmd_plv_o;
 wire        crmd_ie_o;
@@ -192,11 +197,13 @@ wire        next_if_adef;        // misaligned fetch address, gates the request
 
 // exception / ertn / interrupt
 wire        mem_excp;
-wire        mem_excp_ertn;
+wire        mem_excp_ertn_crmd;  // kill IF..EX + restart the fetch: exception / ertn / CRMD write
+wire        mem_ipe;          // privileged instruction at PLV != 0, judged in MEM
 
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
 wire        excp_i;
 wire        ertn_i;
+wire        crmd_wr_wb;       // the WB instruction writes CRMD
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
@@ -218,9 +225,9 @@ wire        ex_mem_zext_o;
 wire        ex_gr_we_o;
 wire  [4:0] ex_dest_o;
 wire [13:0] ex_csr_num_o;
-wire [ 7:0] ex_csr_ctl_o;
-wire [ 5:0] ex_excp_cause_o;
-wire [ 5:0] excp_cause_id;
+wire [ 8:0] ex_csr_ctl_o;
+wire [ 6:0] ex_excp_cause_o;
+wire [ 6:0] excp_cause_id;
 wire [31:0] ex_csr_wdata_o;
 wire [31:0] ex_csr_mask_o;
 wire        ex_valid_o;
@@ -368,18 +375,20 @@ wire [31:0] fw1_data,     fw2_data;
 assign seq_pc       = pc[IF] + 32'h4;
 
 wire sel_era    = ertn_i;                       // ertn -> era
-wire sel_eentry = wb_excp_ertn & ~ ertn_i;      // exception -> eentry (== excp_i)
-wire sel_br     = ~ wb_excp_ertn & br_reg;      // latched redirect, loses only to the WB redirect
-wire sel_seq    = ~ (wb_excp_ertn | br_reg | br_taken_ex | br_taken_id);
+wire sel_eentry = excp_i;                       // exception -> eentry
+wire sel_crmd   = ~ wb_excp_ertn & crmd_wr_wb;  // csrwr CRMD -> restart fetch at pc[WB]+4
+wire sel_br     = ~ wb_excp_ertn & ~ crmd_wr_wb & br_reg;   // latched redirect
+wire sel_seq    = ~ (wb_excp_ertn | crmd_wr_wb | br_reg | br_taken_ex | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{sel_eentry }} & eentry_o    ) |
+                      ({32{sel_crmd   }} & (pc[WB] + 32'h4)) |
                       ({32{sel_br     }} & br_pc_reg   ) |
                       ({32{br_taken_ex}} & br_target_ex) |
                       ({32{br_taken_id}} & br_target_id) |
                       ({32{sel_seq    }} & seq_pc      );
 
-assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn;
+assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn | crmd_wr_wb;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -433,10 +442,10 @@ always @(posedge clk) begin
     end
 end
 
-assign flush = mem_excp_ertn ? 5'b00111 :
-               br_taken_ex   ? 5'b00011 :
-               br_taken_id   ? 5'b00001 :
-                               5'b00000;
+assign flush = mem_excp_ertn_crmd   ? 5'b00111 :
+               br_taken_ex          ? 5'b00011 :
+               br_taken_id          ? 5'b00001 :
+                                      5'b00000;
 
 assign allow[WB]      = 1'b1;
 assign allow[MEM]     = ~ (| stall[WB:MEM]);
@@ -447,7 +456,7 @@ assign allow[IF]      = ~ (| stall[WB:IF]);
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
 
-assign stall[IF]      = inst_pending | mem_excp_ertn;
+assign stall[IF]      = inst_pending | mem_excp_ertn_crmd;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
 assign stall[MEM]     = mem_pending;
@@ -496,12 +505,12 @@ end
 
 always @(posedge clk) begin
     if (reset) begin
-        excp_cause[IF] <= 6'h0;
-        csr_ctl[IF]    <= 8'b0;
+        excp_cause[IF] <= 7'h0;
+        csr_ctl[IF]    <= 9'b0;
     end          
     else if (allow[IF]) begin
-        excp_cause[IF] <= next_if_adef ? (6'h1 << EXCP_ADEF) : 6'h0;
-        csr_ctl[IF]    <= next_if_adef ? (8'h1 << CSR_EXCP ) : 8'h0;
+        excp_cause[IF] <= next_if_adef ? (7'h1 << EXCP_ADEF) : 7'h0;
+        csr_ctl[IF]    <= next_if_adef ? (9'h1 << CSR_EXCP ) : 9'h0;
     end 
 end
 
@@ -712,25 +721,29 @@ always @(*) begin
     // all carried exceptions share one csr_ctl bit; excp_cause says which one
     excp_cause[ID]           = excp_cause[IF] | excp_cause_id;
     csr_ctl[ID][CSR_EXCP]    = | excp_cause[ID];
+    // privileged instructions: IPE when the commit-point PLV is not 0
+    csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle;
 end
 
 always @(posedge clk) begin
     if (allow[MEM]) begin
         csr_num[MEM]    <= csr_num[EX];
         // ALE / interrupt are born in EX and carried like any other cause
-        csr_ctl[MEM]    <= csr_ctl[EX] | (ex_mem_excp ? (8'h1 << CSR_EXCP) : 8'h0);
+        csr_ctl[MEM]    <= csr_ctl[EX] | (ex_mem_excp ? (9'h1 << CSR_EXCP) : 9'h0);
         csr_wdata[MEM]  <= csr_wdata[EX];
         csr_mask[MEM]   <= csr_mask[EX];
         excp_cause[MEM] <= excp_cause[EX]
-                           | (ex_mem_ale ? (6'h1 << EXCP_ALE) : 6'h0)
-                           | (int_take   ? (6'h1 << EXCP_INT) : 6'h0);
+                           | (ex_mem_ale ? (7'h1 << EXCP_ALE) : 7'h0)
+                           | (int_take   ? (7'h1 << EXCP_INT) : 7'h0);
     end
     if (allow[WB]) begin
         csr_num[WB]    <= csr_num[MEM];
-        csr_ctl[WB]    <= csr_ctl[MEM];
+        // IPE is judged in MEM (it needs the CRMD value after every older write),
+        // but it takes effect at the same WB point as the CSR access it forbids
+        csr_ctl[WB]    <= csr_ctl[MEM] | (mem_ipe ? (9'h1 << CSR_EXCP) : 9'h0);
         csr_wdata[WB]  <= csr_wdata[MEM];
         csr_mask[WB]   <= csr_mask[MEM];
-        excp_cause[WB] <= excp_cause[MEM];
+        excp_cause[WB] <= excp_cause[MEM] | (mem_ipe ? (7'h1 << EXCP_IPE) : 7'h0);
         wb_excp_badv   <= excp_cause[MEM][EXCP_ALE] ? result[MEM] : pc[MEM];
     end
 end
@@ -742,6 +755,7 @@ assign excp_cause_id[EXCP_INE]  = inst_ine;
 assign excp_cause_id[EXCP_ADEF] = 1'b0;
 assign excp_cause_id[EXCP_ALE]  = 1'b0;      // ALE / interrupt are judged in MEM
 assign excp_cause_id[EXCP_INT]  = 1'b0;
+assign excp_cause_id[EXCP_IPE]  = 1'b0;      // IPE is judged in MEM (needs crmd_plv_o)
 
 always @(posedge clk) begin
     if (allow[MEM]) begin
@@ -904,9 +918,13 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
                     ({32{mem_half}} & ld_half_ext)  |
                     ({32{mem_word}} & data_rdata);
 
-assign mem_excp = csr_ctl[MEM][CSR_EXCP];
+assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
-assign mem_excp_ertn = valid[MEM] & (mem_excp | csr_ctl[MEM][CSR_ERTN]);
+assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe;
+
+assign mem_excp_ertn_crmd = valid[MEM] & (mem_excp
+                                          | csr_ctl[MEM][CSR_ERTN]
+                                          | (csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD)));
 
 // WB stage
 assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
@@ -919,10 +937,13 @@ assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
 
 // redirect signal at WB stage
 assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
-assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN];
+// Exception wins over ertn
+assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN] & ~ excp_i;
 assign wb_excp_ertn = excp_i | ertn_i;
+assign crmd_wr_wb   = valid[WB] & csr_ctl[WB][CSR_WE] & (csr_num[WB] == CSR_CRMD);
 
 assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
+                       excp_cause[WB][EXCP_IPE]  ? 6'he :
                        excp_cause[WB][EXCP_ALE]  ? 6'h9 :
                        excp_cause[WB][EXCP_ADEF] ? 6'h8 :
                        excp_cause[WB][EXCP_INE]  ? 6'hd :
@@ -932,7 +953,7 @@ assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
 assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
                               & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
 
-assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE];
+assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE] & ~ csr_ctl[WB][CSR_EXCP];
 assign csr_raddr = csr_num[WB];
 assign csr_waddr = csr_num[WB];
 assign csr_wdata_w = csr_wdata[WB];
