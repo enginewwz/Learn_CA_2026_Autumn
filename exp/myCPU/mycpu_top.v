@@ -197,13 +197,14 @@ wire        next_if_adef;        // misaligned fetch address, gates the request
 
 // exception / ertn / interrupt
 wire        mem_excp;
-wire        mem_excp_ertn_crmd;  // kill IF..EX + restart the fetch: exception / ertn / CRMD write
+wire        mem_flush;        // kill IF..EX + restart the fetch: exception / ertn / CRMD write
+wire        mem_crmd_plv_wr;  // the MEM slot writes CRMD with mask[1:0] != 0
 wire        mem_ipe;          // privileged instruction at PLV != 0, judged in MEM
 
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
 wire        excp_i;
 wire        ertn_i;
-wire        crmd_wr_wb;       // the WB instruction writes CRMD
+reg         wb_crmd_plv_wr;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
@@ -376,9 +377,9 @@ assign seq_pc       = pc[IF] + 32'h4;
 
 wire sel_era    = ertn_i;                       // ertn -> era
 wire sel_eentry = excp_i;                       // exception -> eentry
-wire sel_crmd   = ~ wb_excp_ertn & crmd_wr_wb;  // csrwr CRMD -> restart fetch at pc[WB]+4
-wire sel_br     = ~ wb_excp_ertn & ~ crmd_wr_wb & br_reg;   // latched redirect
-wire sel_seq    = ~ (wb_excp_ertn | crmd_wr_wb | br_reg | br_taken_ex | br_taken_id);
+wire sel_crmd   = ~ wb_excp_ertn & wb_crmd_plv_wr;  // csrwr CRMD -> restart fetch at pc[WB]+4
+wire sel_br     = ~ wb_excp_ertn & ~ wb_crmd_plv_wr & br_reg;   // latched redirect
+wire sel_seq    = ~ (wb_excp_ertn | wb_crmd_plv_wr | br_reg | br_taken_ex | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{sel_eentry }} & eentry_o    ) |
@@ -388,7 +389,7 @@ assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{br_taken_id}} & br_target_id) |
                       ({32{sel_seq    }} & seq_pc      );
 
-assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn | crmd_wr_wb;
+assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn | wb_crmd_plv_wr;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -442,10 +443,10 @@ always @(posedge clk) begin
     end
 end
 
-assign flush = mem_excp_ertn_crmd   ? 5'b00111 :
-               br_taken_ex          ? 5'b00011 :
-               br_taken_id          ? 5'b00001 :
-                                      5'b00000;
+assign flush = mem_flush    ? 5'b00111 :
+               br_taken_ex  ? 5'b00011 :
+               br_taken_id  ? 5'b00001 :
+                              5'b00000;
 
 assign allow[WB]      = 1'b1;
 assign allow[MEM]     = ~ (| stall[WB:MEM]);
@@ -456,7 +457,7 @@ assign allow[IF]      = ~ (| stall[WB:IF]);
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
 
-assign stall[IF]      = inst_pending | mem_excp_ertn_crmd;
+assign stall[IF]      = inst_pending | mem_flush;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
 assign stall[MEM]     = mem_pending;
@@ -922,9 +923,16 @@ assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
 assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe;
 
-assign mem_excp_ertn_crmd = valid[MEM] & (mem_excp
-                                          | csr_ctl[MEM][CSR_ERTN]
-                                          | (csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD)));
+assign mem_crmd_plv_wr = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD) & (| csr_mask[MEM][1:0]);
+
+assign mem_flush = valid[MEM] & (mem_excp
+                                | csr_ctl[MEM][CSR_ERTN]
+                                | mem_crmd_plv_wr);
+
+always @(posedge clk) begin
+    if (reset) wb_crmd_plv_wr <= 1'b0;
+    else       wb_crmd_plv_wr <= mem_crmd_plv_wr & valid[MEM];
+end
 
 // WB stage
 assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
@@ -940,7 +948,6 @@ assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
 // Exception wins over ertn
 assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN] & ~ excp_i;
 assign wb_excp_ertn = excp_i | ertn_i;
-assign crmd_wr_wb   = valid[WB] & csr_ctl[WB][CSR_WE] & (csr_num[WB] == CSR_CRMD);
 
 assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
                        excp_cause[WB][EXCP_IPE]  ? 6'he :
