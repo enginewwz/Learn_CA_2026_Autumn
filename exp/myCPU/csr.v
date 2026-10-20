@@ -54,6 +54,32 @@ module csr(
     input  wire [ 7:0] hwi_i,           // hardware
     input  wire        ipi_i,           // inter-processor
 
+    // TLB instruction writes (they commit at WB, so no pass-through is needed)
+    // sel: 1 = TLBSRCH, 2 = TLBRD
+    input  wire        tlb_we_i,
+    input  wire [ 1:0] tlb_sel_i,
+    input  wire        tlb_srch_hit_i,
+    input  wire [ 3:0] tlb_srch_index_i,
+    input  wire        tlb_rd_e_i,
+    input  wire [18:0] tlb_rd_vppn_i,
+    input  wire [ 5:0] tlb_rd_ps_i,
+    input  wire [ 9:0] tlb_rd_asid_i,
+    input  wire [31:0] tlb_rd_lo0_i,
+    input  wire [31:0] tlb_rd_lo1_i,
+
+    // TLB / address-translation side band
+    output wire [ 3:0] tlbidx_index_o,
+    output wire [ 5:0] tlbidx_ps_o,
+    output wire        tlbidx_ne_o,
+    output wire [18:0] tlbehi_vppn_o,
+    output wire [31:0] tlbelo0_o,
+    output wire [31:0] tlbelo1_o,
+    output wire [ 9:0] asid_o,
+    output wire [31:0] tlbrentry_o,
+    output wire [ 5:0] estat_ecode_o,
+    output wire        crmd_da_o,
+    output wire        crmd_pg_o,
+
     // pipeline side-band
     // CRMD as it will be for the *next* instruction: includes the software write
     // in this slot and the exception / ertn override.  This is the value the
@@ -83,6 +109,12 @@ localparam [13:0] CSR_TID     = 14'h040;
 localparam [13:0] CSR_TCFG    = 14'h041;
 localparam [13:0] CSR_TVAL    = 14'h042;    // read-only
 localparam [13:0] CSR_TICLR   = 14'h044;    // write-only, reads 0
+localparam [13:0] CSR_TLBIDX  = 14'h010;
+localparam [13:0] CSR_TLBEHI  = 14'h011;
+localparam [13:0] CSR_TLBELO0 = 14'h012;
+localparam [13:0] CSR_TLBELO1 = 14'h013;
+localparam [13:0] CSR_ASID    = 14'h018;
+localparam [13:0] CSR_TLBRENTRY = 14'h088;
 // EUEN (0x02) / CPUID (0x20) and anything else read 0 and ignore writes
 
 // masked software write of one field: take wdata on the selected bits
@@ -102,6 +134,12 @@ wire        wr_eentry;
 wire        wr_tid;
 wire        wr_tcfg;
 wire        wr_ticlr;
+wire        wr_tlbidx;
+wire        wr_tlbehi;
+wire        wr_tlbelo0;
+wire        wr_tlbelo1;
+wire        wr_asid;
+wire        wr_tlbrentry;
 
 // CRMD
 // PLV/IE are real state; the translation-mode fields are fixed while the core
@@ -160,6 +198,36 @@ wire [31:0] badv_nxt;
 reg  [25:0] eentry_va;
 wire [25:0] eentry_va_nxt;
 
+// TLBIDX   = {NE, 1'b0, PS[5:0], 20'h0, Index[3:0]}
+// TLBEHI   = {VPPN[18:0], 13'h0}
+// TLBELO   = {4'h0, PPN[19:0], 1'b0, G, MAT[1:0], PLV[1:0], D, V}
+// ASID     = {8'h0, 8'd10, 6'h0, ASID[9:0]}
+// TLBRENTRY= {PA[31:6], 6'h0}
+reg  [ 3:0] tlbidx_index;
+reg  [ 5:0] tlbidx_ps;
+reg         tlbidx_ne;
+reg  [18:0] tlbehi_vppn;
+reg  [27:0] tlbelo0;
+reg  [27:0] tlbelo1;
+reg  [ 9:0] asid;
+reg  [25:0] tlbrentry_pa;
+
+wire [ 3:0] tlbidx_index_sw;
+wire [ 5:0] tlbidx_ps_sw;
+wire        tlbidx_ne_sw;
+wire [18:0] tlbehi_vppn_sw;
+wire [27:0] tlbelo0_sw, tlbelo1_sw;
+wire [ 9:0] asid_sw;
+wire [25:0] tlbrentry_pa_sw;
+
+wire [ 3:0] tlbidx_index_nxt;
+wire [ 5:0] tlbidx_ps_nxt;
+wire        tlbidx_ne_nxt;
+wire [18:0] tlbehi_vppn_nxt;
+wire [27:0] tlbelo0_nxt, tlbelo1_nxt;
+wire [ 9:0] asid_nxt;
+wire [25:0] tlbrentry_pa_nxt;
+
 // SAVE0..3
 reg  [31:0] save     [0:3];
 reg  [31:0] save_nxt [0:3];
@@ -213,6 +281,12 @@ assign wr_eentry = we_i & (waddr_i == CSR_EENTRY);
 assign wr_tid    = we_i & (waddr_i == CSR_TID   );
 assign wr_tcfg   = we_i & (waddr_i == CSR_TCFG  );
 assign wr_ticlr  = we_i & (waddr_i == CSR_TICLR );
+assign wr_tlbidx    = we_i & (waddr_i == CSR_TLBIDX   );
+assign wr_tlbehi    = we_i & (waddr_i == CSR_TLBEHI   );
+assign wr_tlbelo0   = we_i & (waddr_i == CSR_TLBELO0  );
+assign wr_tlbelo1   = we_i & (waddr_i == CSR_TLBELO1  );
+assign wr_asid      = we_i & (waddr_i == CSR_ASID     );
+assign wr_tlbrentry = we_i & (waddr_i == CSR_TLBRENTRY);
 
 // CRMD translation-mode fields
 assign csr_crmd_da   = 1'b1;
@@ -269,6 +343,36 @@ assign badv_nxt = excp_badv_en_i ? excp_badv_i :
 // EENTRY
 assign eentry_va_nxt = `CSR_FIELD(wr_eentry, eentry_va, wdata_i[31:6], wmask_i[31:6]);
 
+// TLB CSRs
+// A TLB instruction commits at WB, i.e. after its flush has emptied IF..EX, so
+// its reads already see the software writes and no pass-through is needed here.
+assign tlbidx_index_sw = `CSR_FIELD(wr_tlbidx, tlbidx_index, wdata_i[3:0],   wmask_i[3:0]);
+assign tlbidx_ps_sw    = `CSR_FIELD(wr_tlbidx, tlbidx_ps,    wdata_i[29:24], wmask_i[29:24]);
+assign tlbidx_ne_sw    = `CSR_FIELD(wr_tlbidx, tlbidx_ne,    wdata_i[31],    wmask_i[31]);
+assign tlbehi_vppn_sw  = `CSR_FIELD(wr_tlbehi, tlbehi_vppn,  wdata_i[31:13], wmask_i[31:13]);
+assign tlbelo0_sw      = `CSR_FIELD(wr_tlbelo0, tlbelo0,
+                                    {wdata_i[27:8], 1'b0, wdata_i[6:0]}, wmask_i[27:0]);
+assign tlbelo1_sw      = `CSR_FIELD(wr_tlbelo1, tlbelo1,
+                                    {wdata_i[27:8], 1'b0, wdata_i[6:0]}, wmask_i[27:0]);
+assign asid_sw         = `CSR_FIELD(wr_asid, asid, wdata_i[9:0], wmask_i[9:0]);
+assign tlbrentry_pa_sw = `CSR_FIELD(wr_tlbrentry, tlbrentry_pa, wdata_i[31:6], wmask_i[31:6]);
+
+wire tlb_srch_we;
+wire tlb_rd_we;
+
+assign tlb_srch_we = tlb_we_i & (tlb_sel_i == 2'd1);
+assign tlb_rd_we   = tlb_we_i & (tlb_sel_i == 2'd2);
+
+assign tlbidx_index_nxt = (tlb_srch_we & tlb_srch_hit_i) ? tlb_srch_index_i : tlbidx_index_sw;
+assign tlbidx_ps_nxt    = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_ps_i : 6'h0)      : tlbidx_ps_sw;
+assign tlbidx_ne_nxt    = tlb_srch_we ? ~ tlb_srch_hit_i :
+                          tlb_rd_we   ? ~ tlb_rd_e_i     : tlbidx_ne_sw;
+assign tlbehi_vppn_nxt  = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_vppn_i : 19'h0)   : tlbehi_vppn_sw;
+assign tlbelo0_nxt      = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_lo0_i[27:0] : 28'h0) : tlbelo0_sw;
+assign tlbelo1_nxt      = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_lo1_i[27:0] : 28'h0) : tlbelo1_sw;
+assign asid_nxt         = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_asid_i : 10'h0)  : asid_sw;
+assign tlbrentry_pa_nxt = tlbrentry_pa_sw;
+
 // SAVE0..3
 assign wr_save  = we_i & (waddr_i[13:2] == CSR_SAVE_H);
 assign save_sel = waddr_i[1:0];
@@ -321,6 +425,14 @@ always @(posedge clk) begin
         era           <= 32'b0;
         badv          <= 32'b0;
         eentry_va     <= 26'b0;
+        tlbidx_index  <= 4'b0;
+        tlbidx_ps     <= 6'b0;
+        tlbidx_ne     <= 1'b0;
+        tlbehi_vppn   <= 19'b0;
+        tlbelo0       <= 28'b0;
+        tlbelo1       <= 28'b0;
+        asid          <= 10'b0;
+        tlbrentry_pa  <= 26'b0;
         save[0]       <= 32'b0;
         save[1]       <= 32'b0;
         save[2]       <= 32'b0;
@@ -346,6 +458,14 @@ always @(posedge clk) begin
         era           <= era_nxt;
         badv          <= badv_nxt;
         eentry_va     <= eentry_va_nxt;
+        tlbidx_index  <= tlbidx_index_nxt;
+        tlbidx_ps     <= tlbidx_ps_nxt;
+        tlbidx_ne     <= tlbidx_ne_nxt;
+        tlbehi_vppn   <= tlbehi_vppn_nxt;
+        tlbelo0       <= tlbelo0_nxt;
+        tlbelo1       <= tlbelo1_nxt;
+        asid          <= asid_nxt;
+        tlbrentry_pa  <= tlbrentry_pa_nxt;
         save[0]       <= save_nxt[0];
         save[1]       <= save_nxt[1];
         save[2]       <= save_nxt[2];
@@ -380,6 +500,12 @@ always @(*) begin
         CSR_TCFG   : rdata_o = {tcfg_initval, tcfg_periodic, tcfg_en};
         CSR_TVAL   : rdata_o = tval;
         CSR_TICLR  : rdata_o = 32'b0;       // write-only
+        CSR_TLBIDX : rdata_o = {tlbidx_ne, 1'b0, tlbidx_ps, 20'b0, tlbidx_index};
+        CSR_TLBEHI : rdata_o = {tlbehi_vppn, 13'b0};
+        CSR_TLBELO0: rdata_o = {4'b0, tlbelo0};
+        CSR_TLBELO1: rdata_o = {4'b0, tlbelo1};
+        CSR_ASID   : rdata_o = {8'b0, 8'd10, 6'b0, asid};
+        CSR_TLBRENTRY: rdata_o = {tlbrentry_pa, 6'b0};
         default    : rdata_o = 32'b0;       // EUEN / CPUID / unimplemented
     endcase
 end
@@ -396,6 +522,18 @@ assign era_o      = era_sw;
 assign timer_o    = timer;
 
 assign int_o      = (| (ecfg_lie & estat_is)) & crmd_ie;
+
+assign tlbidx_index_o = tlbidx_index;
+assign tlbidx_ps_o    = tlbidx_ps;
+assign tlbidx_ne_o    = tlbidx_ne;
+assign tlbehi_vppn_o  = tlbehi_vppn;
+assign tlbelo0_o      = {4'b0, tlbelo0};
+assign tlbelo1_o      = {4'b0, tlbelo1};
+assign asid_o         = asid;
+assign tlbrentry_o    = {tlbrentry_pa, 6'b0};
+assign estat_ecode_o  = estat_ecode;
+assign crmd_da_o      = csr_crmd_da;
+assign crmd_pg_o      = csr_crmd_pg;
 
 `undef CSR_FIELD
 

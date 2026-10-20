@@ -63,9 +63,17 @@ module mmu(
     input  wire        bvalid,
     output wire        bready,
 
-    // CSR sideband (tied 0 until the TLB CSRs land)
-    input  wire [ 1:0] crmd_plv,        // -> bridge arprot[0]/awprot[0]; later the PLV check
-    input  wire [ 9:0] asid
+    // translation results from the tlb (it lives in the core, next to the csr)
+    input  wire        if_xlat,         // if_va was translated
+    input  wire [19:0] if_ppn,
+    input  wire [ 5:0] if_ps,
+    input  wire        if_xlat_err,     // exp19: TLBR / PIF / PPI
+    input  wire        mem_xlat,
+    input  wire [19:0] mem_ppn,
+    input  wire [ 5:0] mem_ps,
+    input  wire        mem_xlat_err,    // exp19: TLBR / PIL / PIS / PPI / PME
+
+    input  wire [ 1:0] crmd_plv        // -> bridge arprot[0]/awprot[0]
 );
 
 localparam IDLE    = 3'b001;
@@ -75,21 +83,9 @@ localparam BRI_ACC = 3'b100;
 reg [2:0] if_state,      mem_state;
 reg [2:0] next_if_state, next_mem_state;
 
-// TLB look-up
-wire        if_found, mem_found;
-wire [19:0] if_ppn,   mem_ppn;
-wire [ 5:0] if_ps,    mem_ps;
-
-wire [31:0] if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
-                                       : {if_ppn[19:0],  if_va[11:0]};
-wire [31:0] mem_pa = (mem_ps == 6'd21) ? {mem_ppn[19:9], data_va[20:0]}
-                                       : {mem_ppn[19:0], data_va[11:0]};
-
-// TODO(exp19): CRMD.PG/DA, DMW and the TLB exceptions
-wire        if_xlat_err  = 1'b0;
-wire        mem_xlat_err = 1'b0;
-
-// bridge side commands
+wire [31:0] if_pa, mem_pa;
+wire        if_live, if_done, if_take;
+wire        mem_live, mem_take, mem_done, mem_abort;
 wire        bridge_if_req, bridge_if_flush;
 wire [31:0] bridge_if_addr;
 wire        bridge_if_pending;
@@ -98,13 +94,20 @@ wire [31:0] bridge_data_addr, bridge_data_wdata;
 wire [ 3:0] bridge_data_we;
 wire        bridge_mem_pending;
 
-assign bridge_if_addr   = if_found  ? if_pa  : if_va;
-assign bridge_data_addr = mem_found ? mem_pa : data_va;
+// TLB look-up
+assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
+                                  : {if_ppn[19:0],  if_va[11:0]};
+assign mem_pa = (mem_ps == 6'd21) ? {mem_ppn[19:9], data_va[20:0]}
+                                  : {mem_ppn[19:0], data_va[11:0]};
+
+// bridge side commands
+assign bridge_if_addr   = if_xlat  ? if_pa  : if_va;
+assign bridge_data_addr = mem_xlat ? mem_pa : data_va;
 
 // fetch path
-wire if_live = (if_state != IDLE);
-wire if_done = (if_state == BRI_ACC) & ~ bridge_if_pending;
-wire if_take = if_req & if_allow;
+assign if_live = (if_state != IDLE);
+assign if_done = (if_state == BRI_ACC) & ~ bridge_if_pending;
+assign if_take = if_req & if_allow;
 
 assign if_pending = if_live & ~ if_done;
 
@@ -133,10 +136,10 @@ assign bridge_if_req   = (if_state == TLB_ACC);
 assign bridge_if_flush = if_flush;
 
 // mem path
-wire mem_live  = (mem_state != IDLE);
-wire mem_take  = (ld_pre & mem_allow) | (data_req & (mem_state == IDLE));
-wire mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
-wire mem_abort = data_abort & mem_live;
+assign mem_live  = (mem_state != IDLE);
+assign mem_take  = (ld_pre & mem_allow) | (data_req & (mem_state == IDLE));
+assign mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
+assign mem_abort = data_abort & mem_live;
 
 assign mem_pending       = (mem_live | data_req) & ~ (mem_done | mem_abort);
 assign bridge_data_req   = mem_live & ~ data_abort;
@@ -178,60 +181,6 @@ always @(posedge clk) begin
         mem_state  <= next_mem_state;
     end
 end
-
-// TLB
-tlb u_tlb(
-    .clk          (clk          ),
-    .reset        (reset        ),
-
-    .s0_vppn      (if_va[31:13] ),
-    .s0_va_bit12  (if_va[12]    ),
-    .s0_asid      (asid         ),
-    .s0_found     (if_found     ),
-    .s0_index     (             ),
-    .s0_ppn       (if_ppn       ),
-    .s0_ps        (if_ps        ),
-    .s0_plv       (             ),
-    .s0_mat       (             ),
-    .s0_d         (             ),
-    .s0_v         (             ),
-
-    .s1_vppn      (data_va[31:13]),
-    .s1_va_bit12  (data_va[12]  ),
-    .s1_asid      (asid         ),
-    .s1_found     (mem_found    ),
-    .s1_index     (             ),
-    .s1_ppn       (mem_ppn      ),
-    .s1_ps        (mem_ps       ),
-    .s1_plv       (             ),
-    .s1_mat       (             ),
-    .s1_d         (             ),
-    .s1_v         (             ),
-
-    // no TLB instruction / TLB CSR yet
-    .invtlb_valid (1'b0),
-    .invtlb_op    (5'h0),
-
-    .we           (1'b0),
-    .w_index      (4'h0),
-    .w_e          (1'b0),
-    .w_vppn       (19'h0),
-    .w_ps         (6'h0),
-    .w_asid       (10'h0),
-    .w_g          (1'b0),
-    .w_ppn0       (20'h0),
-    .w_plv0       (2'h0),
-    .w_mat0       (2'h0),
-    .w_d0         (1'b0),
-    .w_v0         (1'b0),
-    .w_ppn1       (20'h0),
-    .w_plv1       (2'h0),
-    .w_mat1       (2'h0),
-    .w_d1         (1'b0),
-    .w_v1         (1'b0),
-
-    .r_index      (4'h0)
-);
 
 // bridge
 sram_axi_bridge u_bridge(

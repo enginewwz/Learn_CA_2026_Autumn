@@ -174,6 +174,8 @@ reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
 reg  [ 8:0] csr_ctl [WB:IF] /* verilator split_var */;
+reg  [ 2:0] tlb_op [WB:ID] /* verilator split_var */;
+reg  [ 4:0] invtlb_op [WB:ID] /* verilator split_var */;
 reg  [ 6:0] excp_cause [WB:IF] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
@@ -200,13 +202,15 @@ wire        next_if_adef;        // misaligned fetch address, gates the request
 // exception / ertn / interrupt
 wire        mem_excp;
 wire        mem_flush;        // kill IF..EX + restart the fetch: exception / ertn / CRMD write
-wire        mem_crmd_plv_wr;  // the MEM slot writes CRMD with mask[1:0] != 0
+wire        mem_crmd_wr;  // the MEM slot writes CRMD with mask[1:0] != 0
 wire        mem_ipe;          // privileged instruction at PLV != 0, judged in MEM
 
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
 wire        excp_i;
 wire        ertn_i;
-reg         wb_crmd_plv_wr;
+reg         wb_crmd_tlb;       // CRMD / TLB changed the map: restart the fetch
+wire        mem_crmd_tlb;
+wire        mem_tlb;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
@@ -229,6 +233,8 @@ wire        ex_gr_we_o;
 wire  [4:0] ex_dest_o;
 wire [13:0] ex_csr_num_o;
 wire [ 8:0] ex_csr_ctl_o;
+wire [ 2:0] ex_tlb_op_o;
+wire [ 4:0] ex_invtlb_op_o;
 wire [ 6:0] ex_excp_cause_o;
 wire [ 6:0] excp_cause_id;
 wire [31:0] ex_csr_wdata_o;
@@ -338,6 +344,21 @@ wire        inst_rdcntvh_w;
 wire        inst_rdcntid;
 wire        inst_ine;
 
+// TLB instructions
+wire        inst_tlbsrch;
+wire        inst_tlbrd;
+wire        inst_tlbwr;
+wire        inst_tlbfill;
+wire        inst_invtlb;
+wire        inst_tlb_any;
+
+localparam [2:0] TLB_NONE = 3'd0;
+localparam [2:0] TLB_SRCH = 3'd1;
+localparam [2:0] TLB_RD   = 3'd2;
+localparam [2:0] TLB_WR   = 3'd3;
+localparam [2:0] TLB_FILL = 3'd4;
+localparam [2:0] TLB_INV  = 3'd5;
+
 wire        need_ui5;
 wire        need_ui12;
 wire        need_si12;
@@ -379,9 +400,9 @@ assign seq_pc       = pc[IF] + 32'h4;
 
 wire sel_era    = ertn_i;                       // ertn -> era
 wire sel_eentry = excp_i;                       // exception -> eentry
-wire sel_crmd   = ~ wb_excp_ertn & wb_crmd_plv_wr;  // csrwr CRMD -> restart fetch at pc[WB]+4
-wire sel_br     = ~ wb_excp_ertn & ~ wb_crmd_plv_wr & br_reg;   // latched redirect
-wire sel_seq    = ~ (wb_excp_ertn | wb_crmd_plv_wr | br_reg | br_taken_ex | br_taken_id);
+wire sel_crmd   = ~ wb_excp_ertn & wb_crmd_tlb;  // CRMD / TLB write -> restart fetch at pc[WB]+4
+wire sel_br     = ~ wb_excp_ertn & ~ wb_crmd_tlb & br_reg;  // latched redirect
+wire sel_seq    = ~ (wb_excp_ertn | wb_crmd_tlb | br_reg | br_taken_ex | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{sel_eentry }} & eentry_o    ) |
@@ -391,7 +412,7 @@ assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{br_taken_id}} & br_target_id) |
                       ({32{sel_seq    }} & seq_pc      );
 
-assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn | wb_crmd_plv_wr;
+assign br_redirect = br_taken_ex | br_taken_id | wb_excp_ertn | wb_crmd_tlb;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -595,8 +616,20 @@ assign inst_csr_any = op_31_26_d[6'h01] & ~ inst[25] & ~ inst[24];
 assign inst_csrrd   = inst_csr_any & (inst[9:5] == 5'd0);
 assign inst_csrwr   = inst_csr_any & (inst[9:5] == 5'd1);
 assign inst_csrxchg = inst_csr_any & ~ inst_csrrd & ~ inst_csrwr;
-assign inst_ertn    = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10];
+// TLB instructions share op_19_15 = 0x10 with ertn, so ertn also checks i14:10
+assign inst_ertn    = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10]
+                    & (inst[14:10] == 5'b01110);
 assign inst_idle    = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h11];
+assign inst_tlbsrch = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10]
+                    & (inst[14:10] == 5'b01010);
+assign inst_tlbrd   = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10]
+                    & (inst[14:10] == 5'b01011);
+assign inst_tlbwr   = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10]
+                    & (inst[14:10] == 5'b01100);
+assign inst_tlbfill = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h10]
+                    & (inst[14:10] == 5'b01101);
+assign inst_invtlb  = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h13];
+assign inst_tlb_any = inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb;
 
 assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
 assign inst_break   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14];
@@ -623,6 +656,7 @@ assign inst_ine = ~ (inst_lu12i_w | inst_add_w | inst_sub_w | inst_slt | inst_sl
                    | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
                    | inst_st_b | inst_st_h
                    | inst_csr_any | inst_ertn | inst_syscall | inst_break | inst_idle
+                   | inst_tlb_any
                    | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid);
 
 // ID source usage includes branch operands and store data
@@ -638,7 +672,8 @@ always @(*) begin
                   | inst_blt | inst_bge | inst_bltu | inst_bgeu
                   | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
                   | inst_st_b | inst_st_h
-                  | inst_csrxchg;          // rj is the csrxchg write mask
+                  | inst_csrxchg           // rj is the csrxchg write mask
+                  | inst_invtlb;           // rj[9:0] is the ASID
     src2_used[ID] = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_st_w | inst_beq | inst_bne
@@ -647,7 +682,8 @@ always @(*) begin
                   | inst_div_w | inst_mod_w | inst_div_wu | inst_mod_wu
                   | inst_blt | inst_bge | inst_bltu | inst_bgeu
                   | inst_st_b | inst_st_h
-                  | inst_csrwr | inst_csrxchg;   // rd is the CSR write data
+                  | inst_csrwr | inst_csrxchg    // rd is the CSR write data
+                  | inst_invtlb;                // rk is the VA
 end
 
 always @(posedge clk) begin
@@ -725,11 +761,20 @@ always @(*) begin
     excp_cause[ID]           = excp_cause[IF] | excp_cause_id;
     csr_ctl[ID][CSR_EXCP]    = | excp_cause[ID];
     // privileged instructions: IPE when the commit-point PLV is not 0
-    csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle;
+    csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any;
+    // TLB instruction payload
+    tlb_op[ID]               = inst_tlbsrch ? TLB_SRCH :
+                               inst_tlbrd   ? TLB_RD   :
+                               inst_tlbwr   ? TLB_WR   :
+                               inst_tlbfill ? TLB_FILL :
+                               inst_invtlb  ? TLB_INV  : TLB_NONE;
+    invtlb_op[ID]            = inst[4:0];
 end
 
 always @(posedge clk) begin
     if (allow[MEM]) begin
+        tlb_op[MEM]     <= tlb_op[EX];
+        invtlb_op[MEM]  <= invtlb_op[EX];
         csr_num[MEM]    <= csr_num[EX];
         // ALE / interrupt are born in EX and carried like any other cause
         csr_ctl[MEM]    <= csr_ctl[EX] | (ex_mem_excp ? (9'h1 << CSR_EXCP) : 9'h0);
@@ -740,6 +785,8 @@ always @(posedge clk) begin
                            | (int_take   ? (7'h1 << EXCP_INT) : 7'h0);
     end
     if (allow[WB]) begin
+        tlb_op[WB]     <= tlb_op[MEM];
+        invtlb_op[WB]  <= invtlb_op[MEM];
         csr_num[WB]    <= csr_num[MEM];
         // IPE is judged in MEM (it needs the CRMD value after every older write),
         // but it takes effect at the same WB point as the CSR access it forbids
@@ -754,7 +801,7 @@ end
 // ADEF arrives from IF, the other three are decoded here
 assign excp_cause_id[EXCP_SYS]  = inst_syscall;
 assign excp_cause_id[EXCP_BRK]  = inst_break;
-assign excp_cause_id[EXCP_INE]  = inst_ine;
+assign excp_cause_id[EXCP_INE]  = inst_ine | (inst_invtlb & (inst[4:0] > 5'd6));
 assign excp_cause_id[EXCP_ADEF] = 1'b0;
 assign excp_cause_id[EXCP_ALE]  = 1'b0;      // ALE / interrupt are judged in MEM
 assign excp_cause_id[EXCP_INT]  = 1'b0;
@@ -776,7 +823,8 @@ always @(*) begin
     gr_we[ID] = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
               & ~inst_st_b & ~inst_st_h
               & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
-              & ~inst_ertn & ~inst_syscall & ~inst_break & ~inst_idle;
+              & ~inst_ertn & ~inst_syscall & ~inst_break & ~inst_idle
+              & ~inst_tlb_any;
     dest[ID]  = inst_bl ? 5'd1 : rd;
 end
 
@@ -864,6 +912,8 @@ always @(*) begin
     dest[EX]         = ex_dest_o;
     csr_num[EX]      = ex_csr_num_o;
     csr_ctl[EX]      = ex_csr_ctl_o;
+    tlb_op[EX]       = ex_tlb_op_o;
+    invtlb_op[EX]    = ex_invtlb_op_o;
     excp_cause[EX]   = ex_excp_cause_o;
     csr_wdata[EX]    = ex_csr_wdata_o;
     csr_mask[EX]     = ex_csr_mask_o;
@@ -928,15 +978,20 @@ assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
 assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe;
 
-assign mem_crmd_plv_wr = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD) & (| csr_mask[MEM][1:0]);
+assign mem_crmd_wr = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD);
+
+assign mem_tlb = valid[MEM] & (| tlb_op[MEM]);
+
+assign mem_crmd_tlb = (mem_crmd_wr & valid[MEM]) | mem_tlb;
 
 assign mem_flush = valid[MEM] & (mem_excp
                                 | csr_ctl[MEM][CSR_ERTN]
-                                | mem_crmd_plv_wr);
+                                | mem_crmd_wr
+                                | (| tlb_op[MEM]));
 
 always @(posedge clk) begin
-    if (reset) wb_crmd_plv_wr <= 1'b0;
-    else       wb_crmd_plv_wr <= mem_crmd_plv_wr & valid[MEM];
+    if (reset) wb_crmd_tlb <= 1'b0;
+    else       wb_crmd_tlb <= mem_crmd_tlb;
 end
 
 // WB stage
@@ -1028,6 +1083,10 @@ EX u_ex(
     .excp_cause_o   (ex_excp_cause_o  ),
     .csr_wdata_o    (ex_csr_wdata_o   ),
     .csr_mask_o     (ex_csr_mask_o    ),
+    .tlb_op_i       (tlb_op[ID]       ),
+    .tlb_op_o       (ex_tlb_op_o      ),
+    .invtlb_op_i    (invtlb_op[ID]    ),
+    .invtlb_op_o    (ex_invtlb_op_o   ),
  
     .ex_result      (ex_result        ),
     .valid_o        (ex_valid_o       ),
@@ -1043,6 +1102,152 @@ EX u_ex(
     .fw2_hit_o      (fw2_ex_hit_o     ),
     .fw2_valid_o    (fw2_ex_valid_o   ),
     .fw2_data_o     (fw2_ex_data_o    )
+);
+
+// The TLB instructions write/read/invalidate the tlb at WB.  The fetch (s0) and
+// the MEM access (s1) search it; a TLBSRCH in WB takes s1 over, which is safe
+// because by then its own flush has turned the MEM slot into a bubble.
+wire        tlb_s0_found, tlb_s1_found;
+wire [19:0] tlb_s0_ppn,   tlb_s1_ppn;
+wire [ 5:0] tlb_s0_ps,    tlb_s1_ps;
+wire [ 3:0] tlb_s1_index;
+wire        tlb_s0_va_bit12, tlb_s1_va_bit12;
+wire [18:0] tlb_s0_vppn,     tlb_s1_vppn;
+
+wire        tlb_r_e, tlb_r_g, tlb_r_d0, tlb_r_d1, tlb_r_v0, tlb_r_v1;
+wire [18:0] tlb_r_vppn;
+wire [ 5:0] tlb_r_ps;
+wire [ 9:0] tlb_r_asid;
+wire [19:0] tlb_r_ppn0, tlb_r_ppn1;
+wire [ 1:0] tlb_r_plv0, tlb_r_plv1, tlb_r_mat0, tlb_r_mat1;
+
+wire [ 3:0] tlb_w_index;
+wire        tlb_w_e, tlb_w_g, tlb_w_d0, tlb_w_d1, tlb_w_v0, tlb_w_v1;
+wire [18:0] tlb_w_vppn;
+wire [ 9:0] tlb_w_asid;
+wire [19:0] tlb_w_ppn0, tlb_w_ppn1;
+wire [ 1:0] tlb_w_plv0, tlb_w_plv1, tlb_w_mat0, tlb_w_mat1;
+
+wire [31:0] tlb_rd_lo0, tlb_rd_lo1;
+wire        wb_tlb_commit, wb_tlb_srch, wb_tlb_rd, wb_tlb_wr, wb_tlb_inv;
+wire        if_xlat, mem_xlat;
+wire [ 1:0] tlb_csr_sel;
+
+wire [ 3:0] tlbidx_index_o;
+wire [ 5:0] tlbidx_ps_o;
+wire        tlbidx_ne_o;
+wire [18:0] tlbehi_vppn_o;
+wire [31:0] tlbelo0_o, tlbelo1_o;
+wire [ 9:0] asid_o;
+wire [31:0] tlbrentry_o;
+wire [ 5:0] estat_ecode_o;
+wire        crmd_da_o, crmd_pg_o;
+
+assign wb_tlb_commit = valid[WB] & (tlb_op[WB] != TLB_NONE) & ~ csr_ctl[WB][CSR_EXCP];
+assign wb_tlb_srch   = wb_tlb_commit & (tlb_op[WB] == TLB_SRCH);
+assign wb_tlb_rd     = wb_tlb_commit & (tlb_op[WB] == TLB_RD);
+assign wb_tlb_wr     = wb_tlb_commit & ((tlb_op[WB] == TLB_WR) | (tlb_op[WB] == TLB_FILL));
+assign wb_tlb_inv    = wb_tlb_commit & (tlb_op[WB] == TLB_INV);
+
+// write / invalidate keys: invtlb reuses the write port (rj -> ASID, rk -> VPPN)
+assign tlb_w_index = (tlb_op[WB] == TLB_FILL) ? timer_o[3:0] : tlbidx_index_o;
+assign tlb_w_e     = (estat_ecode_o == 6'h3f) ? 1'b1 : ~ tlbidx_ne_o;
+assign tlb_w_vppn  = wb_tlb_inv ? csr_wdata[WB][31:13] : tlbehi_vppn_o;
+assign tlb_w_asid  = wb_tlb_inv ? csr_mask[WB][9:0]   : asid_o;
+assign tlb_w_g     = tlbelo0_o[6] & tlbelo1_o[6];
+assign tlb_w_ppn0  = tlbelo0_o[27:8];
+assign tlb_w_plv0  = tlbelo0_o[3:2];
+assign tlb_w_mat0  = tlbelo0_o[5:4];
+assign tlb_w_d0    = tlbelo0_o[1];
+assign tlb_w_v0    = tlbelo0_o[0];
+assign tlb_w_ppn1  = tlbelo1_o[27:8];
+assign tlb_w_plv1  = tlbelo1_o[3:2];
+assign tlb_w_mat1  = tlbelo1_o[5:4];
+assign tlb_w_d1    = tlbelo1_o[1];
+assign tlb_w_v1    = tlbelo1_o[0];
+
+// search keys: s0 = the fetch address, s1 = the MEM address (TLBSRCH in WB takes s1)
+assign tlb_s0_vppn     = pc[IF][31:13];
+assign tlb_s0_va_bit12 = pc[IF][12];
+assign tlb_s1_vppn     = wb_tlb_srch ? tlbehi_vppn_o : result[MEM][31:13];
+assign tlb_s1_va_bit12 = wb_tlb_srch ? 1'b0          : result[MEM][12];
+
+// TLBRD hands the entry back to the CSRs
+assign tlb_rd_lo0 = {4'b0, tlb_r_ppn0, 1'b0, tlb_r_g, tlb_r_mat0, tlb_r_plv0, tlb_r_d0, tlb_r_v0};
+assign tlb_rd_lo1 = {4'b0, tlb_r_ppn1, 1'b0, tlb_r_g, tlb_r_mat1, tlb_r_plv1, tlb_r_d1, tlb_r_v1};
+
+assign tlb_csr_sel = (tlb_op[WB] == TLB_SRCH) ? 2'd1 :
+                     (tlb_op[WB] == TLB_RD)   ? 2'd2 : 2'd0;
+
+// TODO(exp19): a DMW hit also suppresses the translation
+assign if_xlat  = tlb_s0_found & crmd_pg_o & ~ crmd_da_o;
+assign mem_xlat = tlb_s1_found & crmd_pg_o & ~ crmd_da_o & ~ wb_tlb_srch;
+
+tlb u_tlb(
+    .clk          (clk            ),
+    .reset        (reset          ),
+
+    .s0_vppn      (tlb_s0_vppn    ),
+    .s0_va_bit12  (tlb_s0_va_bit12),
+    .s0_asid      (asid_o         ),
+    .s0_found     (tlb_s0_found   ),
+    .s0_index     (               ),
+    .s0_ppn       (tlb_s0_ppn     ),
+    .s0_ps        (tlb_s0_ps      ),
+    .s0_plv       (               ),
+    .s0_mat       (               ),
+    .s0_d         (               ),
+    .s0_v         (               ),
+
+    .s1_vppn      (tlb_s1_vppn    ),
+    .s1_va_bit12  (tlb_s1_va_bit12),
+    .s1_asid      (asid_o         ),
+    .s1_found     (tlb_s1_found   ),
+    .s1_index     (tlb_s1_index   ),
+    .s1_ppn       (tlb_s1_ppn     ),
+    .s1_ps        (tlb_s1_ps      ),
+    .s1_plv       (               ),
+    .s1_mat       (               ),
+    .s1_d         (               ),
+    .s1_v         (               ),
+
+    .invtlb_valid (wb_tlb_inv     ),
+    .invtlb_op    (invtlb_op[WB]  ),
+
+    .we           (wb_tlb_wr      ),
+    .w_index      (tlb_w_index    ),
+    .w_e          (tlb_w_e        ),
+    .w_vppn       (tlb_w_vppn     ),
+    .w_ps         (tlbidx_ps_o    ),
+    .w_asid       (tlb_w_asid     ),
+    .w_g          (tlb_w_g        ),
+    .w_ppn0       (tlb_w_ppn0     ),
+    .w_plv0       (tlb_w_plv0     ),
+    .w_mat0       (tlb_w_mat0     ),
+    .w_d0         (tlb_w_d0       ),
+    .w_v0         (tlb_w_v0       ),
+    .w_ppn1       (tlb_w_ppn1     ),
+    .w_plv1       (tlb_w_plv1     ),
+    .w_mat1       (tlb_w_mat1     ),
+    .w_d1         (tlb_w_d1       ),
+    .w_v1         (tlb_w_v1       ),
+
+    .r_index      (tlbidx_index_o ),
+    .r_e          (tlb_r_e        ),
+    .r_vppn       (tlb_r_vppn     ),
+    .r_ps         (tlb_r_ps       ),
+    .r_asid       (tlb_r_asid     ),
+    .r_g          (tlb_r_g        ),
+    .r_ppn0       (tlb_r_ppn0     ),
+    .r_plv0       (tlb_r_plv0     ),
+    .r_mat0       (tlb_r_mat0     ),
+    .r_d0         (tlb_r_d0       ),
+    .r_v0         (tlb_r_v0       ),
+    .r_ppn1       (tlb_r_ppn1     ),
+    .r_plv1       (tlb_r_plv1     ),
+    .r_mat1       (tlb_r_mat1     ),
+    .r_d1         (tlb_r_d1       ),
+    .r_v1         (tlb_r_v1       )
 );
 
 csr u_csr(
@@ -1063,6 +1268,29 @@ csr u_csr(
     .ertn_i          (ertn_i       ),
     .hwi_i           (8'h0         ),
     .ipi_i           (1'b0         ),
+    .tlb_we_i        (wb_tlb_commit),
+    .tlb_sel_i       (tlb_csr_sel   ),
+    .tlb_srch_hit_i  (tlb_s1_found ),
+    .tlb_srch_index_i(tlb_s1_index ),
+    .tlb_rd_e_i      (tlb_r_e      ),
+    .tlb_rd_vppn_i   (tlb_r_vppn   ),
+    .tlb_rd_ps_i     (tlb_r_ps     ),
+    .tlb_rd_asid_i   (tlb_r_asid   ),
+    .tlb_rd_lo0_i    (tlb_rd_lo0   ),
+    .tlb_rd_lo1_i    (tlb_rd_lo1   ),
+
+    .tlbidx_index_o  (tlbidx_index_o),
+    .tlbidx_ps_o     (tlbidx_ps_o   ),
+    .tlbidx_ne_o     (tlbidx_ne_o   ),
+    .tlbehi_vppn_o   (tlbehi_vppn_o ),
+    .tlbelo0_o       (tlbelo0_o     ),
+    .tlbelo1_o       (tlbelo1_o     ),
+    .asid_o          (asid_o        ),
+    .tlbrentry_o     (tlbrentry_o   ),
+    .estat_ecode_o   (estat_ecode_o ),
+    .crmd_da_o       (crmd_da_o     ),
+    .crmd_pg_o       (crmd_pg_o     ),
+
     .crmd_plv_o      (crmd_plv_o   ),
     .crmd_ie_o       (crmd_ie_o    ),
     .eentry_o        (eentry_o     ),
@@ -1093,7 +1321,15 @@ mmu u_mmu(
     .data_rdata     (data_rdata     ),
 
     .crmd_plv       (crmd_plv_o     ),
-    .asid           (10'h0          ),   // TODO(exp18): CSR.ASID
+
+    .if_xlat        (if_xlat        ),
+    .if_ppn         (tlb_s0_ppn     ),
+    .if_ps          (tlb_s0_ps      ),
+    .if_xlat_err    (1'b0           ),   // TODO(exp19): TLBR / PIF / PPI
+    .mem_xlat       (mem_xlat       ),
+    .mem_ppn        (tlb_s1_ppn     ),
+    .mem_ps         (tlb_s1_ps      ),
+    .mem_xlat_err   (1'b0           ),   // TODO(exp19): TLBR / PIL / PIS / PPI / PME
 
     .arid           (arid           ),
     .araddr         (araddr         ),
