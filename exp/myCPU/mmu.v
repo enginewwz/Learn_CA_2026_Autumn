@@ -64,14 +64,18 @@ module mmu(
     output wire        bready,
 
     // translation results from the tlb (it lives in the core, next to the csr)
-    input  wire        if_xlat,         // if_va was translated
+    input  wire        if_xlat,         // the tlb translated if_va
     input  wire [19:0] if_ppn,
     input  wire [ 5:0] if_ps,
-    input  wire        if_xlat_err,     // exp19: TLBR / PIF / PPI
+    input  wire        if_dmw_hit,      // a dmw window covers if_va
+    input  wire [31:0] if_dmw_pa,
+    input  wire        if_abort,        // this fetch has an exception: do not issue
     input  wire        mem_xlat,
     input  wire [19:0] mem_ppn,
     input  wire [ 5:0] mem_ps,
-    input  wire        mem_xlat_err,    // exp19: TLBR / PIL / PIS / PPI / PME
+    input  wire        mem_dmw_hit,
+    input  wire [31:0] mem_dmw_pa,
+    output wire        if_issue,        // the fetch is being handed to the bridge
 
     input  wire [ 1:0] crmd_plv        // -> bridge arprot[0]/awprot[0]
 );
@@ -84,6 +88,7 @@ reg [2:0] if_state,      mem_state;
 reg [2:0] next_if_state, next_mem_state;
 
 wire [31:0] if_pa, mem_pa;
+wire [31:0] if_addr, mem_addr;
 wire        if_live, if_done, if_take;
 wire        mem_live, mem_take, mem_done, mem_abort;
 wire        bridge_if_req, bridge_if_flush;
@@ -100,9 +105,13 @@ assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
 assign mem_pa = (mem_ps == 6'd21) ? {mem_ppn[19:9], data_va[20:0]}
                                   : {mem_ppn[19:0], data_va[11:0]};
 
+// dmw window > tlb entry > the va as it is
+assign if_addr  = if_dmw_hit  ? if_dmw_pa  : if_xlat  ? if_pa  : if_va;
+assign mem_addr = mem_dmw_hit ? mem_dmw_pa : mem_xlat ? mem_pa : data_va;
+
 // bridge side commands
-assign bridge_if_addr   = if_xlat  ? if_pa  : if_va;
-assign bridge_data_addr = mem_xlat ? mem_pa : data_va;
+assign bridge_if_addr   = if_addr;
+assign bridge_data_addr = mem_addr;
 
 // fetch path
 assign if_live = (if_state != IDLE);
@@ -118,7 +127,7 @@ always @(*) begin
             else         next_if_state = IDLE;
         end
         TLB_ACC: begin
-            if (if_flush | if_xlat_err) next_if_state = IDLE;
+            if (if_flush | if_abort) next_if_state = IDLE;
             else                        next_if_state = BRI_ACC;
         end
         BRI_ACC: begin
@@ -132,12 +141,15 @@ always @(*) begin
     endcase
 end
 
-assign bridge_if_req   = (if_state == TLB_ACC);
+assign if_issue        = (if_state == TLB_ACC);
+// a fetch that is being flushed / aborted must not reach the bridge at all: the
+// bridge would still run it and its rdata would land on the next fetch
+assign bridge_if_req   = if_issue & ~ if_abort & ~ if_flush;
 assign bridge_if_flush = if_flush;
 
 // mem path
 assign mem_live  = (mem_state != IDLE);
-assign mem_take  = (ld_pre & mem_allow) | (data_req & (mem_state == IDLE));
+assign mem_take  = (ld_pre & mem_allow) | data_req;
 assign mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
 assign mem_abort = data_abort & mem_live;
 
@@ -153,7 +165,7 @@ always @(*) begin
             else        next_mem_state = IDLE;
         end
         TLB_ACC: begin
-            if (data_abort | mem_xlat_err) next_mem_state = IDLE;
+            if (data_abort) next_mem_state = IDLE;
             else if (mem_done) begin
                 if (ld_pre & mem_allow) next_mem_state = TLB_ACC;
                 else                    next_mem_state = IDLE;

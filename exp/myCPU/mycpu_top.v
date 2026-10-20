@@ -121,8 +121,16 @@ localparam EXCP_ADEF         = 3;   // fetch address not 4-byte aligned
 localparam EXCP_ALE          = 4;   // load / store not naturally aligned (judged in MEM)
 localparam EXCP_INT          = 5;   // interrupt (judged in MEM)
 localparam EXCP_IPE          = 6;   // privileged instruction at PLV != 0 (judged in MEM)
+localparam EXCP_TLBR         = 7;   // tlb refill
+localparam EXCP_PIF          = 8;   // fetch: page invalid
+localparam EXCP_PIL          = 9;   // load: page invalid
+localparam EXCP_PIS          = 10;  // store: page invalid
+localparam EXCP_PME          = 11;  // store: page not dirty
+localparam EXCP_PPI          = 12;  // page privilege violation
 
 localparam [13:0] CSR_CRMD   = 14'h000;
+localparam [13:0] CSR_DMW0   = 14'h180;
+localparam [13:0] CSR_DMW1   = 14'h181;
 
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
@@ -176,7 +184,7 @@ reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
 reg  [ 8:0] csr_ctl [WB:IF] /* verilator split_var */;
 reg  [ 2:0] tlb_op [WB:ID] /* verilator split_var */;
 reg  [ 4:0] invtlb_op [WB:ID] /* verilator split_var */;
-reg  [ 6:0] excp_cause [WB:IF] /* verilator split_var */;
+reg  [12:0] excp_cause [WB:IF] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:ID] /* verilator split_var */;
 
@@ -202,7 +210,6 @@ wire        next_if_adef;        // misaligned fetch address, gates the request
 // exception / ertn / interrupt
 wire        mem_excp;
 wire        mem_flush;        // kill IF..EX + restart the fetch: exception / ertn / CRMD write
-wire        mem_crmd_wr;  // the MEM slot writes CRMD with mask[1:0] != 0
 wire        mem_ipe;          // privileged instruction at PLV != 0, judged in MEM
 
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
@@ -214,6 +221,24 @@ wire        mem_tlb;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
+
+// TLB / DMW translation and the exceptions it can raise
+wire        map_mode;           // PG mode: consult DMW / TLB
+wire        if_xlat, mem_xlat;
+wire        if_dmw_hit, mem_dmw_hit;
+wire [31:0] if_dmw_pa, mem_dmw_pa;
+wire        dmw0_hit_if, dmw1_hit_if, dmw0_hit_mem, dmw1_hit_mem;
+wire [31:0] dmw0_o, dmw1_o;
+wire [12:0] if_fetch_cause;
+wire        if_fetch_excp, if_abort, if_issue;
+wire        if2id;              // the IF slot moves into ID this cycle
+reg         if_excp_r;          // fetch exception carried by the ID slot
+reg  [12:0] if_cause_r;
+wire        mem_tlb_chk;
+wire [12:0] mem_tlb_cause;
+wire        mem_map_wr;
+wire [31:0] excp_entry;
+wire        excp_tlb;
 
 wire        ex_mem_ale;     // load / store alignment, judged in EX (before MEM)
 wire        ex_mem_excp;    // ALE / interrupt: folded into the slot at the EX -> MEM edge
@@ -235,8 +260,8 @@ wire [13:0] ex_csr_num_o;
 wire [ 8:0] ex_csr_ctl_o;
 wire [ 2:0] ex_tlb_op_o;
 wire [ 4:0] ex_invtlb_op_o;
-wire [ 6:0] ex_excp_cause_o;
-wire [ 6:0] excp_cause_id;
+wire [12:0] ex_excp_cause_o;
+wire [12:0] excp_cause_id;
 wire [31:0] ex_csr_wdata_o;
 wire [31:0] ex_csr_mask_o;
 wire        ex_valid_o;
@@ -399,13 +424,13 @@ wire [31:0] fw1_data,     fw2_data;
 assign seq_pc       = pc[IF] + 32'h4;
 
 wire sel_era    = ertn_i;                       // ertn -> era
-wire sel_eentry = excp_i;                       // exception -> eentry
+wire sel_eentry = excp_i;                       // exception -> eentry / tlbrentry
 wire sel_crmd   = ~ wb_excp_ertn & wb_crmd_tlb;  // CRMD / TLB write -> restart fetch at pc[WB]+4
 wire sel_br     = ~ wb_excp_ertn & ~ wb_crmd_tlb & br_reg;  // latched redirect
 wire sel_seq    = ~ (wb_excp_ertn | wb_crmd_tlb | br_reg | br_taken_ex | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
-                      ({32{sel_eentry }} & eentry_o    ) |
+                      ({32{sel_eentry }} & excp_entry  ) |
                       ({32{sel_crmd   }} & (pc[WB] + 32'h4)) |
                       ({32{sel_br     }} & br_pc_reg   ) |
                       ({32{br_taken_ex}} & br_target_ex) |
@@ -527,15 +552,36 @@ always @(posedge clk) begin
     end
 end
 
+// the IF slot only carries a cause for the single cycle in which it is handed
+// over, so latch it into the ID slot: the instruction may wait there for EX
+assign if2id = cur_valid[IF] & ~ stall[IF] & allow[ID];
+
 always @(posedge clk) begin
     if (reset) begin
-        excp_cause[IF] <= 7'h0;
+        if_excp_r  <= 1'b0;
+        if_cause_r <= 13'h0;
+    end
+    else if (if2id) begin
+        if_excp_r  <= csr_ctl[IF][CSR_EXCP];
+        if_cause_r <= excp_cause[IF];
+    end
+end
+
+always @(posedge clk) begin
+    if (reset) begin
+        excp_cause[IF] <= 13'h0;
         csr_ctl[IF]    <= 9'b0;
-    end          
+    end
+    else if (if_fetch_excp) begin
+        // the tlb check happens one cycle after the fetch is taken, i.e. while
+        // the IF slot is held: stamp the cause and let the slot go as a nop
+        excp_cause[IF] <= if_fetch_cause;
+        csr_ctl[IF]    <= 9'h1 << CSR_EXCP;
+    end
     else if (allow[IF]) begin
-        excp_cause[IF] <= next_if_adef ? (7'h1 << EXCP_ADEF) : 7'h0;
+        excp_cause[IF] <= next_if_adef ? (13'h1 << EXCP_ADEF) : 13'h0;
         csr_ctl[IF]    <= next_if_adef ? (9'h1 << CSR_EXCP ) : 9'h0;
-    end 
+    end
 end
 
 // ID stage
@@ -758,7 +804,7 @@ always @(*) begin
     csr_ctl[ID][CSR_WB]      = inst_csrrd | inst_csrwr | inst_csrxchg
                              | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid;
     // all carried exceptions share one csr_ctl bit; excp_cause says which one
-    excp_cause[ID]           = excp_cause[IF] | excp_cause_id;
+    excp_cause[ID]           = if_cause_r | excp_cause_id;
     csr_ctl[ID][CSR_EXCP]    = | excp_cause[ID];
     // privileged instructions: IPE when the commit-point PLV is not 0
     csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any;
@@ -781,8 +827,8 @@ always @(posedge clk) begin
         csr_wdata[MEM]  <= csr_wdata[EX];
         csr_mask[MEM]   <= csr_mask[EX];
         excp_cause[MEM] <= excp_cause[EX]
-                           | (ex_mem_ale ? (7'h1 << EXCP_ALE) : 7'h0)
-                           | (int_take   ? (7'h1 << EXCP_INT) : 7'h0);
+                           | (ex_mem_ale ? (13'h1 << EXCP_ALE) : 13'h0)
+                           | (int_take   ? (13'h1 << EXCP_INT) : 13'h0);
     end
     if (allow[WB]) begin
         tlb_op[WB]     <= tlb_op[MEM];
@@ -790,11 +836,14 @@ always @(posedge clk) begin
         csr_num[WB]    <= csr_num[MEM];
         // IPE is judged in MEM (it needs the CRMD value after every older write),
         // but it takes effect at the same WB point as the CSR access it forbids
-        csr_ctl[WB]    <= csr_ctl[MEM] | (mem_ipe ? (9'h1 << CSR_EXCP) : 9'h0);
+        csr_ctl[WB]    <= csr_ctl[MEM]
+                        | ((mem_ipe | (| mem_tlb_cause)) ? (9'h1 << CSR_EXCP) : 9'h0);
         csr_wdata[WB]  <= csr_wdata[MEM];
         csr_mask[WB]   <= csr_mask[MEM];
-        excp_cause[WB] <= excp_cause[MEM] | (mem_ipe ? (7'h1 << EXCP_IPE) : 7'h0);
-        wb_excp_badv   <= excp_cause[MEM][EXCP_ALE] ? result[MEM] : pc[MEM];
+        excp_cause[WB] <= excp_cause[MEM] | (mem_ipe ? (13'h1 << EXCP_IPE) : 13'h0)
+                         | mem_tlb_cause;
+        wb_excp_badv   <= (excp_cause[MEM][EXCP_ALE] | (| mem_tlb_cause))
+                          ? result[MEM] : pc[MEM];
     end
 end
 
@@ -806,6 +855,12 @@ assign excp_cause_id[EXCP_ADEF] = 1'b0;
 assign excp_cause_id[EXCP_ALE]  = 1'b0;      // ALE / interrupt are judged in MEM
 assign excp_cause_id[EXCP_INT]  = 1'b0;
 assign excp_cause_id[EXCP_IPE]  = 1'b0;      // IPE is judged in MEM (needs crmd_plv_o)
+assign excp_cause_id[EXCP_TLBR] = 1'b0;      // the TLB kinds are judged at the mmu's tlb cycle
+assign excp_cause_id[EXCP_PIF]  = 1'b0;
+assign excp_cause_id[EXCP_PIL]  = 1'b0;
+assign excp_cause_id[EXCP_PIS]  = 1'b0;
+assign excp_cause_id[EXCP_PME]  = 1'b0;
+assign excp_cause_id[EXCP_PPI]  = 1'b0;
 
 always @(posedge clk) begin
     if (allow[MEM]) begin
@@ -976,17 +1031,17 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
 
 assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
-assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe;
-
-assign mem_crmd_wr = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD);
+assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe | (| mem_tlb_cause);
 
 assign mem_tlb = valid[MEM] & (| tlb_op[MEM]);
 
-assign mem_crmd_tlb = (mem_crmd_wr & valid[MEM]) | mem_tlb;
+assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD | csr_num[MEM] == CSR_DMW0 | csr_num[MEM] == CSR_DMW1);
+
+assign mem_crmd_tlb = (mem_map_wr & valid[MEM]) | mem_tlb;
 
 assign mem_flush = valid[MEM] & (mem_excp
                                 | csr_ctl[MEM][CSR_ERTN]
-                                | mem_crmd_wr
+                                | mem_map_wr
                                 | (| tlb_op[MEM]));
 
 always @(posedge clk) begin
@@ -1013,12 +1068,23 @@ assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
                        excp_cause[WB][EXCP_IPE]  ? 6'he :
                        excp_cause[WB][EXCP_ALE]  ? 6'h9 :
                        excp_cause[WB][EXCP_ADEF] ? 6'h8 :
+                       excp_cause[WB][EXCP_TLBR] ? 6'h3f :
+                       excp_cause[WB][EXCP_PIF]  ? 6'h3 :
+                       excp_cause[WB][EXCP_PIL]  ? 6'h1 :
+                       excp_cause[WB][EXCP_PIS]  ? 6'h2 :
+                       excp_cause[WB][EXCP_PPI]  ? 6'h7 :
+                       excp_cause[WB][EXCP_PME]  ? 6'h4 :
                        excp_cause[WB][EXCP_INE]  ? 6'hd :
                        excp_cause[WB][EXCP_BRK]  ? 6'hc :
                                                    6'hb;   // syscall
 
+assign excp_tlb      = excp_cause[WB][EXCP_TLBR] | excp_cause[WB][EXCP_PIF]
+                     | excp_cause[WB][EXCP_PIL]  | excp_cause[WB][EXCP_PIS]
+                     | excp_cause[WB][EXCP_PPI]  | excp_cause[WB][EXCP_PME];
+
 assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
-                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]);
+                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]
+                                 | excp_tlb);
 
 assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE] & ~ csr_ctl[WB][CSR_EXCP];
 assign csr_raddr = csr_num[WB];
@@ -1111,6 +1177,8 @@ wire        tlb_s0_found, tlb_s1_found;
 wire [19:0] tlb_s0_ppn,   tlb_s1_ppn;
 wire [ 5:0] tlb_s0_ps,    tlb_s1_ps;
 wire [ 3:0] tlb_s1_index;
+wire        tlb_s0_v, tlb_s1_v, tlb_s1_d;
+wire [ 1:0] tlb_s0_plv, tlb_s1_plv;
 wire        tlb_s0_va_bit12, tlb_s1_va_bit12;
 wire [18:0] tlb_s0_vppn,     tlb_s1_vppn;
 
@@ -1130,7 +1198,6 @@ wire [ 1:0] tlb_w_plv0, tlb_w_plv1, tlb_w_mat0, tlb_w_mat1;
 
 wire [31:0] tlb_rd_lo0, tlb_rd_lo1;
 wire        wb_tlb_commit, wb_tlb_srch, wb_tlb_rd, wb_tlb_wr, wb_tlb_inv;
-wire        if_xlat, mem_xlat;
 wire [ 1:0] tlb_csr_sel;
 
 wire [ 3:0] tlbidx_index_o;
@@ -1179,9 +1246,44 @@ assign tlb_rd_lo1 = {4'b0, tlb_r_ppn1, 1'b0, tlb_r_g, tlb_r_mat1, tlb_r_plv1, tl
 assign tlb_csr_sel = (tlb_op[WB] == TLB_SRCH) ? 2'd1 :
                      (tlb_op[WB] == TLB_RD)   ? 2'd2 : 2'd0;
 
-// TODO(exp19): a DMW hit also suppresses the translation
-assign if_xlat  = tlb_s0_found & crmd_pg_o & ~ crmd_da_o;
-assign mem_xlat = tlb_s1_found & crmd_pg_o & ~ crmd_da_o & ~ wb_tlb_srch;
+// dmw / tlb exceptions
+// mapping is only active in PG mode; a DMW hit wins over the TLB and also
+// suppresses every TLB exception
+assign map_mode = crmd_pg_o & ~ crmd_da_o;
+
+assign dmw0_hit_if  = map_mode & ((crmd_plv_o == 2'd0) ? dmw0_o[0] : dmw0_o[3]) & (pc[IF][31:29] == dmw0_o[31:29]);
+assign dmw1_hit_if  = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) & (pc[IF][31:29] == dmw1_o[31:29]);
+assign dmw0_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw0_o[0] : dmw0_o[3]) & (result[MEM][31:29] == dmw0_o[31:29]);
+assign dmw1_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) & (result[MEM][31:29] == dmw1_o[31:29]);
+
+assign if_dmw_hit  = dmw0_hit_if  | dmw1_hit_if;
+assign mem_dmw_hit = dmw0_hit_mem | dmw1_hit_mem;
+assign if_dmw_pa   = {(dmw0_hit_if  ? dmw0_o[27:25] : dmw1_o[27:25]), pc[IF][28:0]};
+assign mem_dmw_pa  = {(dmw0_hit_mem ? dmw0_o[27:25] : dmw1_o[27:25]), result[MEM][28:0]};
+
+assign if_xlat  = tlb_s0_found & map_mode;
+assign mem_xlat = tlb_s1_found & map_mode & ~ wb_tlb_srch;
+
+// fetch: ADEF is born on nextpc, these three are checked when the mmu issues
+assign if_fetch_cause = (if_xlat | (~ if_dmw_hit & map_mode)) ?
+                        ((map_mode & ~ if_dmw_hit & ~ tlb_s0_found)             ? (13'h1 << EXCP_TLBR) :
+                         (map_mode & ~ if_dmw_hit & ~ tlb_s0_v)                 ? (13'h1 << EXCP_PIF ) :
+                         (map_mode & ~ if_dmw_hit & (crmd_plv_o > tlb_s0_plv))  ? (13'h1 << EXCP_PPI ) : 13'h0)
+                        : 13'h0;
+assign if_abort       = | if_fetch_cause;
+assign if_fetch_excp  = if_issue & ~ flush[IF] & if_abort;
+
+// mem: ALE / INT are already folded into the slot, so they win
+assign mem_tlb_chk = valid[MEM] & mem_en[MEM] & ~ csr_ctl[MEM][CSR_EXCP];
+assign mem_tlb_cause = ({13{mem_tlb_chk}} &
+     ( (map_mode & ~ mem_dmw_hit & ~ tlb_s1_found)                        ? (13'h1 << EXCP_TLBR) :
+       (map_mode & ~ mem_dmw_hit & ~ tlb_s1_v)                            ? (13'h1 << (mem_we[MEM] ? EXCP_PIS : EXCP_PIL)) :
+       (map_mode & ~ mem_dmw_hit & (crmd_plv_o > tlb_s1_plv))             ? (13'h1 << EXCP_PPI ) :
+       (map_mode & ~ mem_dmw_hit & mem_we[MEM] & ~ tlb_s1_d)              ? (13'h1 << EXCP_PME ) :
+                                                                           13'h0));
+
+// a refill goes to TLBRENTRY (physical), everything else to EENTRY
+assign excp_entry = excp_cause[WB][EXCP_TLBR] ? tlbrentry_o : eentry_o;
 
 tlb u_tlb(
     .clk          (clk            ),
@@ -1194,10 +1296,10 @@ tlb u_tlb(
     .s0_index     (               ),
     .s0_ppn       (tlb_s0_ppn     ),
     .s0_ps        (tlb_s0_ps      ),
-    .s0_plv       (               ),
+    .s0_plv       (tlb_s0_plv     ),
     .s0_mat       (               ),
-    .s0_d         (               ),
-    .s0_v         (               ),
+    .s0_d         (               ),   // D only guards stores (PME), a fetch never looks at it
+    .s0_v         (tlb_s0_v       ),
 
     .s1_vppn      (tlb_s1_vppn    ),
     .s1_va_bit12  (tlb_s1_va_bit12),
@@ -1206,10 +1308,10 @@ tlb u_tlb(
     .s1_index     (tlb_s1_index   ),
     .s1_ppn       (tlb_s1_ppn     ),
     .s1_ps        (tlb_s1_ps      ),
-    .s1_plv       (               ),
+    .s1_plv       (tlb_s1_plv     ),
     .s1_mat       (               ),
-    .s1_d         (               ),
-    .s1_v         (               ),
+    .s1_d         (tlb_s1_d       ),
+    .s1_v         (tlb_s1_v       ),
 
     .invtlb_valid (wb_tlb_inv     ),
     .invtlb_op    (invtlb_op[WB]  ),
@@ -1265,6 +1367,7 @@ csr u_csr(
     .excp_esubcode_i (9'h0         ),
     .excp_badv_en_i  (excp_badv_en ),
     .excp_badv_i     (wb_excp_badv ),
+    .excp_tlb_i      (excp_i & excp_tlb),
     .ertn_i          (ertn_i       ),
     .hwi_i           (8'h0         ),
     .ipi_i           (1'b0         ),
@@ -1292,6 +1395,8 @@ csr u_csr(
     .crmd_pg_o       (crmd_pg_o     ),
 
     .crmd_plv_o      (crmd_plv_o   ),
+    .dmw0_o          (dmw0_o       ),
+    .dmw1_o          (dmw1_o       ),
     .crmd_ie_o       (crmd_ie_o    ),
     .eentry_o        (eentry_o     ),
     .era_o           (era_o        ),
@@ -1325,11 +1430,15 @@ mmu u_mmu(
     .if_xlat        (if_xlat        ),
     .if_ppn         (tlb_s0_ppn     ),
     .if_ps          (tlb_s0_ps      ),
-    .if_xlat_err    (1'b0           ),   // TODO(exp19): TLBR / PIF / PPI
+    .if_dmw_hit     (if_dmw_hit     ),
+    .if_dmw_pa      (if_dmw_pa      ),
+    .if_abort       (if_abort       ),
+    .if_issue       (if_issue       ),
     .mem_xlat       (mem_xlat       ),
     .mem_ppn        (tlb_s1_ppn     ),
     .mem_ps         (tlb_s1_ps      ),
-    .mem_xlat_err   (1'b0           ),   // TODO(exp19): TLBR / PIL / PIS / PPI / PME
+    .mem_dmw_hit    (mem_dmw_hit    ),
+    .mem_dmw_pa     (mem_dmw_pa     ),
 
     .arid           (arid           ),
     .araddr         (araddr         ),

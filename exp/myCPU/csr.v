@@ -46,6 +46,7 @@ module csr(
     input  wire [ 8:0] excp_esubcode_i,
     input  wire        excp_badv_en_i,
     input  wire [31:0] excp_badv_i,
+    input  wire        excp_tlb_i,      // this exception also reloads TLBEHI.VPPN
 
     // ertn
     input  wire        ertn_i,
@@ -86,6 +87,8 @@ module csr(
     // fetch issued by this slot's redirect has to be tagged with.
     output wire [ 1:0] crmd_plv_o,
     output wire        crmd_ie_o,
+    output wire [31:0] dmw0_o,
+    output wire [31:0] dmw1_o,
     output wire [31:0] eentry_o,
     output wire [31:0] era_o,
     output wire        int_o,           // |(ECFG.LIE & ESTAT.IS) & CRMD.IE
@@ -115,6 +118,8 @@ localparam [13:0] CSR_TLBELO0 = 14'h012;
 localparam [13:0] CSR_TLBELO1 = 14'h013;
 localparam [13:0] CSR_ASID    = 14'h018;
 localparam [13:0] CSR_TLBRENTRY = 14'h088;
+localparam [13:0] CSR_DMW0    = 14'h180;
+localparam [13:0] CSR_DMW1    = 14'h181;
 // EUEN (0x02) / CPUID (0x20) and anything else read 0 and ignore writes
 
 // masked software write of one field: take wdata on the selected bits
@@ -140,20 +145,31 @@ wire        wr_tlbelo0;
 wire        wr_tlbelo1;
 wire        wr_asid;
 wire        wr_tlbrentry;
+wire        wr_dmw0;
+wire        wr_dmw1;
 
 // CRMD
-// PLV/IE are real state; the translation-mode fields are fixed while the core
-// has no address translation.
-wire        csr_crmd_da;
-wire        csr_crmd_pg;
-wire [1:0]  csr_crmd_datf;
-wire [1:0]  csr_crmd_datm;
+// DA/PG/DATF/DATM are real state now: the core has address translation.
+reg         csr_crmd_da;
+reg         csr_crmd_pg;
+reg  [1:0]  csr_crmd_datf;
+reg  [1:0]  csr_crmd_datm;
 
 reg  [1:0]  crmd_plv;
 reg         crmd_ie;
 
+wire        crmd_da_sw;
+wire        crmd_pg_sw;
+wire [1:0]  crmd_datf_sw;
+wire [1:0]  crmd_datm_sw;
 wire [1:0]  crmd_plv_sw;    // software
 wire        crmd_ie_sw;
+reg         tlb_excp_r;     // the exception being handled is a tlb refill
+wire        tlb_excp_nxt;
+wire        crmd_da_nxt;
+wire        crmd_pg_nxt;
+wire [1:0]  crmd_datf_nxt;
+wire [1:0]  crmd_datm_nxt;
 wire [1:0]  crmd_plv_nxt;
 wire        crmd_ie_nxt;
 
@@ -228,6 +244,13 @@ wire [27:0] tlbelo0_nxt, tlbelo1_nxt;
 wire [ 9:0] asid_nxt;
 wire [25:0] tlbrentry_pa_nxt;
 
+// DMW0/1 = {VSEG[2:0], 1'h0, PSEG[2:0], 19'h0, MAT[1:0], PLV3, 2'h0, PLV0}
+// only VSEG/PSEG/MAT/PLV3/PLV0 are writable, the reserved bits stay 0
+reg  [31:0] dmw0, dmw1;
+wire [31:0] dmw0_sw, dmw1_sw;
+wire [31:0] dmw0_wval, dmw1_wval;
+wire [31:0] dmw0_wmsk, dmw1_wmsk;
+
 // SAVE0..3
 reg  [31:0] save     [0:3];
 reg  [31:0] save_nxt [0:3];
@@ -287,12 +310,30 @@ assign wr_tlbelo0   = we_i & (waddr_i == CSR_TLBELO0  );
 assign wr_tlbelo1   = we_i & (waddr_i == CSR_TLBELO1  );
 assign wr_asid      = we_i & (waddr_i == CSR_ASID     );
 assign wr_tlbrentry = we_i & (waddr_i == CSR_TLBRENTRY);
+assign wr_dmw0      = we_i & (waddr_i == CSR_DMW0     );
+assign wr_dmw1      = we_i & (waddr_i == CSR_DMW1     );
 
 // CRMD translation-mode fields
-assign csr_crmd_da   = 1'b1;
-assign csr_crmd_pg   = 1'b0;
-assign csr_crmd_datf = 2'b00;
-assign csr_crmd_datm = 2'b00;
+// exception entry drops to DA=1/PG=0 for a refill, so the handler itself runs
+// on physical addresses; ertn only restores PRMD.PPLV/PIE, so software has to
+// switch back to the mapped mode itself
+assign crmd_da_sw   = `CSR_FIELD(wr_crmd, csr_crmd_da,   wdata_i[3],   wmask_i[3]);
+assign crmd_pg_sw   = `CSR_FIELD(wr_crmd, csr_crmd_pg,   wdata_i[4],   wmask_i[4]);
+assign crmd_datf_sw = `CSR_FIELD(wr_crmd, csr_crmd_datf, wdata_i[6:5], wmask_i[6:5]);
+assign crmd_datm_sw = `CSR_FIELD(wr_crmd, csr_crmd_datm, wdata_i[8:7], wmask_i[8:7]);
+
+// only a tlb refill switches the core back to direct addressing; any other
+// exception leaves DA/PG alone (a syscall must not unmap the core)
+// ertn out of a refill handler goes back to the mapped mode: a refill can only
+// be taken while mapping is on, and the handler ran physical
+assign tlb_excp_nxt  = excp_i ? (excp_ecode_i == 6'h3f) : (ertn_i ? 1'b0 : tlb_excp_r);
+
+assign crmd_da_nxt   = excp_i ? ((excp_ecode_i == 6'h3f) ? 1'b1 : csr_crmd_da) :
+                       (ertn_i & tlb_excp_r)              ? 1'b0 : crmd_da_sw;
+assign crmd_pg_nxt   = excp_i ? ((excp_ecode_i == 6'h3f) ? 1'b0 : csr_crmd_pg) :
+                       (ertn_i & tlb_excp_r)              ? 1'b1 : crmd_pg_sw;
+assign crmd_datf_nxt = crmd_datf_sw;
+assign crmd_datm_nxt = crmd_datm_sw;
 
 // Software-write view of CRMD / PRMD, before the exception/ertn override.  The
 // exception / ertn entry is serviced one stage before the instruction reaches
@@ -367,11 +408,21 @@ assign tlbidx_index_nxt = (tlb_srch_we & tlb_srch_hit_i) ? tlb_srch_index_i : tl
 assign tlbidx_ps_nxt    = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_ps_i : 6'h0)      : tlbidx_ps_sw;
 assign tlbidx_ne_nxt    = tlb_srch_we ? ~ tlb_srch_hit_i :
                           tlb_rd_we   ? ~ tlb_rd_e_i     : tlbidx_ne_sw;
-assign tlbehi_vppn_nxt  = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_vppn_i : 19'h0)   : tlbehi_vppn_sw;
+assign tlbehi_vppn_nxt  = excp_tlb_i ? excp_badv_i[31:13] :
+                          tlb_rd_we   ? (tlb_rd_e_i ? tlb_rd_vppn_i : 19'h0)   : tlbehi_vppn_sw;
 assign tlbelo0_nxt      = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_lo0_i[27:0] : 28'h0) : tlbelo0_sw;
 assign tlbelo1_nxt      = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_lo1_i[27:0] : 28'h0) : tlbelo1_sw;
 assign asid_nxt         = tlb_rd_we ? (tlb_rd_e_i ? tlb_rd_asid_i : 10'h0)  : asid_sw;
 assign tlbrentry_pa_nxt = tlbrentry_pa_sw;
+
+// DMW windows: only VSEG/PSEG/MAT/PLV3/PLV0 are writable, the reserved bits stay 0
+assign dmw0_wval = {wdata_i[31:29], 1'b0, wdata_i[27:25], 19'b0, wdata_i[5:4], wdata_i[3], 2'b0, wdata_i[0]};
+assign dmw1_wval = {wdata_i[31:29], 1'b0, wdata_i[27:25], 19'b0, wdata_i[5:4], wdata_i[3], 2'b0, wdata_i[0]};
+assign dmw0_wmsk = {wmask_i[31:29], 1'b0, wmask_i[27:25], 19'b0, wmask_i[5:4], wmask_i[3], 2'b0, wmask_i[0]};
+assign dmw1_wmsk = {wmask_i[31:29], 1'b0, wmask_i[27:25], 19'b0, wmask_i[5:4], wmask_i[3], 2'b0, wmask_i[0]};
+
+assign dmw0_sw = wr_dmw0 ? ((dmw0_wval & dmw0_wmsk) | (dmw0 & ~dmw0_wmsk)) : dmw0;
+assign dmw1_sw = wr_dmw1 ? ((dmw1_wval & dmw1_wmsk) | (dmw1 & ~dmw1_wmsk)) : dmw1;
 
 // SAVE0..3
 assign wr_save  = we_i & (waddr_i[13:2] == CSR_SAVE_H);
@@ -413,6 +464,11 @@ assign timer_nxt = timer + 64'd1;
 // registers
 always @(posedge clk) begin
     if (reset) begin
+        tlb_excp_r    <= 1'b0;
+        csr_crmd_da   <= 1'b1;
+        csr_crmd_pg   <= 1'b0;
+        csr_crmd_datf <= 2'b0;
+        csr_crmd_datm <= 2'b0;
         crmd_plv      <= 2'b0;
         crmd_ie       <= 1'b0;
         prmd_pplv     <= 2'b0;
@@ -433,6 +489,8 @@ always @(posedge clk) begin
         tlbelo1       <= 28'b0;
         asid          <= 10'b0;
         tlbrentry_pa  <= 26'b0;
+        dmw0          <= 32'b0;
+        dmw1          <= 32'b0;
         save[0]       <= 32'b0;
         save[1]       <= 32'b0;
         save[2]       <= 32'b0;
@@ -446,6 +504,11 @@ always @(posedge clk) begin
         timer         <= 64'b0;
     end
     else begin
+        tlb_excp_r    <= tlb_excp_nxt;
+        csr_crmd_da   <= crmd_da_nxt;
+        csr_crmd_pg   <= crmd_pg_nxt;
+        csr_crmd_datf <= crmd_datf_nxt;
+        csr_crmd_datm <= crmd_datm_nxt;
         crmd_plv      <= crmd_plv_nxt;
         crmd_ie       <= crmd_ie_nxt;
         prmd_pplv     <= prmd_pplv_nxt;
@@ -466,6 +529,8 @@ always @(posedge clk) begin
         tlbelo1       <= tlbelo1_nxt;
         asid          <= asid_nxt;
         tlbrentry_pa  <= tlbrentry_pa_nxt;
+        dmw0          <= dmw0_sw;
+        dmw1          <= dmw1_sw;
         save[0]       <= save_nxt[0];
         save[1]       <= save_nxt[1];
         save[2]       <= save_nxt[2];
@@ -506,6 +571,8 @@ always @(*) begin
         CSR_TLBELO1: rdata_o = {4'b0, tlbelo1};
         CSR_ASID   : rdata_o = {8'b0, 8'd10, 6'b0, asid};
         CSR_TLBRENTRY: rdata_o = {tlbrentry_pa, 6'b0};
+        CSR_DMW0   : rdata_o = dmw0;
+        CSR_DMW1   : rdata_o = dmw1;
         default    : rdata_o = 32'b0;       // EUEN / CPUID / unimplemented
     endcase
 end
@@ -534,6 +601,8 @@ assign tlbrentry_o    = {tlbrentry_pa, 6'b0};
 assign estat_ecode_o  = estat_ecode;
 assign crmd_da_o      = csr_crmd_da;
 assign crmd_pg_o      = csr_crmd_pg;
+assign dmw0_o         = dmw0;
+assign dmw1_o         = dmw1;
 
 `undef CSR_FIELD
 
