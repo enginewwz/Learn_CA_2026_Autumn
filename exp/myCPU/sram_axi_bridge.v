@@ -2,20 +2,20 @@ module sram_axi_bridge(
     input  wire        clk,
     input  wire        reset,
 
-    // fetch side: the request appears when the instruction enters IF
-    input  wire        inst_req,     // a valid pc entering IF
-    input  wire [31:0] inst_addr,    // address of the instruction entering IF
-    input  wire        allow_if,     // allow[IF]
-    input  wire        flush_if,     // the IF stage is being flushed this cycle
+    // fetch side: one command per fetch, issued by the mmu.  inst_req is a
+    // single-cycle pulse (the mmu raises it only for the fetch it wants now).
+    input  wire        inst_req,     // start this fetch
+    input  wire [31:0] inst_addr,    // its physical address
+    input  wire        inst_flush,   // this fetch was killed: drop a request not out yet
     output wire [31:0] inst_rdata,
     output wire        inst_pending, // the fetch should wait
 
     input  wire [ 1:0] crmd_plv,
 
-    // register & access at MEM
-    input  wire        data_req,     // = valid[MEM] & mem_en[MEM] & ~mem_excp
+    // data side: one command per access, issued by the mmu
+    input  wire        data_req,     // an access is on data_addr/data_we/data_wdata
     input  wire [ 3:0] data_we,      // byte strobes; 4'b0 means read
-    input  wire [31:0] data_addr,    // = result[MEM]
+    input  wire [31:0] data_addr,    // its physical address
     input  wire [31:0] data_wdata,
     output wire [31:0] data_rdata,
     output wire        mem_pending,  // this access should wait
@@ -146,7 +146,7 @@ always @(posedge clk) begin
         inst_addr_r    <= 32'b0;
         inst_arprot0_r <= 1'b0;
     end
-    else if (inst_req & allow_if) begin
+    else if (inst_req) begin
         inst_addr_r    <= inst_addr;
         inst_arprot0_r <= (crmd_plv == 2'b00);
     end
@@ -240,7 +240,7 @@ assign write_slot_free = mem_write_state[ret] | write_rsp_done;
 always @(*) begin
     case (inst_state)
         QUE: begin
-            if (flush_if) next_inst_state = RET;      // pc redirected: drop the queued fetch
+            if (inst_flush) next_inst_state = RET;    // fetch killed: drop the queued one
             else if (~ read_req_occupy & ~ mem_read_takes_req) next_inst_state = REQ;
             else next_inst_state = QUE;
         end
@@ -250,7 +250,7 @@ always @(*) begin
         end
         RSP: begin
             if (inst_read_rsp_done) begin
-                if (inst_req & allow_if) begin
+                if (inst_req) begin
                     if (~ read_req_occupy & ~ mem_read_takes_req) next_inst_state = REQ;
                     else next_inst_state = QUE;
                 end
@@ -259,7 +259,7 @@ always @(*) begin
             else next_inst_state = RSP;
         end
         RET: begin
-            if (inst_req & allow_if) begin
+            if (inst_req) begin
                 if (~ read_req_occupy & ~ mem_read_takes_req) next_inst_state = REQ;
                 else next_inst_state = QUE;
             end

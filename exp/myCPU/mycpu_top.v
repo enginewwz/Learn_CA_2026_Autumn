@@ -59,16 +59,18 @@ module mycpu_top(
 wire clk    = aclk;
 wire resetn = aresetn;
 
-// sram_axi_bridge: the core keeps its sram-like request/response view, the
-// bridge turns it into the single AXI master port below.
+// mmu: the fetch / memory-access stage controller.
 wire        inst_req;          // the IF stage has a word to fetch at pc[IF]
 wire [31:0] inst_rdata;        // returns after an arbitrary latency
-wire        data_req;          // MEM issues an access
+wire        data_req;          // the MEM slot holds a real access
+wire [31:0] data_va;           // its virtual address (= result[MEM])
+wire        data_abort;        // this access has been found illegal
 wire [ 3:0] data_we;           // byte strobes; 4'b0 means read
 wire [31:0] data_wdata;
 wire [31:0] data_rdata;
-wire        inst_pending;    // from the bridge: this fetch should wait
-wire        mem_pending;     // from the bridge: this access should wait
+wire        ld_pre;            // a load in EX that enters MEM at this edge
+wire        if_pending;        // from the mmu: this fetch should wait
+wire        mem_pending;      // from the mmu: this access should wait
 
 // pipeline: IF -> ID -> EX -> MEM -> WB
 
@@ -457,7 +459,7 @@ assign allow[IF]      = ~ (| stall[WB:IF]);
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
 
-assign stall[IF]      = inst_pending | mem_flush;
+assign stall[IF]      = if_pending | mem_flush;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
 assign stall[MEM]     = mem_pending;
@@ -880,7 +882,10 @@ always @(posedge clk) begin
     if (allow[WB])      result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
-assign data_req = valid[MEM] & mem_en[MEM] & ~ mem_excp;
+assign ld_pre    = cur_valid[EX] & mem_en[EX] & ~ mem_we[EX] & ~ ex_mem_excp;
+assign data_req  = valid[MEM] & mem_en[MEM] & ~ mem_excp;
+assign data_va   = result[MEM];
+assign data_abort = mem_excp;      // MEM found the access illegal: kill what has not gone out
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
 // and let the write-enable mask pick the addressed lane(s).
@@ -1066,66 +1071,70 @@ csr u_csr(
     .timer_o         (timer_o      )
 );
 
-sram_axi_bridge u_bridge(
-    .clk          (clk         ),
-    .reset        (reset      ),
-    
-    .inst_req     (inst_req    ),
-    .inst_addr    (nextpc      ),
-    .allow_if     (allow[IF]   ),
-    .flush_if     (flush[IF]   ),
-    .inst_rdata   (inst_rdata  ),
-    .inst_pending (inst_pending),
+mmu u_mmu(
+    .clk            (clk            ),
+    .reset          (reset          ),
 
-    .data_req     (data_req    ),
-    .data_we      (data_we     ),
-    .data_addr    (result[MEM] ),
-    .data_wdata   (data_wdata  ),
-    .data_rdata   (data_rdata  ),
-    .mem_pending  (mem_pending ),
+    .if_req         (inst_req       ),
+    .if_va          (pc[IF]         ),
+    .if_allow       (allow[IF]      ),
+    .if_flush       (flush[IF]      ),
+    .if_pending     (if_pending     ),
+    .if_rdata       (inst_rdata     ),
 
-    .crmd_plv     (crmd_plv_o  ),
+    .ld_pre         (ld_pre         ),
+    .data_req       (data_req       ),
+    .data_va        (data_va        ),
+    .data_we        (data_we        ),
+    .data_wdata     (data_wdata     ),
+    .data_abort     (data_abort     ),
+    .mem_allow      (allow[MEM]     ),
+    .mem_pending    (mem_pending    ),
+    .data_rdata     (data_rdata     ),
 
-    .arid         (arid        ),
-    .araddr       (araddr      ),
-    .arlen        (arlen       ),
-    .arsize       (arsize      ),
-    .arburst      (arburst     ),
-    .arlock       (arlock      ),
-    .arcache      (arcache     ),
-    .arprot       (arprot      ),
-    .arvalid      (arvalid     ),
-    .arready      (arready     ),
+    .crmd_plv       (crmd_plv_o     ),
+    .asid           (10'h0          ),   // TODO(exp18): CSR.ASID
 
-    .rid          (rid         ),
-    .rdata        (rdata       ),
-    .rresp        (rresp       ),
-    .rlast        (rlast       ),
-    .rvalid       (rvalid      ),
-    .rready       (rready      ),
+    .arid           (arid           ),
+    .araddr         (araddr         ),
+    .arlen          (arlen          ),
+    .arsize         (arsize         ),
+    .arburst        (arburst        ),
+    .arlock         (arlock         ),
+    .arcache        (arcache        ),
+    .arprot         (arprot         ),
+    .arvalid        (arvalid        ),
+    .arready        (arready        ),
 
-    .awid         (awid        ),
-    .awaddr       (awaddr      ),
-    .awlen        (awlen       ),
-    .awsize       (awsize      ),
-    .awburst      (awburst     ),
-    .awlock       (awlock      ),
-    .awcache      (awcache     ),
-    .awprot       (awprot      ),
-    .awvalid      (awvalid     ),
-    .awready      (awready     ),
+    .rid            (rid            ),
+    .rdata          (rdata          ),
+    .rresp          (rresp          ),
+    .rlast          (rlast          ),
+    .rvalid         (rvalid         ),
+    .rready         (rready         ),
 
-    .wid          (wid         ),
-    .wdata        (wdata       ),
-    .wstrb        (wstrb       ),
-    .wlast        (wlast       ),
-    .wvalid       (wvalid      ),
-    .wready       (wready      ),
+    .awid           (awid           ),
+    .awaddr         (awaddr         ),
+    .awlen          (awlen          ),
+    .awsize         (awsize         ),
+    .awburst        (awburst        ),
+    .awlock         (awlock         ),
+    .awcache        (awcache        ),
+    .awprot         (awprot         ),
+    .awvalid        (awvalid        ),
+    .awready        (awready        ),
 
-    .bid          (bid         ),
-    .bresp        (bresp       ),
-    .bvalid       (bvalid      ),
-    .bready       (bready      )
+    .wid            (wid            ),
+    .wdata          (wdata          ),
+    .wstrb          (wstrb          ),
+    .wlast          (wlast          ),
+    .wvalid         (wvalid         ),
+    .wready         (wready         ),
+
+    .bid            (bid            ),
+    .bresp          (bresp          ),
+    .bvalid         (bvalid         ),
+    .bready         (bready         )
 );
 
 assign debug_wb_pc       = pc[WB];
