@@ -151,12 +151,10 @@ assign s1_found = |s1_hit;
 
 generate
     for (j = 0; j < 8; j = j + 1) begin : ix1
-        localparam [$clog2(TLBNUM)-1:0] I0 = 2 * j;
-        localparam [$clog2(TLBNUM)-1:0] I1 = 2 * j + 1;
         assign s0_h1[j]  = s0_hit[2*j] | s0_hit[2*j+1];
         assign s1_h1[j]  = s1_hit[2*j] | s1_hit[2*j+1];
-        assign s0_ix1[j] = s0_hit[2*j] ? I0 : I1;
-        assign s1_ix1[j] = s1_hit[2*j] ? I0 : I1;
+        assign s0_ix1[j] = s0_hit[2*j] ? 2 * j : 2 * j + 1;
+        assign s1_ix1[j] = s1_hit[2*j] ? 2 * j : 2 * j + 1;
     end
     for (j = 0; j < 4; j = j + 1) begin : ix2
         assign s0_h2[j]  = s0_h1[2*j] | s0_h1[2*j+1];
