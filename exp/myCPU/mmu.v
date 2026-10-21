@@ -127,9 +127,8 @@ always @(*) begin
             else         next_if_state = IDLE;
         end
         TLB_ACC: begin
-            if (if_flush | (if_abort & ~ if_take)) next_if_state = IDLE;
-            else if (if_abort & if_take) next_if_state = TLB_ACC;
-            else                         next_if_state = BRI_ACC;
+            if (if_flush | if_abort) next_if_state = IDLE;
+            else                        next_if_state = BRI_ACC;
         end
         BRI_ACC: begin
             if (~ bridge_if_pending) begin
