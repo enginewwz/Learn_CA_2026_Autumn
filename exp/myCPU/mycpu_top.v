@@ -131,6 +131,7 @@ localparam EXCP_PPI          = 12;  // page privilege violation
 localparam [13:0] CSR_CRMD   = 14'h000;
 localparam [13:0] CSR_DMW0   = 14'h180;
 localparam [13:0] CSR_DMW1   = 14'h181;
+localparam [13:0] CSR_ASID   = 14'h018;
 
 reg  [TOTAL_STAGE_WIDTH - 1: 0] valid /* verilator split_var */;
 // when is valid used in leaf control signals? write back to rf / write mem / change pc
@@ -1037,7 +1038,12 @@ assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe | (| mem_tlb_cause);
 assign tlb_op_map = (| tlb_op[MEM]) & ~ tlb_op[MEM][TLB_SRCH];
 assign mem_tlb    = valid[MEM] & tlb_op_map;
 
-assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD | csr_num[MEM] == CSR_DMW0 | csr_num[MEM] == CSR_DMW1);
+// CRMD / DMW / ASID all feed the translation, so writing any of them must restart
+// the fetch: a younger access would otherwise use a mix of old and new state
+assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD
+                                            | csr_num[MEM] == CSR_DMW0
+                                            | csr_num[MEM] == CSR_DMW1
+                                            | csr_num[MEM] == CSR_ASID);
 
 assign mem_crmd_tlb = (mem_map_wr & valid[MEM]) | mem_tlb;
 

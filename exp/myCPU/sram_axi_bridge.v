@@ -99,7 +99,6 @@ wire        mem_write_req;
 wire        read_req_fire;
 wire        read_rsp_fire;
 wire        read_req_occupy;
-wire        read_rsp_occupy;
 
 wire        inst_read_rsp_done;
 wire        mem_read_rsp_done;
@@ -118,7 +117,6 @@ wire        mem_read_takes_req;
 
 wire        mem_read_take;
 wire        mem_write_take;
-wire        mem_take;
 
 assign arlen   = 8'b0;
 assign arsize  = 3'd2;  // 4 bytes
@@ -221,7 +219,6 @@ assign read_req_occupy = mem_read_state[req] | inst_state[req];
 
 // the fetch must not enter REQ in the same cycle
 assign mem_read_takes_req = ~ read_req_occupy & mem_read_req & mem_write_state[ret] & (mem_read_state[que] | mem_read_state[ret]);
-assign read_rsp_occupy = mem_read_state[rsp] | inst_state[rsp];
 assign mem_read_req = data_req & ~| data_we;
 assign mem_write_req = data_req &  | data_we;
 

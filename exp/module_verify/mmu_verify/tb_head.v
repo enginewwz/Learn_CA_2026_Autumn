@@ -6,9 +6,10 @@ module axi_slave_tiny #(parameter LAT = 1)(
     input  wire [3:0] awid, input wire [31:0] awaddr, input wire awvalid, output wire awready,
     input  wire [31:0] wdata, input wire [3:0] wstrb, input wire wvalid, output wire wready,
     output wire wlast, output wire [3:0] bid, output wire bvalid, input wire bready);
-reg [31:0] mem [0:8191];
-function [12:0] midx(input [31:0] a);
-    midx = (a[31:28] == 4'h1) ? (13'h1000 | a[11:2]) : {1'b0, a[11:2]};
+reg [31:0] mem [0:32767];
+function [14:0] midx(input [31:0] a);
+    // 0x1c00_0000 is the code window (4 KB); everything else indexes by a[16:2]
+    midx = (a[31:28] == 4'h1) ? {2'b00, 13'h1000 | a[11:2]} : a[16:2];
 endfunction
 localparam R_IDLE=2'd0, R_WAIT=2'd1, R_RSP=2'd2;
 reg [1:0] r_state; reg [31:0] rd_addr_r, rd_data_r; reg [3:0] rd_id_r; reg [7:0] r_cnt;
