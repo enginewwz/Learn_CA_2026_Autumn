@@ -99,21 +99,23 @@ reg               tlb_v1       [TLBNUM-1:0];
 wire [TLBNUM-1:0] s0_hit, s1_hit, s2_hit;
 wire [TLBNUM-1:0] inv_asid_match, inv_va_match, inv_clear;
 
-wire                      s0_ps_sel, s1_ps_sel;
-wire [$clog2(TLBNUM)-1:0] s0_index_sel, s1_index_sel;
-wire                      s0_dual_page_sel, s1_dual_page_sel;
+// Search: a 4 level 2:1 mux tournament (16 -> 8 -> 4 -> 2 -> 1) instead of a 16
+// deep priority chain.  Inside a pair the lower entry wins, so the winner is
+// still the first matching entry.  s0/s1 carry the winner's flags (index, ps4MB,
+// plv, mat, d, v) so the exception check does not sit behind a 16:1 mux, while
+// the ppn keeps the plain [index] read; s2 only needs the index.
+localparam SW = 4 + 1 + 2 + 2 + 1 + 1;           // index, ps4MB, plv, mat, d, v
+wire [SW-1:0] sw0 [0:TLBNUM-1];
+wire [SW-1:0] sw1 [0:TLBNUM-1];
 
-// index select: a 4 level 2:1 mux tournament (16 -> 8 -> 4 -> 2 -> 1) instead of
-// a 16 deep priority chain.  Inside a pair the lower entry wins, so the winner
-// is still the first matching entry; the data is read with the plain 16:1 mux
-// that follows, so only the 4 bit index travels up the tree.
 wire [ 7:0] s0_h1, s1_h1, s2_h1;
 wire [ 3:0] s0_h2, s1_h2, s2_h2;
 wire [ 1:0] s0_h3, s1_h3, s2_h3;
-wire [$clog2(TLBNUM)-1:0] s0_ix1 [0:7], s1_ix1 [0:7], s2_ix1 [0:7];
-wire [$clog2(TLBNUM)-1:0] s0_ix2 [0:3], s1_ix2 [0:3], s2_ix2 [0:3];
-wire [$clog2(TLBNUM)-1:0] s0_ix3 [0:1], s1_ix3 [0:1], s2_ix3 [0:1];
-wire [$clog2(TLBNUM)-1:0] s0_ix4,       s1_ix4,       s2_ix4;
+wire [SW-1:0] s0_d1 [0:7], s1_d1 [0:7];
+wire [SW-1:0] s0_d2 [0:3], s1_d2 [0:3];
+wire [SW-1:0] s0_d3 [0:1], s1_d3 [0:1];
+wire [SW-1:0] s0_d4,       s1_d4;
+wire [ 3:0] s2_ix1 [0:7], s2_ix2 [0:3], s2_ix3 [0:1], s2_ix4;
 
 wire inv_all, inv_g1, inv_g0, inv_asid, inv_va, inv_gva;
 wire w_ps4mb;
@@ -141,6 +143,23 @@ generate
                                         & (tlb_vppn[i][18:9] == s2_vppn[18:9])
                                         & (tlb_ps4MB[i] | (tlb_vppn[i][8:0] == s2_vppn[8:0]));
 
+        // page pick: ps4MB comes from the entry, the page bit from the searched
+        // VA, so this mux runs in parallel with the compare
+        localparam [3:0] IDX = i;
+        wire s0_pg1 = tlb_ps4MB[i] ? s0_vppn[8] : s0_va_bit12;
+        wire s1_pg1 = tlb_ps4MB[i] ? s1_vppn[8] : s1_va_bit12;
+
+        assign sw0[i] = {IDX, tlb_ps4MB[i],
+                         s0_pg1 ? tlb_plv1[i] : tlb_plv0[i],
+                         s0_pg1 ? tlb_mat1[i] : tlb_mat0[i],
+                         s0_pg1 ? tlb_d1[i]   : tlb_d0[i],
+                         s0_pg1 ? tlb_v1[i]   : tlb_v0[i]};
+        assign sw1[i] = {IDX, tlb_ps4MB[i],
+                         s1_pg1 ? tlb_plv1[i] : tlb_plv0[i],
+                         s1_pg1 ? tlb_mat1[i] : tlb_mat0[i],
+                         s1_pg1 ? tlb_d1[i]   : tlb_d0[i],
+                         s1_pg1 ? tlb_v1[i]   : tlb_v0[i]};
+
         assign inv_asid_match[i] = (tlb_asid[i] == w_asid);
         assign inv_va_match[i]   = (tlb_vppn[i][18:9] == w_vppn[18:9])
                                  & (tlb_ps4MB[i] | (tlb_vppn[i][8:0] == w_vppn[8:0]));
@@ -165,62 +184,68 @@ generate
         assign s0_h1[j]  = s0_hit[2*j] | s0_hit[2*j+1];
         assign s1_h1[j]  = s1_hit[2*j] | s1_hit[2*j+1];
         assign s2_h1[j]  = s2_hit[2*j] | s2_hit[2*j+1];
-        assign s0_ix1[j] = s0_hit[2*j] ? 2 * j : 2 * j + 1;
-        assign s1_ix1[j] = s1_hit[2*j] ? 2 * j : 2 * j + 1;
+        assign s0_d1[j]  = s0_hit[2*j] ? sw0[2*j] : sw0[2*j+1];
+        assign s1_d1[j]  = s1_hit[2*j] ? sw1[2*j] : sw1[2*j+1];
         assign s2_ix1[j] = s2_hit[2*j] ? 2 * j : 2 * j + 1;
     end
     for (j = 0; j < 4; j = j + 1) begin : ix2
         assign s0_h2[j]  = s0_h1[2*j] | s0_h1[2*j+1];
         assign s1_h2[j]  = s1_h1[2*j] | s1_h1[2*j+1];
         assign s2_h2[j]  = s2_h1[2*j] | s2_h1[2*j+1];
-        assign s0_ix2[j] = s0_h1[2*j] ? s0_ix1[2*j] : s0_ix1[2*j+1];
-        assign s1_ix2[j] = s1_h1[2*j] ? s1_ix1[2*j] : s1_ix1[2*j+1];
+        assign s0_d2[j]  = s0_h1[2*j] ? s0_d1[2*j] : s0_d1[2*j+1];
+        assign s1_d2[j]  = s1_h1[2*j] ? s1_d1[2*j] : s1_d1[2*j+1];
         assign s2_ix2[j] = s2_h1[2*j] ? s2_ix1[2*j] : s2_ix1[2*j+1];
     end
     for (j = 0; j < 2; j = j + 1) begin : ix3
         assign s0_h3[j]  = s0_h2[2*j] | s0_h2[2*j+1];
         assign s1_h3[j]  = s1_h2[2*j] | s1_h2[2*j+1];
         assign s2_h3[j]  = s2_h2[2*j] | s2_h2[2*j+1];
-        assign s0_ix3[j] = s0_h2[2*j] ? s0_ix2[2*j] : s0_ix2[2*j+1];
-        assign s1_ix3[j] = s1_h2[2*j] ? s1_ix2[2*j] : s1_ix2[2*j+1];
+        assign s0_d3[j]  = s0_h2[2*j] ? s0_d2[2*j] : s0_d2[2*j+1];
+        assign s1_d3[j]  = s1_h2[2*j] ? s1_d2[2*j] : s1_d2[2*j+1];
         assign s2_ix3[j] = s2_h2[2*j] ? s2_ix2[2*j] : s2_ix2[2*j+1];
     end
 endgenerate
 
-assign s0_ix4 = s0_h3[0] ? s0_ix3[0] : s0_ix3[1];
-assign s1_ix4 = s1_h3[0] ? s1_ix3[0] : s1_ix3[1];
+assign s0_d4 = s0_h3[0] ? s0_d3[0] : s0_d3[1];
+assign s1_d4 = s1_h3[0] ? s1_d3[0] : s1_d3[1];
 assign s2_ix4 = s2_h3[0] ? s2_ix3[0] : s2_ix3[1];
 
-assign s0_index_sel = s0_ix4;
-assign s1_index_sel = s1_ix4;
-assign s0_ps_sel    = tlb_ps4MB[s0_ix4];
-assign s1_ps_sel    = tlb_ps4MB[s1_ix4];
+wire [ 3:0] s0_idx, s1_idx;
+wire        s0_ps4, s1_ps4;
+wire [ 1:0] s0_lvw, s1_lvw, s0_mtw, s1_mtw;
+wire        s0_dtw, s1_dtw, s0_vdw, s1_vdw;
+wire        s0_dual_page_sel, s1_dual_page_sel;
 
-// va[21] for a 4MB entry is already inside vppn (bit 8); va[12] comes in on its own port
-assign s0_dual_page_sel = s0_ps_sel ? s0_vppn[8] : s0_va_bit12;
-assign s1_dual_page_sel = s1_ps_sel ? s1_vppn[8] : s1_va_bit12;
+assign {s0_idx, s0_ps4, s0_lvw, s0_mtw, s0_dtw, s0_vdw} = s0_d4;
+assign {s1_idx, s1_ps4, s1_lvw, s1_mtw, s1_dtw, s1_vdw} = s1_d4;
 
-assign s0_index = s0_index_sel;
-assign s1_index = s1_index_sel;
+// found comes straight off the hit vector: a 16 bit OR is two LUT levels and it
+// gates the address mux, so it should not wait for the tree root
+assign s0_found = | s0_hit;
+assign s1_found = | s1_hit;
+assign s2_found = | s2_hit;
+
+assign s0_index = s0_idx;
+assign s1_index = s1_idx;
 assign s2_index = s2_ix4;
 
-assign s0_ps  = s0_ps_sel ? 6'd21 : 6'd12;
-assign s1_ps  = s1_ps_sel ? 6'd21 : 6'd12;
+// va[21] for a 4MB entry is already inside vppn (bit 8); va[12] comes in on its own port
+assign s0_dual_page_sel = s0_ps4 ? s0_vppn[8] : s0_va_bit12;
+assign s1_dual_page_sel = s1_ps4 ? s1_vppn[8] : s1_va_bit12;
 
-assign s0_ppn = s0_dual_page_sel ? tlb_ppn1[s0_index_sel] : tlb_ppn0[s0_index_sel];
-assign s1_ppn = s1_dual_page_sel ? tlb_ppn1[s1_index_sel] : tlb_ppn0[s1_index_sel];
+assign s0_ppn = s0_dual_page_sel ? tlb_ppn1[s0_index] : tlb_ppn0[s0_index];
+assign s1_ppn = s1_dual_page_sel ? tlb_ppn1[s1_index] : tlb_ppn0[s1_index];
+assign s0_plv = s0_lvw;
+assign s1_plv = s1_lvw;
+assign s0_mat = s0_mtw;
+assign s1_mat = s1_mtw;
+assign s0_d   = s0_dtw;
+assign s1_d   = s1_dtw;
+assign s0_v   = s0_vdw;
+assign s1_v   = s1_vdw;
 
-assign s0_plv = s0_dual_page_sel ? tlb_plv1[s0_index_sel] : tlb_plv0[s0_index_sel];
-assign s1_plv = s1_dual_page_sel ? tlb_plv1[s1_index_sel] : tlb_plv0[s1_index_sel];
-
-assign s0_mat = s0_dual_page_sel ? tlb_mat1[s0_index_sel] : tlb_mat0[s0_index_sel];
-assign s1_mat = s1_dual_page_sel ? tlb_mat1[s1_index_sel] : tlb_mat0[s1_index_sel];
-
-assign s0_d   = s0_dual_page_sel ? tlb_d1[s0_index_sel] : tlb_d0[s0_index_sel];
-assign s1_d   = s1_dual_page_sel ? tlb_d1[s1_index_sel] : tlb_d0[s1_index_sel];
-
-assign s0_v   = s0_dual_page_sel ? tlb_v1[s0_index_sel] : tlb_v0[s0_index_sel];
-assign s1_v   = s1_dual_page_sel ? tlb_v1[s1_index_sel] : tlb_v0[s1_index_sel];
+assign s0_ps  = s0_ps4 ? 6'd21 : 6'd12;
+assign s1_ps  = s1_ps4 ? 6'd21 : 6'd12;
 
 assign w_ps4mb = (w_ps == 6'd21);
 
