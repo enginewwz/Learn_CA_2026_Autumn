@@ -210,7 +210,7 @@ wire        next_if_adef;        // misaligned fetch address, gates the request
 
 // exception / ertn / interrupt
 wire        mem_excp;
-wire        mem_flush;        // kill IF..EX + restart the fetch: exception / ertn / CRMD write
+wire        wb_flush;          // flush at WB: exception / ertn, or a write that changes the map
 wire        mem_ipe;          // privileged instruction at PLV != 0, judged in MEM
 
 wire        wb_excp_ertn;     // the WB instruction is entering the exception / ertn
@@ -493,10 +493,10 @@ always @(posedge clk) begin
     end
 end
 
-assign flush = mem_flush    ? 5'b00111 :
-               br_taken_ex  ? 5'b00011 :
-               br_taken_id  ? 5'b00001 :
-                              5'b00000;
+assign flush    = wb_flush    ? 5'b01111 :
+                  br_taken_ex ? 5'b00011 :
+                  br_taken_id ? 5'b00001 :
+                                5'b00000;
 
 assign allow[WB]      = 1'b1;
 assign allow[MEM]     = ~ (| stall[WB:MEM]);
@@ -507,7 +507,7 @@ assign allow[IF]      = ~ (| stall[WB:IF]);
 // ID must wait when any tap of either source is still pending
 assign src_wait = | (fw1_pending | fw2_pending);
 
-assign stall[IF]      = if_pending | mem_flush;
+assign stall[IF]      = if_pending;
 assign stall[ID]      = src_wait && cur_valid[ID];
 assign stall[EX]      = ex_stall;
 assign stall[MEM]     = mem_pending;
@@ -988,9 +988,11 @@ end
 // a load and a store are both registered at the end of EX, so both issue in the
 // first MEM cycle; a store will later gain its own state for the cache write
 assign mem_pre   = cur_valid[EX] & mem_en[EX] & ~ ex_mem_excp;
-assign data_req  = valid[MEM] & mem_en[MEM] & ~ mem_excp;
+assign data_req  = cur_valid[MEM] & mem_en[MEM];
 assign data_va   = result[MEM];
-assign data_abort = mem_excp;      // MEM found the access illegal: kill what has not gone out
+// MEM found the access illegal, or the whole pipeline is being flushed at WB: either
+// way the mmu must not issue this access
+assign data_abort = mem_excp | flush[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
 // and let the write-enable mask pick the addressed lane(s).
@@ -1047,10 +1049,6 @@ assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD
 
 assign mem_crmd_tlb = (mem_map_wr & valid[MEM]) | mem_tlb;
 
-assign mem_flush = valid[MEM] & (mem_excp
-                                | csr_ctl[MEM][CSR_ERTN]
-                                | mem_map_wr
-                                | tlb_op_map);
 
 always @(posedge clk) begin
     if (reset) wb_crmd_tlb <= 1'b0;
@@ -1058,6 +1056,8 @@ always @(posedge clk) begin
 end
 
 // WB stage
+assign wb_flush = wb_excp_ertn | wb_crmd_tlb;
+
 assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
 assign rf_waddr = dest[WB];
 assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :

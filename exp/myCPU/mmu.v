@@ -16,7 +16,7 @@ module mmu(
     input  wire [31:0] data_va,         // = result[MEM]
     input  wire [ 3:0] data_we,         // byte strobes; 4'b0 = read
     input  wire [31:0] data_wdata,
-    input  wire        data_abort,      // = mem_excp: this access was found illegal
+    input  wire        data_abort,      // this access must not issue
     input  wire        mem_allow,       // = allow[MEM]
     output wire        mem_pending,     // -> stall[MEM]
     output wire [31:0] data_rdata,
@@ -153,7 +153,7 @@ assign mem_take  = (mem_pre & mem_allow) | data_req;
 assign mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
 assign mem_abort = data_abort & mem_live;
 
-assign mem_pending       = (mem_live | data_req) & ~ (mem_done | mem_abort);
+assign mem_pending       = (mem_live | data_req) & ~ mem_done;
 assign bridge_data_req   = mem_live & ~ data_abort;
 assign bridge_data_we    = data_we;
 assign bridge_data_wdata = data_wdata;
