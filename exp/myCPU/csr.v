@@ -82,9 +82,6 @@ module csr(
     output wire        crmd_pg_o,
 
     // pipeline side-band
-    // CRMD as it will be for the *next* instruction: includes the software write
-    // in this slot and the exception / ertn override.  This is the value the
-    // fetch issued by this slot's redirect has to be tagged with.
     output wire [ 1:0] crmd_plv_o,
     output wire        crmd_ie_o,
     output wire [31:0] dmw0_o,
@@ -577,13 +574,11 @@ always @(*) begin
     endcase
 end
 
-// side-band
-// NB: the exception / ertn override must be part of this view.  A redirect is
-// issued in the same cycle the entry/return lands, and the fetch it starts must
-// already carry the *new* PLV; crmd_plv_sw alone would still show the old one
-// for an exception (-> 0) or an ertn (-> PRMD.PPLV).
-assign crmd_plv_o = crmd_plv_nxt;
+assign crmd_plv_o = crmd_plv;
+
 assign crmd_ie_o  = crmd_ie_nxt;
+
+// nextpc is stored when entering if
 assign eentry_o   = {eentry_va_nxt, 6'b0};
 assign era_o      = era_sw;
 assign timer_o    = timer;
