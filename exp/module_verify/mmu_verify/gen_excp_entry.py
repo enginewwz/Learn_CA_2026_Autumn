@@ -11,11 +11,11 @@ SYSCALL, BREAK = 0x002B0000, 0x002A0000
 prog = [ lu12i(12, 0x1c000), ori(12, 12, 0x200), csrwr(12, EENTRY),
          addi_w(1, 0, 0x11),
          SYSCALL,
-         addi_w(2, 0, 0x22),          # must not run
+         csrrd(3, CRMD), st_w(3, 0, 0x70),   # back from the handler: DA=1, PG=0 (0x8)
          0x50000000 ]
 handler = [ csrrd(20, ESTAT), st_w(20, 0, 0x60), csrrd(20, CRMD), st_w(20, 0, 0x64),
             csrrd(20, PRMD),  st_w(20, 0, 0x68), csrrd(20, ERA),  st_w(20, 0, 0x6c),
-            0x50000000 ]
+            addi_w(20, 20, 4), csrwr(20, ERA), 0x06483800 ]   # ERA+=4, ertn
 print(open('tb_head.v').read())
 print("initial begin")
 for i, w in enumerate(prog):
@@ -24,9 +24,9 @@ for i, w in enumerate(handler):
     print("    slave.mem[13'h%04x] = 32'h%08x;" % (0x1080 + i, w))
 print("""    resetn = 0; repeat (4) @(posedge clk); resetn = 1;
     repeat (400) @(posedge clk);
-    $display("EXCP_ENTRY: ESTAT=%h CRMD=%h PRMD=%h ERA=%h r1=%h r2=%h (expect 000b0000 00000008 0 1c000010 11 x)",
+    $display("EXCP_ENTRY: ESTAT=%h CRMD=%h PRMD=%h ERA=%h r1=%h CRMD_after_ertn=%h (expect 000b0000 00000008 0 1c000010 11 00000008)",
              slave.mem[24], slave.mem[25], slave.mem[26], slave.mem[27],
-             dut.u_regfile.rf[1], dut.u_regfile.rf[2]);
+             dut.u_regfile.rf[1], slave.mem[28]);
     $finish;
 end
 endmodule""")
