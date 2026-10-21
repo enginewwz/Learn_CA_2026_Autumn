@@ -33,7 +33,7 @@ module EX(
     input  wire [12:0] excp_cause_i,
     input  wire [31:0] csr_wdata_i,
     input  wire [31:0] csr_mask_i,
-    input  wire [ 2:0] tlb_op_i,
+    input  wire [ 4:0] tlb_op_i,
     input  wire [ 4:0] invtlb_op_i,
 
     // EX -> MEM: combinational, the MEM stage registers them on allow[MEM]
@@ -55,7 +55,7 @@ module EX(
     output wire [12:0] excp_cause_o,
     output wire [31:0] csr_wdata_o,
     output wire [31:0] csr_mask_o,
-    output wire [ 2:0] tlb_op_o,
+    output wire [ 4:0] tlb_op_o,
     output wire [ 4:0] invtlb_op_o,
 
     // execute result, valid and handshake
@@ -147,7 +147,7 @@ reg  [ 8:0] csr_ctl      [1:0];
 reg  [12:0] excp_cause   [1:0];
 reg  [31:0] csr_wdata    [1:0];
 reg  [31:0] csr_mask     [1:0];
-reg  [ 2:0] tlb_op       [1:0];
+reg  [ 4:0] tlb_op       [1:0];
 reg  [ 4:0] invtlb_op    [1:0];
 
 // unit results
@@ -324,7 +324,7 @@ assign dest_o         = ({ 5{out_sel[0]}} & dest      [0]) | ({ 5{out_sel[1]}} &
 // payload rides along with whichever stage drives the output
 assign csr_num_o      = ({14{out_sel[0]}} & csr_num  [0]) | ({14{out_sel[1]}} & csr_num  [1]);
 assign csr_ctl_o      = ({ 9{out_sel[0]}} & csr_ctl  [0]) | ({ 9{out_sel[1]}} & csr_ctl  [1]);
-assign tlb_op_o       = ({ 3{out_sel[0]}} & tlb_op   [0]) | ({ 3{out_sel[1]}} & tlb_op   [1]);
+assign tlb_op_o       = ({ 5{out_sel[0]}} & tlb_op   [0]) | ({ 5{out_sel[1]}} & tlb_op   [1]);
 assign invtlb_op_o    = ({ 5{out_sel[0]}} & invtlb_op[0]) | ({ 5{out_sel[1]}} & invtlb_op[1]);
 assign excp_cause_o   = ({13{out_sel[0]}} & excp_cause[0]) | ({13{out_sel[1]}} & excp_cause[1]);
 assign csr_wdata_o    = ({32{out_sel[0]}} & csr_wdata[0]) | ({32{out_sel[1]}} & csr_wdata[1]);

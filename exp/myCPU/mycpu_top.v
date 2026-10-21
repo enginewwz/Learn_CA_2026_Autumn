@@ -182,7 +182,7 @@ reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
 reg  [ 8:0] csr_ctl [WB:IF] /* verilator split_var */;
-reg  [ 2:0] tlb_op [WB:ID] /* verilator split_var */;
+reg  [ 4:0] tlb_op [WB:ID] /* verilator split_var */;
 reg  [ 4:0] invtlb_op [WB:ID] /* verilator split_var */;
 reg  [12:0] excp_cause [WB:IF] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:ID] /* verilator split_var */;
@@ -218,6 +218,7 @@ wire        ertn_i;
 reg         wb_crmd_tlb;       // CRMD / TLB changed the map: restart the fetch
 wire        mem_crmd_tlb;
 wire        mem_tlb;
+wire        tlb_op_map;      // this TLB op changes the mapping, so it must flush
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;   // BADV of the instruction now in WB
@@ -258,7 +259,7 @@ wire        ex_gr_we_o;
 wire  [4:0] ex_dest_o;
 wire [13:0] ex_csr_num_o;
 wire [ 8:0] ex_csr_ctl_o;
-wire [ 2:0] ex_tlb_op_o;
+wire [ 4:0] ex_tlb_op_o;
 wire [ 4:0] ex_invtlb_op_o;
 wire [12:0] ex_excp_cause_o;
 wire [12:0] excp_cause_id;
@@ -377,12 +378,12 @@ wire        inst_tlbfill;
 wire        inst_invtlb;
 wire        inst_tlb_any;
 
-localparam [2:0] TLB_NONE = 3'd0;
-localparam [2:0] TLB_SRCH = 3'd1;
-localparam [2:0] TLB_RD   = 3'd2;
-localparam [2:0] TLB_WR   = 3'd3;
-localparam [2:0] TLB_FILL = 3'd4;
-localparam [2:0] TLB_INV  = 3'd5;
+// TLB instruction select, one hot per slot
+localparam TLB_SRCH = 0;
+localparam TLB_RD   = 1;
+localparam TLB_WR   = 2;
+localparam TLB_FILL = 3;
+localparam TLB_INV  = 4;
 
 wire        need_ui5;
 wire        need_ui12;
@@ -809,11 +810,7 @@ always @(*) begin
     // privileged instructions: IPE when the commit-point PLV is not 0
     csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any;
     // TLB instruction payload
-    tlb_op[ID]               = inst_tlbsrch ? TLB_SRCH :
-                               inst_tlbrd   ? TLB_RD   :
-                               inst_tlbwr   ? TLB_WR   :
-                               inst_tlbfill ? TLB_FILL :
-                               inst_invtlb  ? TLB_INV  : TLB_NONE;
+    tlb_op[ID]               = {inst_invtlb, inst_tlbfill, inst_tlbwr, inst_tlbrd, inst_tlbsrch};
     invtlb_op[ID]            = inst[4:0];
 end
 
@@ -1033,7 +1030,10 @@ assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
 assign mem_excp = csr_ctl[MEM][CSR_EXCP] | mem_ipe | (| mem_tlb_cause);
 
-assign mem_tlb = valid[MEM] & (| tlb_op[MEM]);
+// tlbsrch only reports where the entry lives (TLBIDX.Index/NE), which is not
+// part of the translation, so it neither flushes nor re-fetches
+assign tlb_op_map = (| tlb_op[MEM]) & ~ tlb_op[MEM][TLB_SRCH];
+assign mem_tlb    = valid[MEM] & tlb_op_map;
 
 assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD | csr_num[MEM] == CSR_DMW0 | csr_num[MEM] == CSR_DMW1);
 
@@ -1042,7 +1042,7 @@ assign mem_crmd_tlb = (mem_map_wr & valid[MEM]) | mem_tlb;
 assign mem_flush = valid[MEM] & (mem_excp
                                 | csr_ctl[MEM][CSR_ERTN]
                                 | mem_map_wr
-                                | (| tlb_op[MEM]));
+                                | tlb_op_map);
 
 always @(posedge clk) begin
     if (reset) wb_crmd_tlb <= 1'b0;
@@ -1212,14 +1212,14 @@ wire [31:0] tlbrentry_o;
 wire [ 5:0] estat_ecode_o;
 wire        crmd_da_o, crmd_pg_o;
 
-assign wb_tlb_commit = valid[WB] & (tlb_op[WB] != TLB_NONE) & ~ csr_ctl[WB][CSR_EXCP];
-assign wb_tlb_srch   = wb_tlb_commit & (tlb_op[WB] == TLB_SRCH);
-assign wb_tlb_rd     = wb_tlb_commit & (tlb_op[WB] == TLB_RD);
-assign wb_tlb_wr     = wb_tlb_commit & ((tlb_op[WB] == TLB_WR) | (tlb_op[WB] == TLB_FILL));
-assign wb_tlb_inv    = wb_tlb_commit & (tlb_op[WB] == TLB_INV);
+assign wb_tlb_commit = valid[WB] & (| tlb_op[WB]) & ~ csr_ctl[WB][CSR_EXCP];
+assign wb_tlb_srch   = wb_tlb_commit & tlb_op[WB][TLB_SRCH];
+assign wb_tlb_rd     = wb_tlb_commit & tlb_op[WB][TLB_RD];
+assign wb_tlb_wr     = wb_tlb_commit & (tlb_op[WB][TLB_WR] | tlb_op[WB][TLB_FILL]);
+assign wb_tlb_inv    = wb_tlb_commit & tlb_op[WB][TLB_INV];
 
 // write / invalidate keys: invtlb reuses the write port (rj -> ASID, rk -> VPPN)
-assign tlb_w_index = (tlb_op[WB] == TLB_FILL) ? timer_o[3:0] : tlbidx_index_o;
+assign tlb_w_index = tlb_op[WB][TLB_FILL] ? timer_o[3:0] : tlbidx_index_o;
 assign tlb_w_e     = (estat_ecode_o == 6'h3f) ? 1'b1 : ~ tlbidx_ne_o;
 assign tlb_w_vppn  = wb_tlb_inv ? csr_wdata[WB][31:13] : tlbehi_vppn_o;
 assign tlb_w_asid  = wb_tlb_inv ? csr_mask[WB][9:0]   : asid_o;
@@ -1247,8 +1247,8 @@ assign tlb_s1_va_bit12 = result[MEM][12];
 assign tlb_rd_lo0 = {4'b0, tlb_r_ppn0, 1'b0, tlb_r_g, tlb_r_mat0, tlb_r_plv0, tlb_r_d0, tlb_r_v0};
 assign tlb_rd_lo1 = {4'b0, tlb_r_ppn1, 1'b0, tlb_r_g, tlb_r_mat1, tlb_r_plv1, tlb_r_d1, tlb_r_v1};
 
-assign tlb_csr_sel = (tlb_op[WB] == TLB_SRCH) ? 2'd1 :
-                     (tlb_op[WB] == TLB_RD)   ? 2'd2 : 2'd0;
+assign tlb_csr_sel = tlb_op[WB][TLB_SRCH] ? 2'd1 :
+                     tlb_op[WB][TLB_RD]   ? 2'd2 : 2'd0;
 
 // dmw / tlb exceptions
 // mapping is only active in PG mode; a DMW hit wins over the TLB and also

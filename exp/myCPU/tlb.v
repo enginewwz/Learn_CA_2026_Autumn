@@ -146,8 +146,10 @@ generate
         // page pick: ps4MB comes from the entry, the page bit from the searched
         // VA, so this mux runs in parallel with the compare
         localparam [3:0] IDX = i;
-        wire s0_pg1 = tlb_ps4MB[i] ? s0_vppn[8] : s0_va_bit12;
-        wire s1_pg1 = tlb_ps4MB[i] ? s1_vppn[8] : s1_va_bit12;
+        wire s0_pg1, s1_pg1;
+
+        assign s0_pg1 = tlb_ps4MB[i] ? s0_vppn[8] : s0_va_bit12;
+        assign s1_pg1 = tlb_ps4MB[i] ? s1_vppn[8] : s1_va_bit12;
 
         assign sw0[i] = {IDX, tlb_ps4MB[i],
                          s0_pg1 ? tlb_plv1[i] : tlb_plv0[i],
