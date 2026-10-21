@@ -11,7 +11,7 @@ module mmu(
     output wire [31:0] if_rdata,
 
     // CPU side: load / store
-    input  wire        ld_pre,          // a load in EX that enters MEM at this edge
+    input  wire        mem_pre,         // a load / store in EX that enters MEM at this edge
     input  wire        data_req,        // the MEM slot holds a real access
     input  wire [31:0] data_va,         // = result[MEM]
     input  wire [ 3:0] data_we,         // byte strobes; 4'b0 = read
@@ -149,7 +149,7 @@ assign bridge_if_flush = if_flush;
 
 // mem path
 assign mem_live  = (mem_state != IDLE);
-assign mem_take  = (ld_pre & mem_allow) | data_req;
+assign mem_take  = (mem_pre & mem_allow) | data_req;
 assign mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
 assign mem_abort = data_abort & mem_live;
 
@@ -167,14 +167,14 @@ always @(*) begin
         TLB_ACC: begin
             if (data_abort) next_mem_state = IDLE;
             else if (mem_done) begin
-                if (ld_pre & mem_allow) next_mem_state = TLB_ACC;
+                if (mem_pre & mem_allow) next_mem_state = TLB_ACC;
                 else                    next_mem_state = IDLE;
             end
             else next_mem_state = BRI_ACC;
         end
         BRI_ACC: begin
             if (mem_done | mem_abort) begin
-                if (ld_pre & mem_allow) next_mem_state = TLB_ACC;
+                if (mem_pre & mem_allow) next_mem_state = TLB_ACC;
                 else                    next_mem_state = IDLE;
             end
             else next_mem_state = BRI_ACC;

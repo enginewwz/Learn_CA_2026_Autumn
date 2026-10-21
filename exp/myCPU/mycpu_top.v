@@ -68,7 +68,7 @@ wire        data_abort;        // this access has been found illegal
 wire [ 3:0] data_we;           // byte strobes; 4'b0 means read
 wire [31:0] data_wdata;
 wire [31:0] data_rdata;
-wire        ld_pre;            // a load in EX that enters MEM at this edge
+wire        mem_pre;           // a load / store in EX that enters MEM at this edge
 wire        if_pending;        // from the mmu: this fetch should wait
 wire        mem_pending;      // from the mmu: this access should wait
 
@@ -984,7 +984,9 @@ always @(posedge clk) begin
     if (allow[WB])      result[WB]  <= res_from_mem[MEM] ? mem_result : result[MEM];
 end
 
-assign ld_pre    = cur_valid[EX] & mem_en[EX] & ~ mem_we[EX] & ~ ex_mem_excp;
+// a load and a store are both registered at the end of EX, so both issue in the
+// first MEM cycle; a store will later gain its own state for the cache write
+assign mem_pre   = cur_valid[EX] & mem_en[EX] & ~ ex_mem_excp;
 assign data_req  = valid[MEM] & mem_en[MEM] & ~ mem_excp;
 assign data_va   = result[MEM];
 assign data_abort = mem_excp;      // MEM found the access illegal: kill what has not gone out
@@ -1424,7 +1426,7 @@ mmu u_mmu(
     .if_pending     (if_pending     ),
     .if_rdata       (inst_rdata     ),
 
-    .ld_pre         (ld_pre         ),
+    .mem_pre        (mem_pre        ),
     .data_req       (data_req       ),
     .data_va        (data_va        ),
     .data_we        (data_we        ),
