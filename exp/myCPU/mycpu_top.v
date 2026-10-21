@@ -1177,6 +1177,8 @@ wire        tlb_s0_found, tlb_s1_found;
 wire [19:0] tlb_s0_ppn,   tlb_s1_ppn;
 wire [ 5:0] tlb_s0_ps,    tlb_s1_ps;
 wire [ 3:0] tlb_s1_index;
+wire        tlb_s2_found;
+wire [ 3:0] tlb_s2_index;
 wire        tlb_s0_v, tlb_s1_v, tlb_s1_d;
 wire [ 1:0] tlb_s0_plv, tlb_s1_plv;
 wire        tlb_s0_va_bit12, tlb_s1_va_bit12;
@@ -1236,8 +1238,10 @@ assign tlb_w_v1    = tlbelo1_o[0];
 // search keys: s0 = the fetch address, s1 = the MEM address (TLBSRCH in WB takes s1)
 assign tlb_s0_vppn     = pc[IF][31:13];
 assign tlb_s0_va_bit12 = pc[IF][12];
-assign tlb_s1_vppn     = wb_tlb_srch ? tlbehi_vppn_o : result[MEM][31:13];
-assign tlb_s1_va_bit12 = wb_tlb_srch ? 1'b0          : result[MEM][12];
+// s1 always searches the MEM address; TLBSRCH has its own port (s2), so no
+// WB stage signal leaks into the MEM exception path any more
+assign tlb_s1_vppn     = result[MEM][31:13];
+assign tlb_s1_va_bit12 = result[MEM][12];
 
 // TLBRD hands the entry back to the CSRs
 assign tlb_rd_lo0 = {4'b0, tlb_r_ppn0, 1'b0, tlb_r_g, tlb_r_mat0, tlb_r_plv0, tlb_r_d0, tlb_r_v0};
@@ -1262,7 +1266,7 @@ assign if_dmw_pa   = {(dmw0_hit_if  ? dmw0_o[27:25] : dmw1_o[27:25]), pc[IF][28:
 assign mem_dmw_pa  = {(dmw0_hit_mem ? dmw0_o[27:25] : dmw1_o[27:25]), result[MEM][28:0]};
 
 assign if_xlat  = tlb_s0_found & map_mode;
-assign mem_xlat = tlb_s1_found & map_mode & ~ wb_tlb_srch;
+assign mem_xlat = tlb_s1_found & map_mode;
 
 // fetch: ADEF is born on nextpc, these three are checked when the mmu issues
 assign if_fetch_cause = (if_xlat | (~ if_dmw_hit & map_mode)) ?
@@ -1305,13 +1309,18 @@ tlb u_tlb(
     .s1_va_bit12  (tlb_s1_va_bit12),
     .s1_asid      (asid_o         ),
     .s1_found     (tlb_s1_found   ),
-    .s1_index     (tlb_s1_index   ),
+    .s1_index     (               ),
     .s1_ppn       (tlb_s1_ppn     ),
     .s1_ps        (tlb_s1_ps      ),
     .s1_plv       (tlb_s1_plv     ),
     .s1_mat       (               ),
     .s1_d         (tlb_s1_d       ),
     .s1_v         (tlb_s1_v       ),
+
+    .s2_vppn      (tlbehi_vppn_o  ),
+    .s2_asid      (asid_o         ),
+    .s2_found     (tlb_s2_found   ),
+    .s2_index     (tlb_s2_index   ),
 
     .invtlb_valid (wb_tlb_inv     ),
     .invtlb_op    (invtlb_op[WB]  ),
@@ -1373,8 +1382,8 @@ csr u_csr(
     .ipi_i           (1'b0         ),
     .tlb_we_i        (wb_tlb_commit),
     .tlb_sel_i       (tlb_csr_sel   ),
-    .tlb_srch_hit_i  (tlb_s1_found ),
-    .tlb_srch_index_i(tlb_s1_index ),
+    .tlb_srch_hit_i  (tlb_s2_found ),
+    .tlb_srch_index_i(tlb_s2_index ),
     .tlb_rd_e_i      (tlb_r_e      ),
     .tlb_rd_vppn_i   (tlb_r_vppn   ),
     .tlb_rd_ps_i     (tlb_r_ps     ),

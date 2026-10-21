@@ -32,6 +32,12 @@ module tlb
     output wire                      s1_d,
     output wire                      s1_v,
 
+    // search port 2 (TLBSRCH: TLBEHI + ASID, index only)
+    input  wire [              18:0] s2_vppn,
+    input  wire [               9:0] s2_asid,
+    output wire                      s2_found,
+    output wire [$clog2(TLBNUM)-1:0] s2_index,
+
     // invtlb opcode (keys come in on the write port: w_asid, w_vppn)
     input  wire                      invtlb_valid,
     input  wire [               4:0] invtlb_op,
@@ -90,7 +96,7 @@ reg  [       1:0] tlb_mat1     [TLBNUM-1:0];
 reg               tlb_d1       [TLBNUM-1:0];
 reg               tlb_v1       [TLBNUM-1:0];
 
-wire [TLBNUM-1:0] s0_hit, s1_hit;
+wire [TLBNUM-1:0] s0_hit, s1_hit, s2_hit;
 wire [TLBNUM-1:0] inv_asid_match, inv_va_match, inv_clear;
 
 wire                      s0_ps_sel, s1_ps_sel;
@@ -101,13 +107,13 @@ wire                      s0_dual_page_sel, s1_dual_page_sel;
 // a 16 deep priority chain.  Inside a pair the lower entry wins, so the winner
 // is still the first matching entry; the data is read with the plain 16:1 mux
 // that follows, so only the 4 bit index travels up the tree.
-wire [ 7:0] s0_h1, s1_h1;
-wire [ 3:0] s0_h2, s1_h2;
-wire [ 1:0] s0_h3, s1_h3;
-wire [$clog2(TLBNUM)-1:0] s0_ix1 [0:7], s1_ix1 [0:7];
-wire [$clog2(TLBNUM)-1:0] s0_ix2 [0:3], s1_ix2 [0:3];
-wire [$clog2(TLBNUM)-1:0] s0_ix3 [0:1], s1_ix3 [0:1];
-wire [$clog2(TLBNUM)-1:0] s0_ix4,       s1_ix4;
+wire [ 7:0] s0_h1, s1_h1, s2_h1;
+wire [ 3:0] s0_h2, s1_h2, s2_h2;
+wire [ 1:0] s0_h3, s1_h3, s2_h3;
+wire [$clog2(TLBNUM)-1:0] s0_ix1 [0:7], s1_ix1 [0:7], s2_ix1 [0:7];
+wire [$clog2(TLBNUM)-1:0] s0_ix2 [0:3], s1_ix2 [0:3], s2_ix2 [0:3];
+wire [$clog2(TLBNUM)-1:0] s0_ix3 [0:1], s1_ix3 [0:1], s2_ix3 [0:1];
+wire [$clog2(TLBNUM)-1:0] s0_ix4,       s1_ix4,       s2_ix4;
 
 wire inv_all, inv_g1, inv_g0, inv_asid, inv_va, inv_gva;
 wire w_ps4mb;
@@ -131,6 +137,10 @@ generate
                                         & (tlb_vppn[i][18:9] == s1_vppn[18:9])
                                         & (tlb_ps4MB[i] | (tlb_vppn[i][8:0] == s1_vppn[8:0]));
 
+        assign s2_hit [i] = tlb_e[i]    & (tlb_g[i] | tlb_asid[i] == s2_asid)
+                                        & (tlb_vppn[i][18:9] == s2_vppn[18:9])
+                                        & (tlb_ps4MB[i] | (tlb_vppn[i][8:0] == s2_vppn[8:0]));
+
         assign inv_asid_match[i] = (tlb_asid[i] == w_asid);
         assign inv_va_match[i]   = (tlb_vppn[i][18:9] == w_vppn[18:9])
                                  & (tlb_ps4MB[i] | (tlb_vppn[i][8:0] == w_vppn[8:0]));
@@ -148,30 +158,38 @@ endgenerate
 
 assign s0_found = |s0_hit;
 assign s1_found = |s1_hit;
+assign s2_found = |s2_hit;
 
 generate
     for (j = 0; j < 8; j = j + 1) begin : ix1
         assign s0_h1[j]  = s0_hit[2*j] | s0_hit[2*j+1];
         assign s1_h1[j]  = s1_hit[2*j] | s1_hit[2*j+1];
+        assign s2_h1[j]  = s2_hit[2*j] | s2_hit[2*j+1];
         assign s0_ix1[j] = s0_hit[2*j] ? 2 * j : 2 * j + 1;
         assign s1_ix1[j] = s1_hit[2*j] ? 2 * j : 2 * j + 1;
+        assign s2_ix1[j] = s2_hit[2*j] ? 2 * j : 2 * j + 1;
     end
     for (j = 0; j < 4; j = j + 1) begin : ix2
         assign s0_h2[j]  = s0_h1[2*j] | s0_h1[2*j+1];
         assign s1_h2[j]  = s1_h1[2*j] | s1_h1[2*j+1];
+        assign s2_h2[j]  = s2_h1[2*j] | s2_h1[2*j+1];
         assign s0_ix2[j] = s0_h1[2*j] ? s0_ix1[2*j] : s0_ix1[2*j+1];
         assign s1_ix2[j] = s1_h1[2*j] ? s1_ix1[2*j] : s1_ix1[2*j+1];
+        assign s2_ix2[j] = s2_h1[2*j] ? s2_ix1[2*j] : s2_ix1[2*j+1];
     end
     for (j = 0; j < 2; j = j + 1) begin : ix3
         assign s0_h3[j]  = s0_h2[2*j] | s0_h2[2*j+1];
         assign s1_h3[j]  = s1_h2[2*j] | s1_h2[2*j+1];
+        assign s2_h3[j]  = s2_h2[2*j] | s2_h2[2*j+1];
         assign s0_ix3[j] = s0_h2[2*j] ? s0_ix2[2*j] : s0_ix2[2*j+1];
         assign s1_ix3[j] = s1_h2[2*j] ? s1_ix2[2*j] : s1_ix2[2*j+1];
+        assign s2_ix3[j] = s2_h2[2*j] ? s2_ix2[2*j] : s2_ix2[2*j+1];
     end
 endgenerate
 
 assign s0_ix4 = s0_h3[0] ? s0_ix3[0] : s0_ix3[1];
 assign s1_ix4 = s1_h3[0] ? s1_ix3[0] : s1_ix3[1];
+assign s2_ix4 = s2_h3[0] ? s2_ix3[0] : s2_ix3[1];
 
 assign s0_index_sel = s0_ix4;
 assign s1_index_sel = s1_ix4;
@@ -184,6 +202,7 @@ assign s1_dual_page_sel = s1_ps_sel ? s1_vppn[8] : s1_va_bit12;
 
 assign s0_index = s0_index_sel;
 assign s1_index = s1_index_sel;
+assign s2_index = s2_ix4;
 
 assign s0_ps  = s0_ps_sel ? 6'd21 : 6'd12;
 assign s1_ps  = s1_ps_sel ? 6'd21 : 6'd12;
