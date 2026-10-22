@@ -62,12 +62,12 @@ wire resetn = aresetn;
 // mmu: the fetch / memory-access stage controller.
 wire        inst_req;          // the IF stage has a word to fetch at pc[IF]
 wire [31:0] inst_rdata;        // returns after an arbitrary latency
-wire        data_req;          // the MEM slot holds a real access
-wire [31:0] data_va;           // its virtual address (= result[MEM])
-wire        data_abort;        // this access has been found illegal
-wire [ 3:0] data_we;           // byte strobes; 4'b0 means read
-wire [31:0] data_wdata;
-wire [31:0] data_rdata;
+wire        mem_req;           // the MEM slot holds a real access
+wire [31:0] mem_va;            // its virtual address (= result[MEM])
+wire        mem_abort;         // this access has been found illegal
+wire [ 3:0] mem_wstrb;         // byte strobes; 4'b0 means read
+wire [31:0] mem_stdata;        // store data, already spread over the byte lanes
+wire [31:0] mem_rdata;
 wire        mem_pre;           // a load / store in EX that enters MEM at this edge
 wire        if_pending;        // from the mmu: this fetch should wait
 wire        mem_pending;      // from the mmu: this access should wait
@@ -972,11 +972,11 @@ end
 // a load and a store are both registered at the end of EX, so both issue in the
 // first MEM cycle; a store will later gain its own state for the cache write
 assign mem_pre   = cur_valid[EX] & mem_en[EX] & ~ ex_mem_excp;
-assign data_req  = cur_valid[MEM] & mem_en[MEM];
-assign data_va   = result[MEM];
+assign mem_req   = cur_valid[MEM] & mem_en[MEM];
+assign mem_va    = result[MEM];
 // MEM found the access illegal, or the whole pipeline is being flushed at WB: either
 // way the mmu must not issue this access
-assign data_abort = mem_excp | flush[MEM];
+assign mem_abort = mem_excp | flush[MEM];
 
 // byte / halfword / word store: broadcast the stored data to every byte lane
 // and let the write-enable mask pick the addressed lane(s).
@@ -996,24 +996,24 @@ assign st_we_word = 4'b1111;
 
 assign st_we = ({4{mem_byte}} & st_we_byte) | ({4{mem_half}} & st_we_half) | ({4{mem_word}} & st_we_word);
 
-assign data_we      = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
-assign data_wdata   = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
-                      ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
-                      ({32{mem_word}} &    mem_wdata[MEM]);
+assign mem_wstrb  = {4{mem_we[MEM] && valid[MEM] && ~ mem_excp}} & st_we;
+assign mem_stdata = ({32{mem_byte}} & {4{mem_wdata[MEM][ 7: 0]}}) |
+                    ({32{mem_half}} & {2{mem_wdata[MEM][15: 0]}}) |
+                    ({32{mem_word}} &    mem_wdata[MEM]);
 
 // byte / halfword / word load: take the addressed lane and extend it
-assign ld_byte = (result[MEM][1:0] == 2'd0) ? data_rdata[ 7: 0] :
-                 (result[MEM][1:0] == 2'd1) ? data_rdata[15: 8] :
-                 (result[MEM][1:0] == 2'd2) ? data_rdata[23:16] :
-                                              data_rdata[31:24];
-assign ld_half = result[MEM][1] ? data_rdata[31:16] : data_rdata[15:0];
+assign ld_byte = (result[MEM][1:0] == 2'd0) ? mem_rdata[ 7: 0] :
+                 (result[MEM][1:0] == 2'd1) ? mem_rdata[15: 8] :
+                 (result[MEM][1:0] == 2'd2) ? mem_rdata[23:16] :
+                                              mem_rdata[31:24];
+assign ld_half = result[MEM][1] ? mem_rdata[31:16] : mem_rdata[15:0];
 
 assign ld_byte_ext = mem_zext[MEM] ? {24'b0, ld_byte} : {{24{ld_byte[7]}}, ld_byte};
 assign ld_half_ext = mem_zext[MEM] ? {16'b0, ld_half} : {{16{ld_half[15]}}, ld_half};
 
 assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
                     ({32{mem_half}} & ld_half_ext)  |
-                    ({32{mem_word}} & data_rdata);
+                    ({32{mem_word}} & mem_rdata);
 
 assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
 
@@ -1416,14 +1416,14 @@ mmu u_mmu(
     .if_rdata       (inst_rdata     ),
 
     .mem_pre        (mem_pre        ),
-    .data_req       (data_req       ),
-    .data_va        (data_va        ),
-    .data_we        (data_we        ),
-    .data_wdata     (data_wdata     ),
-    .data_abort     (data_abort     ),
+    .mem_req        (mem_req        ),
+    .mem_va         (mem_va         ),
+    .mem_wstrb      (mem_wstrb      ),
+    .mem_stdata     (mem_stdata     ),
+    .mem_abort      (mem_abort      ),
     .mem_allow      (allow[MEM]     ),
     .mem_pending    (mem_pending    ),
-    .data_rdata     (data_rdata     ),
+    .mem_rdata      (mem_rdata      ),
 
     .crmd_plv       (crmd_plv_o     ),
 
