@@ -182,7 +182,7 @@ reg  [4:0]  dest [WB:ID] /* verilator split_var */;
 
 // CSR / exception
 reg  [13:0] csr_num [WB:ID] /* verilator split_var */;
-reg  [ 8:0] csr_ctl [WB:IF] /* verilator split_var */;
+reg  [ 8:0] csr_ctl [WB:ID] /* verilator split_var */;
 reg  [ 4:0] tlb_op [WB:ID] /* verilator split_var */;
 reg  [ 4:0] invtlb_op [WB:ID] /* verilator split_var */;
 reg  [12:0] excp_cause [WB:IF] /* verilator split_var */;
@@ -232,10 +232,8 @@ wire [31:0] if_dmw_pa, mem_dmw_pa;
 wire        dmw0_hit_if, dmw1_hit_if, dmw0_hit_mem, dmw1_hit_mem;
 wire [31:0] dmw0_o, dmw1_o;
 wire [12:0] if_fetch_cause;
-wire        if_fetch_excp, if_abort, if_issue;
-wire        if2id;              // the IF slot moves into ID this cycle
-reg         if_excp_r;          // fetch exception carried by the ID slot
-reg  [12:0] if_cause_r;
+wire        if_abort;
+reg  [12:0] if_excp_cause_r;
 wire        mem_tlb_chk;
 wire [12:0] mem_tlb_cause;
 wire        mem_map_wr;
@@ -549,40 +547,26 @@ assign inst_rd         = inst_rdata;
 
 always @(posedge clk) begin
     if (allow[ID]) begin
-        if (csr_ctl[IF][CSR_EXCP])  inst <= 32'h0340_0000; // nop = andi $r0, $r0, 0
-        else                        inst <= inst_rdata;
+        if (|if_excp_cause_r)  inst <= 32'h0340_0000; // nop = andi $r0, $r0, 0
+        else                   inst <= inst_rdata;
     end
 end
 
-// the IF slot only carries a cause for the single cycle in which it is handed
-// over, so latch it into the ID slot: the instruction may wait there for EX
-assign if2id = cur_valid[IF] & ~ stall[IF] & allow[ID];
-
 always @(posedge clk) begin
     if (reset) begin
-        if_excp_r  <= 1'b0;
-        if_cause_r <= 13'h0;
+        if_excp_cause_r <= 13'h0;
     end
-    else if (if2id) begin
-        if_excp_r  <= csr_ctl[IF][CSR_EXCP];
-        if_cause_r <= excp_cause[IF];
+    else if (allow[ID]) begin
+        if_excp_cause_r <= excp_cause[IF] | if_fetch_cause;
     end
 end
 
 always @(posedge clk) begin
     if (reset) begin
         excp_cause[IF] <= 13'h0;
-        csr_ctl[IF]    <= 9'b0;
-    end
-    else if (if_fetch_excp) begin
-        // the tlb check happens one cycle after the fetch is taken, i.e. while
-        // the IF slot is held: stamp the cause and let the slot go as a nop
-        excp_cause[IF] <= if_fetch_cause;
-        csr_ctl[IF]    <= 9'h1 << CSR_EXCP;
     end
     else if (allow[IF]) begin
         excp_cause[IF] <= next_if_adef ? (13'h1 << EXCP_ADEF) : 13'h0;
-        csr_ctl[IF]    <= next_if_adef ? (9'h1 << CSR_EXCP ) : 9'h0;
     end
 end
 
@@ -806,7 +790,7 @@ always @(*) begin
     csr_ctl[ID][CSR_WB]      = inst_csrrd | inst_csrwr | inst_csrxchg
                              | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid;
     // all carried exceptions share one csr_ctl bit; excp_cause says which one
-    excp_cause[ID]           = if_cause_r | excp_cause_id;
+    excp_cause[ID]           = if_excp_cause_r | excp_cause_id;
     csr_ctl[ID][CSR_EXCP]    = | excp_cause[ID];
     // privileged instructions: IPE when the commit-point PLV is not 0
     csr_ctl[ID][CSR_PRIV]    = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any;
@@ -1283,7 +1267,6 @@ assign if_fetch_cause = (if_xlat | (~ if_dmw_hit & map_mode)) ?
                          (map_mode & ~ if_dmw_hit & (crmd_plv_o > tlb_s0_plv))  ? (13'h1 << EXCP_PPI ) : 13'h0)
                         : 13'h0;
 assign if_abort       = | if_fetch_cause;
-assign if_fetch_excp  = if_issue & ~ flush[IF] & if_abort;
 
 // mem: ALE / INT are already folded into the slot, so they win
 assign mem_tlb_chk = valid[MEM] & mem_en[MEM] & ~ csr_ctl[MEM][CSR_EXCP];
@@ -1450,7 +1433,6 @@ mmu u_mmu(
     .if_dmw_hit     (if_dmw_hit     ),
     .if_dmw_pa      (if_dmw_pa      ),
     .if_abort       (if_abort       ),
-    .if_issue       (if_issue       ),
     .mem_xlat       (mem_xlat       ),
     .mem_ppn        (tlb_s1_ppn     ),
     .mem_ps         (tlb_s1_ps      ),

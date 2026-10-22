@@ -81,6 +81,8 @@ reg  [3:0] inst_state,      next_inst_state;
 reg  [3:0] mem_read_state,  next_mem_read_state;
 reg  [3:0] mem_write_state, next_mem_write_state;
 
+reg mem_write_entry_cycle;
+
 reg         write_addr_req_fire_reg;
 reg         write_data_req_fire_reg;
 
@@ -335,7 +337,13 @@ always @(posedge clk) begin
     end
 end
 
-assign inst_pending = inst_state[que] | inst_state[req] | (inst_state[rsp] & ~ inst_read_rsp_done);
-assign mem_pending = (mem_read_req  & ~ mem_read_rsp_done) | (mem_write_req & ~ write_slot_free);
+always @(posedge clk) begin
+    if (mem_write_take) mem_write_entry_cycle <= 1'b1;
+    else mem_write_entry_cycle <= 1'b0; 
+end
+
+assign inst_pending = ~ inst_state[ret] & ~ inst_read_rsp_done;
+assign mem_pending = (~ mem_read_state[ret] & ~ mem_read_rsp_done) 
+                    | (~ mem_write_entry_cycle & ~ mem_write_state[ret]);
 
 endmodule

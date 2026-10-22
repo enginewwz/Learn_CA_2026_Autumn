@@ -16,7 +16,7 @@ module mmu(
     input  wire [31:0] data_va,         // = result[MEM]
     input  wire [ 3:0] data_we,         // byte strobes; 4'b0 = read
     input  wire [31:0] data_wdata,
-    input  wire        data_abort,      // this access must not issue
+    input  wire        data_abort,      // this access should stop at stage tlb access
     input  wire        mem_allow,       // = allow[MEM]
     output wire        mem_pending,     // -> stall[MEM]
     output wire [31:0] data_rdata,
@@ -75,7 +75,6 @@ module mmu(
     input  wire [ 5:0] mem_ps,
     input  wire        mem_dmw_hit,
     input  wire [31:0] mem_dmw_pa,
-    output wire        if_issue,        // the fetch is being handed to the bridge
 
     input  wire [ 1:0] crmd_plv        // -> bridge arprot[0]/awprot[0]
 );
@@ -83,6 +82,10 @@ module mmu(
 localparam IDLE    = 3'b001;
 localparam TLB_ACC = 3'b010;
 localparam BRI_ACC = 3'b100;
+
+localparam idle = 0;
+localparam tlb_acc = 1;
+localparam bri_acc = 2;
 
 reg [2:0] if_state,      mem_state;
 reg [2:0] next_if_state, next_mem_state;
@@ -114,8 +117,8 @@ assign bridge_if_addr   = if_addr;
 assign bridge_data_addr = mem_addr;
 
 // fetch path
-assign if_live = (if_state != IDLE);
-assign if_done = (if_state == BRI_ACC) & ~ bridge_if_pending;
+assign if_live = ~ if_state[idle];
+assign if_done = if_state[bri_acc] & ~ bridge_if_pending;
 assign if_take = if_req & if_allow;
 
 assign if_pending = if_live & ~ if_done;
@@ -141,20 +144,17 @@ always @(*) begin
     endcase
 end
 
-assign if_issue        = (if_state == TLB_ACC);
-// a fetch that is being flushed / aborted must not reach the bridge at all: the
-// bridge would still run it and its rdata would land on the next fetch
-assign bridge_if_req   = if_issue & ~ if_abort & ~ if_flush;
+assign bridge_if_req   = if_state[tlb_acc] & ~ if_abort & ~ if_flush;
 assign bridge_if_flush = if_flush;
 
 // mem path
-assign mem_live  = (mem_state != IDLE);
+assign mem_live  = ~ mem_state[idle];
 assign mem_take  = (mem_pre & mem_allow) | data_req;
-assign mem_done  = mem_live & ~ bridge_mem_pending;   // write: taken; read: data back
+assign mem_done  = mem_state[bri_acc] & ~ bridge_mem_pending;   // write: taken; read: data back
 assign mem_abort = data_abort & mem_live;
 
-assign mem_pending       = (mem_live | data_req) & ~ mem_done;
-assign bridge_data_req   = mem_live & ~ data_abort;
+assign mem_pending       = mem_live & ~ mem_done & ~ data_abort;
+assign bridge_data_req   = ~ mem_state[idle] & ~ data_abort;
 assign bridge_data_we    = data_we;
 assign bridge_data_wdata = data_wdata;
 
