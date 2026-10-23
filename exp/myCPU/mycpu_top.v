@@ -198,9 +198,7 @@ reg  [MOD_WU:0] md_op_ex1;
 
 // EX1 late-operand registers: a non-mul/div instruction whose EX0 operands
 // were not ready moves to EX1 and re-forwards the pending source there.
-// The EX0 forwarded register values are carried too, so store data / CSR
-// wdata / CSR mask / TLB operands can be rebuilt at EX1.
-reg  [31:0] src1_fw_ex1, src2_fw_ex1;
+// EX1 reads the RF directly, so the EX0 forwarded values are not carried.
 reg  [31:0] imm_ex1;
 reg         src1_is_pc_ex1, src2_is_imm_ex1, csr_mask_ones_ex1;
 reg  [ 4:0] rf_raddr1_ex1, rf_raddr2_ex1;
@@ -288,10 +286,12 @@ wire [12:0] premem_excp_cause;
 // ID -> EX0 forwarding network
 wire        id_fw1_hit_ex0, id_fw1_hit_ex1, id_fw1_hit_mem;
 wire        id_fw1_valid_ex1, id_fw1_valid_mem;
+wire        id_fw1_hit_csr;
 wire        id_fw1_pending, id_fw1_sel_ex1, id_fw1_sel_mem;
 wire [31:0] id_fw1_data;
 wire        id_fw2_hit_ex0, id_fw2_hit_ex1, id_fw2_hit_mem;
 wire        id_fw2_valid_ex1, id_fw2_valid_mem;
+wire        id_fw2_hit_csr;
 wire        id_fw2_pending, id_fw2_sel_ex1, id_fw2_sel_mem;
 wire [31:0] id_fw2_data;
 wire        id_fw_pending;
@@ -299,13 +299,15 @@ wire        id_br_fw_needed;
 wire        id_br_valid;
 
 // EX0 -> ALU/mul/div forwarding network
-wire        ex0_fw1_hit_ex1, ex0_fw1_hit_mem, ex0_fw1_hit_wb;
+wire        ex0_fw1_hit_ex1, ex0_fw1_hit_mem;
 wire        ex0_fw1_valid_ex1, ex0_fw1_valid_mem;
-wire        ex0_fw1_pending, ex0_fw1_sel_ex1, ex0_fw1_sel_mem, ex0_fw1_sel_wb;
+wire        ex0_fw1_hit_csr;
+wire        ex0_fw1_pending, ex0_fw1_sel_ex1, ex0_fw1_sel_mem;
 wire [31:0] ex0_fw1_data;
-wire        ex0_fw2_hit_ex1, ex0_fw2_hit_mem, ex0_fw2_hit_wb;
+wire        ex0_fw2_hit_ex1, ex0_fw2_hit_mem;
 wire        ex0_fw2_valid_ex1, ex0_fw2_valid_mem;
-wire        ex0_fw2_pending, ex0_fw2_sel_ex1, ex0_fw2_sel_mem, ex0_fw2_sel_wb;
+wire        ex0_fw2_hit_csr;
+wire        ex0_fw2_pending, ex0_fw2_sel_ex1, ex0_fw2_sel_mem;
 wire [31:0] ex0_fw2_data;
 wire        ex0_fw1_used, ex0_fw2_used;
 wire        ex0_late_valid, ex0_fw_pending;
@@ -313,14 +315,15 @@ wire        ex0_late_valid, ex0_fw_pending;
 wire [31:0] ex0_src1, ex0_src2;
 wire [31:0] ex0_alu_result;
 wire [31:0] ex1_mem_wdata, ex1_csr_wdata, ex1_csr_mask;
-wire [31:0] src1_refwd, src2_refwd;
 
 // EX1 -> EX1 late-ALU forwarding network (operands that were still pending in EX0)
-wire        ex1_fw1_hit_mem, ex1_fw1_valid_mem, ex1_fw1_hit_wb;
-wire        ex1_fw1_pending, ex1_fw1_sel_mem, ex1_fw1_sel_wb;
+wire        ex1_fw1_hit_mem, ex1_fw1_valid_mem;
+wire        ex1_fw1_hit_csr;
+wire        ex1_fw1_pending, ex1_fw1_sel_mem;
 wire [31:0] ex1_fw1_data;
-wire        ex1_fw2_hit_mem, ex1_fw2_valid_mem, ex1_fw2_hit_wb;
-wire        ex1_fw2_pending, ex1_fw2_sel_mem, ex1_fw2_sel_wb;
+wire        ex1_fw2_hit_mem, ex1_fw2_valid_mem;
+wire        ex1_fw2_hit_csr;
+wire        ex1_fw2_pending, ex1_fw2_sel_mem;
 wire [31:0] ex1_fw2_data;
 wire [31:0] ex1_src1, ex1_src2;
 wire [31:0] ex1_alu_result;
@@ -352,9 +355,9 @@ wire [31:0] ld_byte_ext, ld_half_ext;
 wire [31:0] mem_result;
 
 // regfile
-wire        rf_we;
+wire        rf_we, rf_we_csr;
 wire [ 4:0] rf_waddr;
-wire [31:0] rf_wdata;
+wire [31:0] rf_wdata, rf_wdata_csr;
 wire [31:0] rf_rdata1_ex0, rf_rdata2_ex0;
 wire [31:0] rf_rdata1_ex1, rf_rdata2_ex1;
 
@@ -838,18 +841,20 @@ br u_br(
 );
 
 // id_fw(dst): branch operands
-assign id_fw1_hit_ex0 = valid[EX0] & gr_we[EX0] & id_src1_used
-                      & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX0]);
-assign id_fw1_hit_ex1 = valid[EX1] & gr_we[EX1] & id_src1_used
-                      & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX1]);
-assign id_fw1_hit_mem = valid[MEM] & gr_we[MEM] & id_src1_used
-                      & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[MEM]);
+assign id_fw1_hit_ex0 = valid[EX0] & gr_we[EX0] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX0]);
+assign id_fw1_hit_ex1 = valid[EX1] & gr_we[EX1] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX1]);
+assign id_fw1_hit_mem = valid[MEM] & gr_we[MEM] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[MEM]);
+
 assign id_fw1_valid_ex1  = alu_pos[EX1] & alu_done_ex0_ex1 & ~ mem_en[EX1] & ~ csr_ctl[EX1][CSR_WB];
 assign id_fw1_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
 
+assign id_fw1_hit_csr = rf_we_csr & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == rf_waddr);
+
 assign id_fw1_pending = id_fw1_hit_ex0
                       | (~ id_fw1_hit_ex0 & id_fw1_hit_ex1 & ~ id_fw1_valid_ex1)
-                      | (~ id_fw1_hit_ex0 & ~ id_fw1_hit_ex1 & id_fw1_hit_mem & ~ id_fw1_valid_mem);
+                      | (~ id_fw1_hit_ex0 & ~ id_fw1_hit_ex1 & id_fw1_hit_mem & ~ id_fw1_valid_mem)
+                      | id_fw1_hit_csr;
+
 assign id_fw1_sel_ex1 = ~ id_fw1_hit_ex0 & id_fw1_hit_ex1 & id_fw1_valid_ex1;
 assign id_fw1_sel_mem = ~ id_fw1_hit_ex0 & ~ id_fw1_hit_ex1 & id_fw1_hit_mem & id_fw1_valid_mem;
 
@@ -857,18 +862,19 @@ assign id_fw1_data = ({32{id_fw1_sel_ex1}} & alu_result_ex1) |
                      ({32{id_fw1_sel_mem}} & result[MEM])    |
                      ({32{~ id_fw1_sel_ex1 & ~ id_fw1_sel_mem}} & id_rf_rdata1);
 
-assign id_fw2_hit_ex0 = valid[EX0] & gr_we[EX0] & id_src2_used
-                      & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[EX0]);
-assign id_fw2_hit_ex1 = valid[EX1] & gr_we[EX1] & id_src2_used
-                      & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[EX1]);
-assign id_fw2_hit_mem = valid[MEM] & gr_we[MEM] & id_src2_used
-                      & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[MEM]);
+assign id_fw2_hit_ex0 = valid[EX0] & gr_we[EX0] & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[EX0]);
+assign id_fw2_hit_ex1 = valid[EX1] & gr_we[EX1] & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[EX1]);
+assign id_fw2_hit_mem = valid[MEM] & gr_we[MEM] & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[MEM]);
 assign id_fw2_valid_ex1  = alu_pos[EX1] & alu_done_ex0_ex1 & ~ mem_en[EX1] & ~ csr_ctl[EX1][CSR_WB];
 assign id_fw2_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
 
+assign id_fw2_hit_csr = rf_we_csr & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == rf_waddr);
+
 assign id_fw2_pending = id_fw2_hit_ex0
                       | (~ id_fw2_hit_ex0 & id_fw2_hit_ex1 & ~ id_fw2_valid_ex1)
-                      | (~ id_fw2_hit_ex0 & ~ id_fw2_hit_ex1 & id_fw2_hit_mem & ~ id_fw2_valid_mem);
+                      | (~ id_fw2_hit_ex0 & ~ id_fw2_hit_ex1 & id_fw2_hit_mem & ~ id_fw2_valid_mem)
+                      | id_fw2_hit_csr;
+
 assign id_fw2_sel_ex1 = ~ id_fw2_hit_ex0 & id_fw2_hit_ex1 & id_fw2_valid_ex1;
 assign id_fw2_sel_mem = ~ id_fw2_hit_ex0 & ~ id_fw2_hit_ex1 & id_fw2_hit_mem & id_fw2_valid_mem;
 
@@ -909,8 +915,6 @@ always @(posedge clk) begin
     if (reset) begin
         alu_result_ex1     <= 32'b0;
         md_op_ex1          <= 7'b0;
-        src1_fw_ex1        <= 32'b0;
-        src2_fw_ex1        <= 32'b0;
         imm_ex1            <= 32'b0;
         src1_is_pc_ex1     <= 1'b0;
         src2_is_imm_ex1    <= 1'b0;
@@ -925,8 +929,6 @@ always @(posedge clk) begin
     else if (allow[EX1]) begin
         alu_result_ex1    <= ex0_alu_result;
         md_op_ex1         <= md_op_ex0;
-        src1_fw_ex1       <= ex0_fw1_data;
-        src2_fw_ex1       <= ex0_fw2_data;
         imm_ex1           <= imm_ex0;
         src1_is_pc_ex1    <= src1_is_pc_ex0;
         src2_is_imm_ex1   <= src2_is_imm_ex0;
@@ -955,45 +957,41 @@ end
 // ex0_fw(dst)
 assign ex0_fw1_used = src1_used_ex0 & ~ src1_is_pc_ex0;
 assign ex0_fw2_used = src2_used_ex0;
-assign ex0_fw1_hit_ex1 = valid[EX1] & gr_we[EX1] & ex0_fw1_used
-                       & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == dest[EX1]);
-assign ex0_fw1_hit_mem = valid[MEM] & gr_we[MEM] & ex0_fw1_used
-                       & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == dest[MEM]);
-assign ex0_fw1_hit_wb  = rf_we & ex0_fw1_used
-                       & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == rf_waddr);
+assign ex0_fw1_hit_ex1 = valid[EX1] & gr_we[EX1] & ex0_fw1_used & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == dest[EX1]);
+assign ex0_fw1_hit_mem = valid[MEM] & gr_we[MEM] & ex0_fw1_used & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == dest[MEM]);
 assign ex0_fw1_valid_ex1  = alu_pos[EX1] & alu_done_ex0_ex1 & ~ mem_en[EX1] & ~ csr_ctl[EX1][CSR_WB];
 assign ex0_fw1_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
 
+assign ex0_fw1_hit_csr = rf_we_csr & ex0_fw1_used & (rf_raddr1_ex0 != 5'd0) & (rf_raddr1_ex0 == rf_waddr);
+
 assign ex0_fw1_pending = (ex0_fw1_hit_ex1 & ~ ex0_fw1_valid_ex1)
-                       | (~ ex0_fw1_hit_ex1 & ex0_fw1_hit_mem & ~ ex0_fw1_valid_mem);
+                       | (~ ex0_fw1_hit_ex1 & ex0_fw1_hit_mem & ~ ex0_fw1_valid_mem)
+                       | ex0_fw1_hit_csr;
+
 assign ex0_fw1_sel_ex1 = ex0_fw1_hit_ex1 & ex0_fw1_valid_ex1;
 assign ex0_fw1_sel_mem = ~ ex0_fw1_hit_ex1 & ex0_fw1_hit_mem & ex0_fw1_valid_mem;
-assign ex0_fw1_sel_wb  = ~ ex0_fw1_hit_ex1 & ~ ex0_fw1_hit_mem & ex0_fw1_hit_wb;
 
 assign ex0_fw1_data = ({32{ex0_fw1_sel_ex1}} & alu_result_ex1) |
                       ({32{ex0_fw1_sel_mem}} & result[MEM])    |
-                      ({32{ex0_fw1_sel_wb}}  & rf_wdata)       |
-                      ({32{~ ex0_fw1_sel_ex1 & ~ ex0_fw1_sel_mem & ~ ex0_fw1_sel_wb}} & rf_rdata1_ex0);
+                      ({32{~ ex0_fw1_sel_ex1 & ~ ex0_fw1_sel_mem}} & rf_rdata1_ex0);
 
-assign ex0_fw2_hit_ex1 = valid[EX1] & gr_we[EX1] & ex0_fw2_used
-                       & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == dest[EX1]);
-assign ex0_fw2_hit_mem = valid[MEM] & gr_we[MEM] & ex0_fw2_used
-                       & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == dest[MEM]);
-assign ex0_fw2_hit_wb  = rf_we & ex0_fw2_used
-                       & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == rf_waddr);
+assign ex0_fw2_hit_ex1 = valid[EX1] & gr_we[EX1] & ex0_fw2_used & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == dest[EX1]);
+assign ex0_fw2_hit_mem = valid[MEM] & gr_we[MEM] & ex0_fw2_used & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == dest[MEM]);
 assign ex0_fw2_valid_ex1  = alu_pos[EX1] & alu_done_ex0_ex1 & ~ mem_en[EX1] & ~ csr_ctl[EX1][CSR_WB];
 assign ex0_fw2_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
 
+assign ex0_fw2_hit_csr = rf_we_csr & ex0_fw2_used & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == rf_waddr);
+
 assign ex0_fw2_pending = (ex0_fw2_hit_ex1 & ~ ex0_fw2_valid_ex1)
-                       | (~ ex0_fw2_hit_ex1 & ex0_fw2_hit_mem & ~ ex0_fw2_valid_mem);
+                       | (~ ex0_fw2_hit_ex1 & ex0_fw2_hit_mem & ~ ex0_fw2_valid_mem)
+                       | ex0_fw2_hit_csr;
+
 assign ex0_fw2_sel_ex1 = ex0_fw2_hit_ex1 & ex0_fw2_valid_ex1;
 assign ex0_fw2_sel_mem = ~ ex0_fw2_hit_ex1 & ex0_fw2_hit_mem & ex0_fw2_valid_mem;
-assign ex0_fw2_sel_wb  = ~ ex0_fw2_hit_ex1 & ~ ex0_fw2_hit_mem & ex0_fw2_hit_wb;
 
 assign ex0_fw2_data = ({32{ex0_fw2_sel_ex1}} & alu_result_ex1) |
                       ({32{ex0_fw2_sel_mem}} & result[MEM])    |
-                      ({32{ex0_fw2_sel_wb}}  & rf_wdata)       |
-                      ({32{~ ex0_fw2_sel_ex1 & ~ ex0_fw2_sel_mem & ~ ex0_fw2_sel_wb}} & rf_rdata2_ex0);
+                      ({32{~ ex0_fw2_sel_ex1 & ~ ex0_fw2_sel_mem}} & rf_rdata2_ex0);
 
 // EX0 datapath
 assign ex0_fw_pending = ex0_fw1_pending | ex0_fw2_pending;
@@ -1022,44 +1020,38 @@ always @(posedge clk) begin
 end
 
 // EX1 -> EX1 forwarding for a late instruction's still-pending operands.
-// Only MEM / WB can still hold the producer: the instruction that was in EX1
-// when the consumer was in EX0 has just moved to MEM (or WB for a load/CSR).
-assign ex1_fw1_hit_mem = src1_pending_ex1 & (rf_raddr1_ex1 != 5'd0)
-                       & valid[MEM] & gr_we[MEM] & (rf_raddr1_ex1 == dest[MEM]);
+// Only MEM can still hold the producer: a normal WB write is covered by the
+// RF read-port write-first, and a CSR WB write is marked pending (no bypass).
+assign ex1_fw1_hit_mem = (rf_raddr1_ex1 != 5'd0) & valid[MEM] & gr_we[MEM] & (rf_raddr1_ex1 == dest[MEM]);
 assign ex1_fw1_valid_mem = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
-assign ex1_fw1_hit_wb  = src1_pending_ex1 & (rf_raddr1_ex1 != 5'd0)
-                       & rf_we & (rf_raddr1_ex1 == rf_waddr);
-assign ex1_fw1_pending = ex1_fw1_hit_mem & ~ ex1_fw1_valid_mem;
+
+assign ex1_fw1_hit_csr = rf_we_csr & src1_pending_ex1 & (rf_raddr1_ex1 != 5'd0) & (rf_raddr1_ex1 == rf_waddr);
+
+assign ex1_fw1_pending = (ex1_fw1_hit_mem & ~ ex1_fw1_valid_mem)
+                       | ex1_fw1_hit_csr;
 assign ex1_fw1_sel_mem = ex1_fw1_hit_mem & ex1_fw1_valid_mem;
-assign ex1_fw1_sel_wb  = ~ ex1_fw1_hit_mem & ex1_fw1_hit_wb;
 
 assign ex1_fw1_data = ({32{ex1_fw1_sel_mem}} & result[MEM]) |
-                      ({32{ex1_fw1_sel_wb}}  & rf_wdata)    |
-                      ({32{~ ex1_fw1_sel_mem & ~ ex1_fw1_sel_wb}} & rf_rdata1_ex1);
+                      ({32{~ ex1_fw1_sel_mem}} & rf_rdata1_ex1);
 
-assign ex1_fw2_hit_mem = src2_pending_ex1 & (rf_raddr2_ex1 != 5'd0)
-                       & valid[MEM] & gr_we[MEM] & (rf_raddr2_ex1 == dest[MEM]);
+assign ex1_fw2_hit_mem = (rf_raddr2_ex1 != 5'd0) & valid[MEM] & gr_we[MEM] & (rf_raddr2_ex1 == dest[MEM]);
 assign ex1_fw2_valid_mem = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB];
-assign ex1_fw2_hit_wb  = src2_pending_ex1 & (rf_raddr2_ex1 != 5'd0)
-                       & rf_we & (rf_raddr2_ex1 == rf_waddr);
-assign ex1_fw2_pending = ex1_fw2_hit_mem & ~ ex1_fw2_valid_mem;
+
+assign ex1_fw2_hit_csr = rf_we_csr & src2_pending_ex1 & (rf_raddr2_ex1 != 5'd0) & (rf_raddr2_ex1 == rf_waddr);
+
+assign ex1_fw2_pending = (ex1_fw2_hit_mem & ~ ex1_fw2_valid_mem) | ex1_fw2_hit_csr;
 assign ex1_fw2_sel_mem = ex1_fw2_hit_mem & ex1_fw2_valid_mem;
-assign ex1_fw2_sel_wb  = ~ ex1_fw2_hit_mem & ex1_fw2_hit_wb;
 
 assign ex1_fw2_data = ({32{ex1_fw2_sel_mem}} & result[MEM]) |
-                      ({32{ex1_fw2_sel_wb}}  & rf_wdata)    |
-                      ({32{~ ex1_fw2_sel_mem & ~ ex1_fw2_sel_wb}} & rf_rdata2_ex1);
+                      ({32{~ ex1_fw2_sel_mem}} & rf_rdata2_ex1);
 
-assign src1_refwd = src1_pending_ex1 ? ex1_fw1_data : src1_fw_ex1;
-assign src2_refwd = src2_pending_ex1 ? ex1_fw2_data : src2_fw_ex1;
-
-assign ex1_src1 = src1_is_pc_ex1  ? pc[EX1] : src1_refwd;
-assign ex1_src2 = src2_is_imm_ex1 ? imm_ex1 : src2_refwd;
+assign ex1_src1 = src1_is_pc_ex1  ? pc[EX1] : ex1_fw1_data;
+assign ex1_src2 = src2_is_imm_ex1 ? imm_ex1 : ex1_fw2_data;
 
 // EX1 payloads rebuilt from the (possibly late) forwarded register values.
-assign ex1_mem_wdata = src2_refwd;
-assign ex1_csr_wdata = src2_refwd;
-assign ex1_csr_mask  = csr_mask_ones_ex1 ? 32'hffffffff : src1_refwd;
+assign ex1_mem_wdata = ex1_fw2_data;
+assign ex1_csr_wdata = ex1_fw2_data;
+assign ex1_csr_mask  = csr_mask_ones_ex1 ? 32'hffffffff : ex1_fw1_data;
 
 assign ex1_fw_pending = alu_pos[EX1] & ~ alu_done_ex0_ex1
                       & ((src1_pending_ex1 & ex1_fw1_pending)
@@ -1216,13 +1208,21 @@ end
 // WB
 assign wb_flush = wb_excp_ertn | wb_crmd_tlb;
 
-assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP];
+assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP]
+                && ~ csr_ctl[WB][CSR_WB];
 assign rf_waddr = dest[WB];
-assign rf_wdata = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
-                  csr_ctl[WB][CSR_RDCNTID] ? csr_rdata      :
-                  csr_ctl[WB][CSR_RDCNTVL] ? timer_o[31: 0] :
-                  csr_ctl[WB][CSR_RDCNTVH] ? timer_o[63:32] :
-                                             result[WB];
+assign rf_wdata = result[WB];
+
+// CSR GPR write: same address port as the pipeline write (the address is the
+// registered dest[WB]), separate data port, no write-first read bypass.  The
+// forwarding networks mark it pending and never forward csr_rdata.
+assign rf_we_csr    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP]
+                    && csr_ctl[WB][CSR_WB];
+assign rf_wdata_csr = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
+                      csr_ctl[WB][CSR_RDCNTID] ? csr_rdata      :
+                      csr_ctl[WB][CSR_RDCNTVL] ? timer_o[31: 0] :
+                      csr_ctl[WB][CSR_RDCNTVH] ? timer_o[63:32] :
+                                                 csr_rdata;
 
 assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
 assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN] & ~ excp_i;
@@ -1312,9 +1312,11 @@ regfile u_regfile(
     .rdata1_ex1 (rf_rdata1_ex1),
     .raddr2_ex1 (rf_raddr2_ex1),
     .rdata2_ex1 (rf_rdata2_ex1),
-    .we     (rf_we       ),
-    .waddr  (rf_waddr    ),
-    .wdata  (rf_wdata    )
+    .we        (rf_we       ),
+    .waddr     (rf_waddr    ),
+    .wdata     (rf_wdata    ),
+    .we_csr    (rf_we_csr    ),
+    .wdata_csr (rf_wdata_csr )
 );
 
 tlb u_tlb(
@@ -1540,8 +1542,10 @@ mmu u_mmu(
 );
 
 assign debug_wb_pc       = pc[WB];
-assign debug_wb_rf_we    = {4{rf_we}};
-assign debug_wb_rf_wnum  = dest[WB];
-assign debug_wb_rf_wdata = rf_wdata;
+// the CSR GPR write uses the dedicated CSR data port, so the debug WB
+// interface must report both writes (the SoC testbench checks this output)
+assign debug_wb_rf_we    = {4{rf_we | rf_we_csr}};
+assign debug_wb_rf_wnum  = rf_waddr;
+assign debug_wb_rf_wdata = rf_we_csr ? rf_wdata_csr : rf_wdata;
 
 endmodule
