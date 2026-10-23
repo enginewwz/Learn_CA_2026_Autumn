@@ -186,7 +186,6 @@ wire [31:0] id_imm;
 // EX0 stage registers
 reg  [11:0] alu_op_ex0;
 reg  [MOD_WU:0] md_op_ex0;
-reg  [31:0] src1_ex0, src2_ex0;
 reg  [31:0] imm_ex0;
 reg  [ 4:0] rf_raddr1_ex0, rf_raddr2_ex0;
 reg         src1_used_ex0, src2_used_ex0;
@@ -311,14 +310,6 @@ wire [31:0] ex0_fw2_data;
 wire        ex0_fw1_used, ex0_fw2_used;
 wire        ex0_late_valid, ex0_fw_pending;
 
-// sticky resolved EX0 operands: a source may become valid only through the WB
-// tap for one cycle; if the instruction is held in EX0 by back-pressure, the
-// value is captured here so it does not fall back to the stale ID read.
-reg  [31:0] src1_val_ex0, src2_val_ex0;
-reg         src1_valid_ex0, src2_valid_ex0;
-wire        src1_ready_ex0, src2_ready_ex0, src1_pending_ex0, src2_pending_ex0;
-wire [31:0] src1_use, src2_use;
-
 wire [31:0] ex0_src1, ex0_src2;
 wire [31:0] ex0_alu_result;
 wire [31:0] ex1_mem_wdata, ex1_csr_wdata, ex1_csr_mask;
@@ -364,6 +355,8 @@ wire [31:0] mem_result;
 wire        rf_we;
 wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata;
+wire [31:0] rf_rdata1_ex0, rf_rdata2_ex0;
+wire [31:0] rf_rdata1_ex1, rf_rdata2_ex1;
 
 // the top of the branch compare
 wire        sel_era, sel_eentry, sel_crmd, sel_br, sel_seq;
@@ -514,9 +507,10 @@ assign allow[IF]  = ~ stall[IF]  & allow[ID];
 // ID waits only for branch / jump operands; everything else waits in EX0
 assign stall[IF]  = if_pending;
 assign stall[ID]  = cur_valid[ID] & id_br_fw_needed & id_fw_pending;
-assign stall[EX0] = (valid[EX0] & ~ ex0_late_valid & ex0_fw_pending)
-                  | div_hold;
-assign stall[EX1] = (div_pos[EX1] & div_busy) | ex1_fw_pending;
+assign stall[EX0] = cur_valid[EX0] &
+                    ((~ ex0_late_valid & ex0_fw_pending) | div_hold);
+assign stall[EX1] = cur_valid[EX1] &
+                    ((cur_div_pos[EX1] & div_busy) | ex1_fw_pending);
 assign stall[MEM] = mem_pending;
 assign stall[WB]  = 1'b0;
 
@@ -882,37 +876,11 @@ assign id_fw2_data = ({32{id_fw2_sel_ex1}} & alu_result_ex1) |
                      ({32{id_fw2_sel_mem}} & result[MEM])    |
                      ({32{~ id_fw2_sel_ex1 & ~ id_fw2_sel_mem}} & id_rf_rdata2);
 
-// sticky resolved EX0 operands
-always @(posedge clk) begin
-    if (reset) begin
-        src1_valid_ex0  <= 1'b0;
-        src2_valid_ex0  <= 1'b0;
-        src1_val_ex0 <= 32'b0;
-        src2_val_ex0 <= 32'b0;
-    end
-    else if (allow[EX0]) begin
-        src1_valid_ex0  <= 1'b0;
-        src2_valid_ex0  <= 1'b0;
-    end
-    else begin
-        if (~ src1_valid_ex0 & ~ ex0_fw1_pending) begin
-            src1_valid_ex0  <= 1'b1;
-            src1_val_ex0 <= ex0_fw1_data;
-        end
-        if (~ src2_valid_ex0 & ~ ex0_fw2_pending) begin
-            src2_valid_ex0  <= 1'b1;
-            src2_val_ex0 <= ex0_fw2_data;
-        end
-    end
-end
-
 // EX0 <- ID
 always @(posedge clk) begin
     if (allow[EX0]) begin
         alu_op_ex0        <= id_alu_op;
         md_op_ex0         <= id_md_op;
-        src1_ex0          <= id_rf_rdata1;
-        src2_ex0          <= id_rf_rdata2;
         imm_ex0           <= id_imm;
         rf_raddr1_ex0     <= id_rf_raddr1;
         rf_raddr2_ex0     <= id_rf_raddr2;
@@ -957,8 +925,8 @@ always @(posedge clk) begin
     else if (allow[EX1]) begin
         alu_result_ex1    <= ex0_alu_result;
         md_op_ex1         <= md_op_ex0;
-        src1_fw_ex1       <= src1_use;
-        src2_fw_ex1       <= src2_use;
+        src1_fw_ex1       <= ex0_fw1_data;
+        src2_fw_ex1       <= ex0_fw2_data;
         imm_ex1           <= imm_ex0;
         src1_is_pc_ex1    <= src1_is_pc_ex0;
         src2_is_imm_ex1   <= src2_is_imm_ex0;
@@ -966,8 +934,8 @@ always @(posedge clk) begin
         rf_raddr1_ex1     <= rf_raddr1_ex0;
         rf_raddr2_ex1     <= rf_raddr2_ex0;
         alu_op_ex1        <= alu_op_ex0;
-        src1_pending_ex1  <= alu_pos[EX0] & src1_pending_ex0;
-        src2_pending_ex1  <= alu_pos[EX0] & src2_pending_ex0;
+        src1_pending_ex1  <= alu_pos[EX0] & ex0_fw1_pending;
+        src2_pending_ex1  <= alu_pos[EX0] & ex0_fw2_pending;
         alu_done_ex0_ex1  <= alu_pos[EX0] & ~ ex0_fw_pending;
         res_from_mem[EX1] <= res_from_mem[EX0];
         mem_we[EX1]       <= mem_we[EX0];
@@ -1005,7 +973,7 @@ assign ex0_fw1_sel_wb  = ~ ex0_fw1_hit_ex1 & ~ ex0_fw1_hit_mem & ex0_fw1_hit_wb;
 assign ex0_fw1_data = ({32{ex0_fw1_sel_ex1}} & alu_result_ex1) |
                       ({32{ex0_fw1_sel_mem}} & result[MEM])    |
                       ({32{ex0_fw1_sel_wb}}  & rf_wdata)       |
-                      ({32{~ ex0_fw1_sel_ex1 & ~ ex0_fw1_sel_mem & ~ ex0_fw1_sel_wb}} & src1_ex0);
+                      ({32{~ ex0_fw1_sel_ex1 & ~ ex0_fw1_sel_mem & ~ ex0_fw1_sel_wb}} & rf_rdata1_ex0);
 
 assign ex0_fw2_hit_ex1 = valid[EX1] & gr_we[EX1] & ex0_fw2_used
                        & (rf_raddr2_ex0 != 5'd0) & (rf_raddr2_ex0 == dest[EX1]);
@@ -1025,20 +993,13 @@ assign ex0_fw2_sel_wb  = ~ ex0_fw2_hit_ex1 & ~ ex0_fw2_hit_mem & ex0_fw2_hit_wb;
 assign ex0_fw2_data = ({32{ex0_fw2_sel_ex1}} & alu_result_ex1) |
                       ({32{ex0_fw2_sel_mem}} & result[MEM])    |
                       ({32{ex0_fw2_sel_wb}}  & rf_wdata)       |
-                      ({32{~ ex0_fw2_sel_ex1 & ~ ex0_fw2_sel_mem & ~ ex0_fw2_sel_wb}} & src2_ex0);
+                      ({32{~ ex0_fw2_sel_ex1 & ~ ex0_fw2_sel_mem & ~ ex0_fw2_sel_wb}} & rf_rdata2_ex0);
 
 // EX0 datapath
-assign src1_ready_ex0   = src1_valid_ex0 | ~ ex0_fw1_pending;
-assign src2_ready_ex0   = src2_valid_ex0 | ~ ex0_fw2_pending;
-assign src1_pending_ex0 = ~ src1_ready_ex0;
-assign src2_pending_ex0 = ~ src2_ready_ex0;
-assign ex0_fw_pending   = src1_pending_ex0 | src2_pending_ex0;
+assign ex0_fw_pending = ex0_fw1_pending | ex0_fw2_pending;
 
-assign src1_use = src1_valid_ex0 ? src1_val_ex0 : ex0_fw1_data;
-assign src2_use = src2_valid_ex0 ? src2_val_ex0 : ex0_fw2_data;
-
-assign ex0_src1 = src1_is_pc_ex0  ? pc[EX0] : src1_use;
-assign ex0_src2 = src2_is_imm_ex0 ? imm_ex0 : src2_use;
+assign ex0_src1 = src1_is_pc_ex0  ? pc[EX0] : ex0_fw1_data;
+assign ex0_src2 = src2_is_imm_ex0 ? imm_ex0 : ex0_fw2_data;
 
 // every non-mul/div instruction may leave EX0 with a pending source and
 // re-forward it in EX1; only mul/div must have their operands at EX0
@@ -1048,10 +1009,10 @@ assign ex0_late_valid = alu_pos[EX0];
 assign div_is_signed   = md_op_ex0[DIV_W] | md_op_ex0[MOD_W];
 assign div_is_mod      = md_op_ex1[MOD_W] | md_op_ex1[MOD_WU];
 assign div_result      = div_is_mod ? div_rem : div_quot;
-assign div_leave       = div_pos[EX1] & ~ div_busy & allow[MEM];
-assign div_start       = div_pos[EX0] & ~ div_started & ~ ex0_fw_pending
+assign div_leave       = cur_div_pos[EX1] & ~ div_busy & allow[MEM];
+assign div_start       = cur_div_pos[EX0] & ~ div_started & ~ ex0_fw_pending
                        & (~ div_pos[EX1] | div_leave);
-assign div_hold        = div_pos[EX0] & ~ div_started & ~ div_start;
+assign div_hold        = cur_div_pos[EX0] & ~ div_started & ~ div_start;
 assign div_reset       = reset | flush[EX0] | flush[EX1];
 
 always @(posedge clk) begin
@@ -1074,7 +1035,7 @@ assign ex1_fw1_sel_wb  = ~ ex1_fw1_hit_mem & ex1_fw1_hit_wb;
 
 assign ex1_fw1_data = ({32{ex1_fw1_sel_mem}} & result[MEM]) |
                       ({32{ex1_fw1_sel_wb}}  & rf_wdata)    |
-                      ({32{~ ex1_fw1_sel_mem & ~ ex1_fw1_sel_wb}} & src1_fw_ex1);
+                      ({32{~ ex1_fw1_sel_mem & ~ ex1_fw1_sel_wb}} & rf_rdata1_ex1);
 
 assign ex1_fw2_hit_mem = src2_pending_ex1 & (rf_raddr2_ex1 != 5'd0)
                        & valid[MEM] & gr_we[MEM] & (rf_raddr2_ex1 == dest[MEM]);
@@ -1087,7 +1048,7 @@ assign ex1_fw2_sel_wb  = ~ ex1_fw2_hit_mem & ex1_fw2_hit_wb;
 
 assign ex1_fw2_data = ({32{ex1_fw2_sel_mem}} & result[MEM]) |
                       ({32{ex1_fw2_sel_wb}}  & rf_wdata)    |
-                      ({32{~ ex1_fw2_sel_mem & ~ ex1_fw2_sel_wb}} & src2_fw_ex1);
+                      ({32{~ ex1_fw2_sel_mem & ~ ex1_fw2_sel_wb}} & rf_rdata2_ex1);
 
 assign src1_refwd = src1_pending_ex1 ? ex1_fw1_data : src1_fw_ex1;
 assign src2_refwd = src2_pending_ex1 ? ex1_fw2_data : src2_fw_ex1;
@@ -1343,6 +1304,14 @@ regfile u_regfile(
     .rdata1 (id_rf_rdata1),
     .raddr2 (id_rf_raddr2),
     .rdata2 (id_rf_rdata2),
+    .raddr1_ex0 (rf_raddr1_ex0),
+    .rdata1_ex0 (rf_rdata1_ex0),
+    .raddr2_ex0 (rf_raddr2_ex0),
+    .rdata2_ex0 (rf_rdata2_ex0),
+    .raddr1_ex1 (rf_raddr1_ex1),
+    .rdata1_ex1 (rf_rdata1_ex1),
+    .raddr2_ex1 (rf_raddr2_ex1),
+    .rdata2_ex1 (rf_rdata2_ex1),
     .we     (rf_we       ),
     .waddr  (rf_waddr    ),
     .wdata  (rf_wdata    )
