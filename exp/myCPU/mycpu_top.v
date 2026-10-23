@@ -1109,11 +1109,11 @@ assign ex1_fw_pending = alu_pos[EX1] & ~ alu_done_ex0_ex1
 // ex1_fw payloads.  mul/div keep their own results.
 assign ex1_result = ({32{alu_pos[EX1] &   alu_done_ex0_ex1}} & alu_result_ex1) |
                     ({32{alu_pos[EX1] & ~ alu_done_ex0_ex1}} & ex1_alu_result) |
-                    ({32{mul_pos[EX1]}} & mul_result)|
+                    ({32{mul_pos[EX1]}} & mul_result) |
                     ({32{div_pos[EX1]}} & div_result);
 
 // EX units
-alu u_alu(
+alu u_alu_ex0(
     .alu_op     (alu_op_ex0    ),
     .src1       (ex0_src1      ),
     .src2       (ex0_src2      ),
@@ -1151,8 +1151,8 @@ div u_div(
 );
 
 // EX1 -> MEM / MEM -> WB
-assign premem_ale   = mem_en[EX1] & (mem_size[EX1][SIZE_HALF] ? ex1_result[0] :
-                                     mem_size[EX1][SIZE_WORD] ? | ex1_result[1:0] : 1'b0);
+assign premem_ale   = mem_en[EX1] & ((mem_size[EX1][SIZE_HALF] &    ex1_result[0]   |
+                                      mem_size[EX1][SIZE_WORD] & (| ex1_result[1:0])));
 assign premem_int_take = int_o;
 assign premem_excp  = premem_ale | premem_int_take | csr_ctl[EX1][CSR_EXCP];
 assign premem_csr_ctl   = csr_ctl[EX1] | (premem_excp ? (9'h1 << CSR_EXCP) : 9'h0);
