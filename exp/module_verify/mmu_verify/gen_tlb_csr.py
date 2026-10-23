@@ -135,7 +135,7 @@ always @(posedge clk) if (resetn && dbg_we[0])
     $display("WB  pc=%h  r%0d <= %h", dbg_pc, dbg_wnum, dbg_wdata);
 always @(posedge clk) if (resetn && dut.pc[3] >= 32'h1c000084 && dut.pc[3] <= 32'h1c0000a0)
     $display("t=%0t pcMEM=%h v=%b men=%b dreq=%b dabort=%b tlbcause=%h excp=%b ecode=%h nextpc=%h",
-        $time, dut.pc[3], dut.valid[3], dut.mem_en[3], dut.data_req, dut.data_abort,
+        $time, dut.pc[4], dut.valid[4], dut.mem_en[4], dut.mem_req, dut.mem_abort,
         dut.mem_tlb_cause, dut.excp_i, dut.excp_ecode, dut.nextpc);
 always @(posedge clk) if (resetn && dut.pc[0] >= 32'h1c00008c && dut.pc[0] <= 32'h1c000094)
     $display("t=%0t pcIF=%h st=%b ifpend=%b abort=%b xlat=%b s0f=%b s0v=%b dmw=%b da=%b pg=%b arv=%b ara=%h rv=%b",

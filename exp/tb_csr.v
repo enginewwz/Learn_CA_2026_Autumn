@@ -155,12 +155,12 @@ initial begin
     chr(TVAL,   32'h0000_0000, "TVAL reset");
     chr(TICLR,  32'h0000_0000, "TICLR reads 0");
 
-    // --------------------------- crmd_plv_o / crmd_ie_o are write-first
+    // --------------------------- crmd_plv_o / crmd_ie_o are registered (no write-first)
     // (kept shaped for a privilege check; IPE itself is not implemented)
     @(negedge clk);
     we = 1'b1; waddr = CRMD; wdata = 32'h0000_0003; wmask = 32'h0000_0007;
     #1;
-    chk(crmd_plv === 2'd3, "crmd_plv_o shows a same-cycle crswr CRMD");
+    chk(crmd_plv === 2'd0, "crmd_plv_o does NOT show a same-cycle crswr CRMD (write-first path removed)");
     step;
     we = 1'b0;
     wr(CRMD, 32'h0000_0000, 32'h0000_0007);         // back to PLV=0, IE=0

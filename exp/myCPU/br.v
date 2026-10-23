@@ -1,21 +1,16 @@
-// Branch unit for EX stage 0: decide taken and build the target.
+// Branch unit for the ID stage: decide taken and build the target.
 //
-// The branch conditions do NOT re-implement a comparator.  The ALU already
-// evaluates its borrow prefix tree on the very same operand pair
-// (src1 / src2 == br src1 / src2), so blt/bge/bltu/bgeu read the two
-// compare taps the ALU exports (lt_i = signed <, ltu_i = unsigned <) and only
-// invert them for the "or equal" forms.  Equality has no such tap, so beq/bne
-// still fold src1 ^ src2 here (one XOR per bit + a reduction OR: 3 LUT levels
-// for 32 bits, and it starts from the registered operands).
+// The comparison tree lives here now (it used to be the ALU's borrow prefix
+// tree): ltu32 is the root of the same 2->4->8->16->32 prefix tree that the
+// old ALU exported, and lt is the sign fold of it.  eq is a plain XOR + OR
+// reduction.  The ALU no longer exports compare taps.
 //
-// jirl has no comparison at all: br_op[JIRL] alone decides taken, and the
-// target is base + offs for every branch (base = pc for a conditional branch,
-// the forwarded rj for jirl).
+// b / bl are unconditional and are OR-ed in by the top; this module handles
+// beq / bne / blt / bge / bltu / bgeu / jirl.  jirl has no comparison at all:
+// its br_op bit alone decides taken, and base is the forwarded rj.
 module br(
-    input  wire [31:0] src1,     // compare operands (same pair the ALU uses)
+    input  wire [31:0] src1,     // compare operands
     input  wire [31:0] src2,
-    input  wire        lt_i,     // signed   src1 < src2   (ALU borrow tree)
-    input  wire        ltu_i,    // unsigned src1 < src2   (ALU borrow tree)
     input  wire [31:0] base,     // target base: pc (conditional) / rj (jirl)
     input  wire [31:0] offs,     // i16 << 2
     input  wire [ 6:0] br_op,    // one-hot branch select
@@ -33,14 +28,61 @@ localparam BLTU = 4;
 localparam BGEU = 5;
 localparam JIRL = 6;
 
+// carry-lookahead combine of two adjacent (G, P) groups:
+//   {G,P} = {Ghi | (Phi & Glo), Phi & Plo}
+// The subtraction borrow tree uses g_i = ~a_i & b_i, p_i = a_i ~^ b_i,
+// brw_0 = 0, so the root is (a <u b).
+function [1:0] cla;
+    input ghi, phi, glo, plo;
+    begin
+        cla[1] = ghi | (phi & glo);
+        cla[0] = phi & plo;
+    end
+endfunction
+
+genvar g;
+
+wire [1:0] brw2 [0:15];    //aligned 2-bit groups
+wire [1:0] brw4 [0: 7];
+wire [1:0] brw8 [0: 3];
+wire [1:0] brw16_1;
+
+generate
+    for (g = 0; g < 16; g = g + 1) begin : g_brw2
+        assign brw2[g] = cla(~src1[2*g+1] & src2[2*g+1],
+                              src1[2*g+1] ~^ src2[2*g+1],
+                             ~src1[2*g  ] & src2[2*g  ],
+                              src1[2*g  ] ~^ src2[2*g  ]);
+    end
+    for (g = 0; g < 8; g = g + 1) begin : g_brw4
+        assign brw4[g] = cla(brw2[2*g+1][1], brw2[2*g+1][0],
+                             brw2[2*g  ][1], brw2[2*g  ][0]);
+    end
+    for (g = 0; g < 4; g = g + 1) begin : g_brw8
+        assign brw8[g] = cla(brw4[2*g+1][1], brw4[2*g+1][0],
+                             brw4[2*g  ][1], brw4[2*g  ][0]);
+    end
+endgenerate
+
+wire brw_lo16;   //G(0..15): borrow out of the low half
+wire ltu32;      //G(0..31): a <u b
+
+assign brw_lo16 = brw8[1][1] | (brw8[1][0] & brw8[0][1]);
+assign brw16_1  = cla(brw8[3][1], brw8[3][0], brw8[2][1], brw8[2][0]);
+assign ltu32    = brw16_1[1] | (brw16_1[0] & brw_lo16);
+
+wire lt;
+wire ltu;
 wire eq;
 
-assign eq = ~| (src1 ^ src2);
+assign ltu = ltu32;
+assign lt  = (src1[31] & ~src2[31])
+           | ((src1[31] ~^ src2[31]) & ltu32);
+assign eq  = ~| (src1 ^ src2);
 
-// bge = ~lt / bgeu = ~ltu are the ALU taps inverted here, not a second compare
 assign taken  = valid & ( (br_op[BEQ]  &   eq   ) | (br_op[BNE]  & ~ eq   )
-                        | (br_op[BLT]  &   lt_i ) | (br_op[BGE]  & ~ lt_i )
-                        | (br_op[BLTU] &   ltu_i) | (br_op[BGEU] & ~ ltu_i)
+                        | (br_op[BLT]  &   lt   ) | (br_op[BGE]  & ~ lt   )
+                        | (br_op[BLTU] &   ltu  ) | (br_op[BGEU] & ~ ltu  )
                         |  br_op[JIRL] );
 
 assign target = base + offs;

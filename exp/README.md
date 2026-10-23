@@ -2,7 +2,7 @@
 
 ```
 exp/
-  myCPU/          设计源码（9 个 .v，2825 行）——唯一会被综合的东西
+  myCPU/          设计源码（11 个 .v）——唯一会被综合的东西
   tb_*.v          回归测试（自检、有参考模型）      <- 改了 RTL 就要跑
   analysis/       A/B 对照台（需要"参考版本"才能跑）<- 只在改某个单元时用
   func/           测试程序（汇编 -> inst_ram.mif）
@@ -22,10 +22,9 @@ exp/
 
 | 测试台 | 条数 | 覆盖 | 大致耗时 | 编译命令 |
 | --- | --- | --- | --- | --- |
-| `tb_alu.v` | 23300 | ALU 全操作 + **多热 `alu_op`**；参考模型按 LoongArch 语义手写，与实现结构无关 | 秒级 | `iverilog -g2005 -o /tmp/t exp/myCPU/alu.v exp/tb_alu.v && vvp /tmp/t` |
+| `tb_alu.v` | 23092 | ALU 全操作 + **多热 `alu_op`**；参考模型按 LoongArch 语义手写，与实现结构无关 | 秒级 | `iverilog -g2005 -o /tmp/t exp/myCPU/alu.v exp/tb_alu.v && vvp /tmp/t` |
 | `tb_csr.v` | 62 | 每个 CSR 的复位值、掩码写/读回、同拍读旧值、计时器、中断 | 秒级 | `iverilog -g2005 -o /tmp/t exp/myCPU/csr.v exp/tb_csr.v && vvp /tmp/t` |
 | `tb_mul_div.v` | 661 | mul + div 常规与边界（**exp/ 根下唯一的 mul 回归**） | 秒级 | `iverilog -g2005 -o /tmp/t exp/myCPU/tools.v exp/myCPU/mul.v exp/myCPU/div.v exp/tb_mul_div.v && vvp /tmp/t` |
-| `tb_ex.v` | 81 | EX 侧握手：div 走位、flush、stall、`stall_div`、前递 | 秒级 | `iverilog -g2005 -o /tmp/t exp/myCPU/tools.v exp/myCPU/EX.v exp/myCPU/alu.v exp/myCPU/mul.v exp/myCPU/div.v exp/myCPU/br.v exp/tb_ex.v && vvp /tmp/t` |
 | `tb_div_scan.v` | **201719** | div 的**独立**参考模型：20 万随机 + `b∈[1,256]` 全扫 + 8×8 网格 + 除零 + `INT_MIN`；另查 busy/done 协议与拍数 | ~1 分钟 | `iverilog -g2005 -o /tmp/t exp/myCPU/tools.v exp/myCPU/div.v exp/tb_div_scan.v && vvp /tmp/t` |
 
 **注意重叠**：`tb_div_scan.v` 完全不依赖 `tb_mul_div.v` 的参考模型，而且强度高约 300 倍，
