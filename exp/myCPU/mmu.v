@@ -6,12 +6,11 @@ module mmu(
     input  wire        if_req,          // = inst_req: a legal fetch address is on if_va
     input  wire [31:0] if_va,           // = pc[IF]: the address taken at the last edge
     input  wire        if_allow,        // = allow[IF]: pc[IF] <- nextpc at this edge
-    input  wire        if_flush,        // = flush[IF]: this fetch is killed
     output wire        if_pending,      // -> stall[IF]
     output wire [31:0] if_rdata,
 
     // CPU side: load / store
-    input  wire        mem_pre,         // a load / store in EX that enters MEM at this edge
+    input  wire        mem_pre,         // premem_req: the access arrives in MEM at this edge
     input  wire        mem_req,         // the MEM slot holds a real access
     input  wire [31:0] mem_va,          // = result[MEM]
     input  wire [ 3:0] mem_wstrb,       // byte strobes; 4'b0 = read
@@ -130,7 +129,7 @@ always @(*) begin
             else         next_if_state = IDLE;
         end
         TLB_ACC: begin
-            if (if_flush | if_abort) next_if_state = IDLE;
+            if (if_abort) next_if_state = IDLE;
             else                        next_if_state = BRI_ACC;
         end
         BRI_ACC: begin
@@ -144,8 +143,8 @@ always @(*) begin
     endcase
 end
 
-assign bridge_if_req   = if_state[tlb_acc] & ~ if_abort & ~ if_flush;
-assign bridge_if_flush = if_flush;
+assign bridge_if_req   = if_state[tlb_acc] & ~ if_abort;
+assign bridge_if_flush = if_abort;
 
 // mem path
 assign mem_live  = ~ mem_state[idle];
