@@ -824,8 +824,6 @@ assign id_br_fw_needed = inst_beq | inst_bne | inst_blt | inst_bge
                        | inst_bltu | inst_bgeu | inst_jirl;
 assign id_fw_pending = id_fw1_pending | id_fw2_pending;
 assign id_br_valid   = cur_valid[ID] & ~ id_br_sent & ~ id_fw_pending;
-assign br_taken_id;
-assign br_target_id;
 
 always @(posedge clk) begin
     if (reset)                  id_br_sent <= 1'b0;
