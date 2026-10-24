@@ -254,7 +254,6 @@ wire        ertn_i;
 reg         wb_crmd_tlb;
 wire        mem_crmd_tlb;
 wire        mem_tlb;
-wire        tlb_op_map;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;
@@ -1182,34 +1181,32 @@ assign mem_result = ({32{mem_byte}} & ld_byte_ext)  |
                     ({32{mem_half}} & ld_half_ext)  |
                     ({32{mem_word}} & mem_rdata);
 
-assign mem_ipe = valid[MEM] & csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
-assign mem_excp = valid[MEM] & (csr_ctl[MEM][CSR_EXCP] | mem_ipe | (| mem_tlb_cause));
+assign mem_ipe = csr_ctl[MEM][CSR_PRIV] & (crmd_plv_o != 2'b0);
+assign mem_excp = (csr_ctl[MEM][CSR_EXCP] | mem_ipe | (| mem_tlb_cause));
 
 assign mem_csr_ctl    = csr_ctl[MEM] | ((mem_ipe | (| mem_tlb_cause)) ? (9'h1 << CSR_EXCP) : 9'h0);
 assign mem_excp_cause = excp_cause[MEM]
                       | (mem_ipe ? (13'h1 << EXCP_IPE) : 13'h0)
                       | mem_tlb_cause;
 
-assign tlb_op_map = (| tlb_op[MEM]) & ~ tlb_op[MEM][TLB_SRCH];
-assign mem_tlb    = valid[MEM] & tlb_op_map;
+assign mem_tlb = (| tlb_op[MEM]) & ~ tlb_op[MEM][TLB_SRCH];
 
 assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD
                                             | csr_num[MEM] == CSR_DMW0
                                             | csr_num[MEM] == CSR_DMW1
                                             | csr_num[MEM] == CSR_ASID);
 
-assign mem_crmd_tlb = (mem_map_wr & valid[MEM]) | mem_tlb;
+assign mem_crmd_tlb = mem_map_wr | mem_tlb;
 
 always @(posedge clk) begin
     if (reset) wb_crmd_tlb <= 1'b0;
-    else       wb_crmd_tlb <= mem_crmd_tlb;
+    else       wb_crmd_tlb <= mem_crmd_tlb & cur_valid[MEM];
 end
 
 // WB
 assign wb_flush = wb_excp_ertn | wb_crmd_tlb;
 
-assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP]
-                && ~ csr_ctl[WB][CSR_WB];
+assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP] && ~ csr_ctl[WB][CSR_WB];
 assign rf_waddr = dest[WB];
 assign rf_wdata = result[WB];
 
@@ -1290,11 +1287,11 @@ assign if_fetch_cause = (if_xlat | (~ if_dmw_hit & map_mode)) ?
 
 assign mem_tlb_chk = valid[MEM] & mem_en[MEM] & ~ csr_ctl[MEM][CSR_EXCP];
 assign mem_tlb_cause = ({13{mem_tlb_chk}} &
-     ( (map_mode & ~ mem_dmw_hit & ~ tlb_s1_found)                        ? (13'h1 << EXCP_TLBR) :
-       (map_mode & ~ mem_dmw_hit & ~ tlb_s1_v)                            ? (13'h1 << (mem_we[MEM] ? EXCP_PIS : EXCP_PIL)) :
-       (map_mode & ~ mem_dmw_hit & (crmd_plv_o > tlb_s1_plv))             ? (13'h1 << EXCP_PPI ) :
-       (map_mode & ~ mem_dmw_hit & mem_we[MEM] & ~ tlb_s1_d)              ? (13'h1 << EXCP_PME ) :
-                                                                            13'h0));
+                        ((map_mode & ~ mem_dmw_hit & ~ tlb_s1_found)            ? (13'h1 << EXCP_TLBR) :
+                        (map_mode & ~ mem_dmw_hit & ~ tlb_s1_v)                 ? (13'h1 << (mem_we[MEM] ? EXCP_PIS : EXCP_PIL)) :
+                        (map_mode & ~ mem_dmw_hit & (crmd_plv_o > tlb_s1_plv))  ? (13'h1 << EXCP_PPI ) :
+                        (map_mode & ~ mem_dmw_hit & mem_we[MEM] & ~ tlb_s1_d)   ? (13'h1 << EXCP_PME ) :
+                                                                                   13'h0));
 
 assign excp_entry = excp_cause[WB][EXCP_TLBR] ? tlbrentry_o : eentry_o;
 

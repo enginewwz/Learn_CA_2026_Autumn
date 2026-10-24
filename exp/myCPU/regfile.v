@@ -28,7 +28,7 @@ reg [31:0] rf[31:0];
 
 //WRITE
 always @(posedge clk) begin
-    if (we)     rf[waddr]      <= wdata;
+    if (we)          rf[waddr] <= wdata;
     else if (we_csr) rf[waddr] <= wdata_csr;
 end
 
