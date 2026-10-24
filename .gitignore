@@ -73,3 +73,6 @@ project/
 # rm reports
 report/
 timing_report.txt
+
+# rm local testbench
+local_testbench/
