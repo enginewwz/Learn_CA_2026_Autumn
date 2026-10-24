@@ -248,9 +248,9 @@ wire        wb_flush;
 wire        mem_ipe;
 wire [ 8:0] mem_csr_ctl;
 wire [12:0] mem_excp_cause;
-wire        wb_excp_ertn;
-wire        excp_i;
-wire        ertn_i;
+reg         wb_excp_ertn;
+reg         wb_excp;
+reg         wb_ertn;
 reg         wb_crmd_tlb;
 wire        mem_crmd_tlb;
 wire        mem_tlb;
@@ -296,6 +296,7 @@ wire [31:0] id_fw2_data;
 wire        id_fw_pending;
 wire        id_br_fw_needed;
 wire        id_br_valid;
+reg         id_br_sent;
 
 // EX0 -> ALU/mul/div forwarding network
 wire        ex0_fw1_hit_ex1, ex0_fw1_hit_mem;
@@ -341,9 +342,6 @@ wire        div_reset;
 // branch unit at ID
 wire [ 6:0] id_br_op;
 wire [31:0] id_br_base, id_br_offs;
-wire        id_br_cond_taken;
-wire [31:0] id_br_cond_target;
-wire        id_br_uncond;
 
 // memory / CSR helpers
 wire        mem_byte, mem_half, mem_word;
@@ -435,8 +433,8 @@ wire        crmd_da_o, crmd_pg_o;
 // redirect logic
 assign seq_pc       = pc[IF] + 32'h4;
 
-assign sel_era      = ertn_i;
-assign sel_eentry   = excp_i;
+assign sel_era      = wb_ertn;
+assign sel_eentry   = wb_excp;
 assign sel_crmd     = ~ wb_excp_ertn & wb_crmd_tlb;
 assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb & br_reg;
 assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb | br_reg | br_taken_id);
@@ -509,10 +507,8 @@ assign allow[IF]  = ~ stall[IF]  & allow[ID];
 // ID waits only for branch / jump operands; everything else waits in EX0
 assign stall[IF]  = if_pending;
 assign stall[ID]  = cur_valid[ID] & id_br_fw_needed & id_fw_pending;
-assign stall[EX0] = cur_valid[EX0] &
-                    ((~ ex0_late_valid & ex0_fw_pending) | div_hold);
-assign stall[EX1] = cur_valid[EX1] &
-                    ((cur_div_pos[EX1] & div_busy) | ex1_fw_pending);
+assign stall[EX0] = cur_valid[EX0] & ((~ ex0_late_valid & ex0_fw_pending) | div_hold);
+assign stall[EX1] = cur_valid[EX1] & ((cur_div_pos[EX1] & div_busy) | ex1_fw_pending);
 assign stall[MEM] = mem_pending;
 assign stall[WB]  = 1'b0;
 
@@ -817,26 +813,35 @@ assign id_rf_raddr1 = rj;
 assign id_rf_raddr2 = src_reg_is_rd ? rd : rk;
 
 // ID branch
-assign id_br_op      = {inst_jirl, inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_bne, inst_beq};
+// b / bl / jirl are unconditional: they use the br unit's JIRL (taken) bit,
+// so the target is built by the same base+offs adder as the conditional
+// branches.  b/bl use pc + i26<<2; jirl uses rj + i16<<2.
+assign id_br_op      = {inst_jirl | inst_b | inst_bl,
+                        inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_bne, inst_beq};
 assign id_br_base    = inst_jirl ? id_fw1_data : pc[ID];
-assign id_br_offs    = br_offs_i16;
-assign id_br_uncond  = inst_b | inst_bl;
+assign id_br_offs    = (inst_b | inst_bl) ? br_offs_i26 : br_offs_i16;
 assign id_br_fw_needed = inst_beq | inst_bne | inst_blt | inst_bge
                        | inst_bltu | inst_bgeu | inst_jirl;
 assign id_fw_pending = id_fw1_pending | id_fw2_pending;
-assign id_br_valid   = cur_valid[ID] & ~ stall[ID];
-assign br_taken_id   = (id_br_uncond & id_br_valid) | id_br_cond_taken;
-assign br_target_id  = id_br_uncond ? (pc[ID] + br_offs_i26) : id_br_cond_target;
+assign id_br_valid   = cur_valid[ID] & ~ id_br_sent & ~ id_fw_pending;
+assign br_taken_id;
+assign br_target_id;
+
+always @(posedge clk) begin
+    if (reset)                  id_br_sent <= 1'b0;
+    else if (allow[ID])         id_br_sent <= 1'b0;
+    else if (~ id_fw_pending)   id_br_sent <= 1'b1;
+end
 
 br u_br(
-    .src1   (id_fw1_data       ),
-    .src2   (id_fw2_data       ),
-    .base   (id_br_base        ),
-    .offs   (id_br_offs        ),
-    .br_op  (id_br_op          ),
-    .valid  (id_br_valid       ),
-    .taken  (id_br_cond_taken  ),
-    .target (id_br_cond_target )
+    .src1   (id_fw1_data    ),
+    .src2   (id_fw2_data    ),
+    .base   (id_br_base     ),
+    .offs   (id_br_offs     ),
+    .br_op  (id_br_op       ),
+    .valid  (id_br_valid    ),
+    .taken  (br_taken_id    ),
+    .target (br_target_id   )
 );
 
 // id_fw(dst): branch operands
@@ -1013,9 +1018,9 @@ assign div_hold        = cur_div_pos[EX0] & ~ div_started & ~ div_start;
 assign div_reset       = reset | flush[EX0] | flush[EX1];
 
 always @(posedge clk) begin
-    if (div_reset)                    div_started <= 1'b0;
+    if (div_reset)                     div_started <= 1'b0;
     else if (div_start & ~ allow[EX0]) div_started <= 1'b1;
-    else if (allow[EX0])              div_started <= 1'b0;
+    else if (allow[EX0])               div_started <= 1'b0;
 end
 
 // EX1 -> EX1 forwarding for a late instruction's still-pending operands.
@@ -1199,8 +1204,18 @@ assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD
 assign mem_crmd_tlb = mem_map_wr | mem_tlb;
 
 always @(posedge clk) begin
-    if (reset) wb_crmd_tlb <= 1'b0;
-    else       wb_crmd_tlb <= mem_crmd_tlb & cur_valid[MEM];
+    if (reset) begin
+        wb_crmd_tlb     <= 1'b0;
+        wb_excp         <= 1'b0;
+        wb_ertn         <= 1'b0;
+        wb_excp_ertn    <= 1'b0;
+    end
+    else begin
+        wb_crmd_tlb <= mem_crmd_tlb & cur_valid[MEM];
+        wb_excp     <= mem_excp & cur_valid[MEM];
+        wb_ertn     <= csr_ctl[MEM][CSR_ERTN] & ~ mem_excp & cur_valid[MEM];
+        wb_excp_ertn<= (csr_ctl[MEM][CSR_ERTN] | mem_excp) & cur_valid[MEM];
+    end
 end
 
 // WB
@@ -1221,10 +1236,6 @@ assign rf_wdata_csr = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
                       csr_ctl[WB][CSR_RDCNTVH] ? timer_o[63:32] :
                                                  csr_rdata;
 
-assign excp_i       = valid[WB] & csr_ctl[WB][CSR_EXCP];
-assign ertn_i       = valid[WB] & csr_ctl[WB][CSR_ERTN] & ~ excp_i;
-assign wb_excp_ertn = excp_i | ertn_i;
-
 assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
                        excp_cause[WB][EXCP_IPE]  ? 6'he :
                        excp_cause[WB][EXCP_ALE]  ? 6'h9 :
@@ -1243,9 +1254,8 @@ assign excp_tlb      = excp_cause[WB][EXCP_TLBR] | excp_cause[WB][EXCP_PIF]
                      | excp_cause[WB][EXCP_PIL]  | excp_cause[WB][EXCP_PIS]
                      | excp_cause[WB][EXCP_PPI]  | excp_cause[WB][EXCP_PME];
 
-assign excp_badv_en  = excp_i & ~ excp_cause[WB][EXCP_INT]
-                              & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF]
-                                 | excp_tlb);
+assign excp_badv_en  = wb_excp & ~ excp_cause[WB][EXCP_INT]
+                               & (excp_cause[WB][EXCP_ALE] | excp_cause[WB][EXCP_ADEF] | excp_tlb);
 
 assign csr_we    = valid[WB] & csr_ctl[WB][CSR_WE] & ~ csr_ctl[WB][CSR_EXCP];
 assign csr_raddr = csr_num[WB];
@@ -1397,14 +1407,14 @@ csr u_csr(
     .waddr_i         (csr_waddr    ),
     .wdata_i         (csr_wdata_w  ),
     .wmask_i         (csr_mask[WB] ),
-    .excp_i          (excp_i       ),
+    .excp_i          (wb_excp      ),
     .excp_pc_i       (pc[WB]       ),
     .excp_ecode_i    (excp_ecode   ),
     .excp_esubcode_i (9'h0         ),
     .excp_badv_en_i  (excp_badv_en ),
     .excp_badv_i     (wb_excp_badv ),
-    .excp_tlb_i      (excp_i & excp_tlb),
-    .ertn_i          (ertn_i       ),
+    .excp_tlb_i      (wb_excp & excp_tlb),
+    .ertn_i          (wb_ertn      ),
     .hwi_i           (8'h0         ),
     .ipi_i           (1'b0         ),
     .tlb_we_i        (wb_tlb_commit),
