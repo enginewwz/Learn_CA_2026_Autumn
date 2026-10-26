@@ -292,7 +292,7 @@ wire        wb_fw_we;
 wire [ 4:0] wb_fw_dest;
 wire [31:0] wb_fw_data;
 // CSR-write-RF dependency: any in-flight stage writing the RF from CSR
-wire        csr_dep1, csr_dep2, csr_dep;
+reg         csr_dep;
 // sticky EX0/EX1 operand copies (replace the removed EX0/EX1 RF read ports)
 reg  [31:0] ex0_rdata1, ex0_rdata2;
 reg  [31:0] ex1_rdata1, ex1_rdata2;
@@ -882,17 +882,12 @@ assign fw_data_ex1 = alu_done_ex0_ex1 ? alu_result_ex0_ex1 : fw_data_ex1_r;
 
 // CSR-writes-RF dependency: detect the csrrd in EX0/EX1/MEM/WB.
 // CSR writes the RF at WB with no bypass, so ID waits for the write to land.
-assign csr_dep1 = (id_src1_used & (id_rf_raddr1 != 5'd0)) & (
-      (valid[EX0] & gr_we[EX0] & csr_ctl[EX0][CSR_WB] & (dest[EX0] == id_rf_raddr1))
-    | (valid[EX1] & gr_we[EX1] & csr_ctl[EX1][CSR_WB] & (dest[EX1] == id_rf_raddr1))
-    | (valid[MEM] & gr_we[MEM] & csr_ctl[MEM][CSR_WB] & (dest[MEM] == id_rf_raddr1))
-    | (valid[WB]  & gr_we[WB ] & csr_ctl[WB ][CSR_WB] & (dest[WB ] == id_rf_raddr1)));
-assign csr_dep2 = (id_src2_used & (id_rf_raddr2 != 5'd0)) & (
-      (valid[EX0] & gr_we[EX0] & csr_ctl[EX0][CSR_WB] & (dest[EX0] == id_rf_raddr2))
-    | (valid[EX1] & gr_we[EX1] & csr_ctl[EX1][CSR_WB] & (dest[EX1] == id_rf_raddr2))
-    | (valid[MEM] & gr_we[MEM] & csr_ctl[MEM][CSR_WB] & (dest[MEM] == id_rf_raddr2))
-    | (valid[WB]  & gr_we[WB ] & csr_ctl[WB ][CSR_WB] & (dest[WB ] == id_rf_raddr2)));
-assign csr_dep = csr_dep1 | csr_dep2;
+always @(posedge clk) begin
+    if (reset | flush[ID])                      csr_dep <= 1'b0;
+    else if (allow[EX0] & valid[ID] & ~ csr_dep & id_csr_ctl[CSR_WB])
+                                                csr_dep <= 1'b1;
+    else if (valid[WB] & csr_ctl[WB][CSR_WB])   csr_dep <= 1'b0;
+end
 
 // id_fw(dst): branch operands
 assign id_fw1_hit_ex0 = valid[EX0] & gr_we[EX0] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX0]);
@@ -903,7 +898,8 @@ assign id_fw1_hit_csr = rf_we_csr & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_
 
 assign id_fw1_pending = (id_fw1_sel_ex0 & ~ fw_valid_ex0)
                       | (id_fw1_sel_ex1 & ~ fw_valid_ex1)
-                      | (id_fw1_sel_mem & ~ fw_valid_mem);
+                      | (id_fw1_sel_mem & ~ fw_valid_mem)
+                      | csr_dep;
 
 assign id_fw1_sel_ex0 = id_fw1_hit_ex0;
 assign id_fw1_sel_ex1 = ~ id_fw1_hit_ex0 & id_fw1_hit_ex1;
@@ -923,7 +919,8 @@ assign id_fw2_hit_csr = rf_we_csr & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_
 
 assign id_fw2_pending = (id_fw2_sel_ex0 & ~ fw_valid_ex0)
                       | (id_fw2_sel_ex1 & ~ fw_valid_ex1)
-                      | (id_fw2_sel_mem & ~ fw_valid_mem);
+                      | (id_fw2_sel_mem & ~ fw_valid_mem)
+                      | csr_dep;
 
 assign id_fw2_sel_ex0 = id_fw2_hit_ex0;
 assign id_fw2_sel_ex1 = ~ id_fw2_hit_ex0 & id_fw2_hit_ex1;
@@ -1051,7 +1048,6 @@ assign ex0_fw_pending = ex0_fw1_pending | ex0_fw2_pending;
 
 assign ex0_src1 = src1_is_pc_ex0  ? pc[EX0] : ex0_fw1_data;
 assign ex0_src2 = src2_is_imm_ex0 ? imm_ex0 : ex0_fw2_data;
-
 
 // div handshake
 assign div_is_signed   = md_op_ex0[DIV_W] | md_op_ex0[MOD_W];

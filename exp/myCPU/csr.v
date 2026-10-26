@@ -579,8 +579,8 @@ assign crmd_plv_o = crmd_plv;
 assign crmd_ie_o  = crmd_ie_nxt;
 
 // nextpc is stored when entering if
-assign eentry_o   = {eentry_va_nxt, 6'b0};
-assign era_o      = era_sw;
+assign eentry_o   = {eentry_va, 6'b0};
+assign era_o      = era;
 assign timer_o    = timer;
 
 assign int_o      = (| (ecfg_lie & estat_is)) & crmd_ie;
