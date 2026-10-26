@@ -3,7 +3,7 @@ module mmu(
     input  wire        reset,
 
     // CPU side: fetch
-    input  wire        if_req,          // = inst_req: a legal fetch address is on if_va
+    input  wire        if_pre,          // = inst_req: a legal fetch address is on if_va
     input  wire [31:0] if_va,           // = pc[IF]: the address taken at the last edge
     input  wire        if_allow,        // = allow[IF]: pc[IF] <- nextpc at this edge
     output wire        if_pending,      // -> stall[IF]
@@ -11,7 +11,6 @@ module mmu(
 
     // CPU side: load / store
     input  wire        mem_pre,         // premem_req: the access arrives in MEM at this edge
-    input  wire        mem_req,         // the MEM slot holds a real access
     input  wire [31:0] mem_va,          // = result[MEM]
     input  wire [ 3:0] mem_wstrb,       // byte strobes; 4'b0 = read
     input  wire [31:0] mem_stdata,      // store data, already spread over the byte lanes
@@ -118,7 +117,7 @@ assign bridge_data_addr = mem_addr;
 // fetch path
 assign if_live = ~ if_state[idle];
 assign if_done = if_state[bri_acc] & ~ bridge_if_pending;
-assign if_take = if_req & if_allow;
+assign if_take = if_pre & if_allow;
 
 assign if_pending = if_live & ~ if_done;
 
@@ -148,7 +147,7 @@ assign bridge_if_flush = if_abort;
 
 // mem path
 assign mem_live  = ~ mem_state[idle];
-assign mem_take  = (mem_pre & mem_allow) | mem_req;
+assign mem_take  = mem_pre & mem_allow;
 assign mem_done  = mem_state[bri_acc] & ~ bridge_mem_pending;   // write: taken; read: data back
 
 assign mem_pending       = mem_live & ~ mem_done & ~ mem_abort;

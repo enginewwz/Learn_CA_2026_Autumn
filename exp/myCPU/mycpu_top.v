@@ -60,15 +60,14 @@ wire clk    = aclk;
 wire resetn = aresetn;
 
 // mmu: the fetch / memory-access stage controller.
-wire        if_req;          // the IF stage has a word to fetch at pc[IF]
+wire        preif_req;         // a fetch enters IF
 wire [31:0] inst_rdata;        // returns after an arbitrary latency
-wire        mem_req;           // the MEM slot holds a real access
+wire        premem_req;        // a load / store in EX1 that enters MEM at this edge
 wire [31:0] mem_va;            // its virtual address (= result[MEM])
 wire        mem_abort;         // this access has been found illegal
 wire [ 3:0] mem_wstrb;         // byte strobes; 4'b0 means read
 wire [31:0] mem_stdata;        // store data, already spread over the byte lanes
 wire [31:0] mem_rdata;
-wire        premem_req;        // a load / store in EX1 that enters MEM at this edge
 wire        if_pending;        // from the mmu: this fetch should wait
 wire        mem_pending;       // from the mmu: this access should wait
 
@@ -367,7 +366,7 @@ wire [31:0] rf_rdata1_ex0, rf_rdata2_ex0;
 wire [31:0] rf_rdata1_ex1, rf_rdata2_ex1;
 
 // the top of the branch compare
-wire        sel_era, sel_eentry, sel_crmd, sel_br, sel_seq;
+wire        sel_era, sel_eentry, sel_crmd, sel_br, sel_cur_br, sel_seq;
 
 // ID decode helpers
 wire [ 5:0] op_31_26;
@@ -445,13 +444,14 @@ assign sel_era      = wb_ertn;
 assign sel_eentry   = wb_excp;
 assign sel_crmd     = ~ wb_excp_ertn & wb_crmd_tlb;
 assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb & br_reg;
+assign sel_cur_br   = ~ wb_excp_ertn & ~ wb_crmd_tlb & ~ br_reg & br_taken_id;
 assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb | br_reg | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{sel_eentry }} & excp_entry  ) |
                       ({32{sel_crmd   }} & (pc[WB] + 32'h4)) |
                       ({32{sel_br     }} & br_pc_reg   ) |
-                      ({32{br_taken_id}} & br_target_id) |
+                      ({32{sel_cur_br }} & br_target_id) |
                       ({32{sel_seq    }} & seq_pc      );
 
 assign br_redirect = br_taken_id | wb_excp_ertn | wb_crmd_tlb;
@@ -553,7 +553,7 @@ end
 
 // preif
 assign preif_adef  = | nextpc[1:0];
-assign if_req      = ~ preif_adef;
+assign preif_req   = ~ preif_adef;
 
 // IF
 assign if_excp_cause = excp_cause[IF] | if_fetch_cause;
@@ -831,7 +831,7 @@ assign id_br_offs    = (inst_b | inst_bl) ? br_offs_i26 : br_offs_i16;
 assign id_br_fw_needed = inst_beq | inst_bne | inst_blt | inst_bge
                        | inst_bltu | inst_bgeu | inst_jirl;
 assign id_fw_pending = id_fw1_pending | id_fw2_pending;
-assign id_br_valid   = cur_valid[ID] & ~ id_br_sent & ~ id_fw_pending;
+assign id_br_valid   = valid[ID] & ~ id_br_sent & ~ id_fw_pending;
 
 always @(posedge clk) begin
     if (reset)                  id_br_sent <= 1'b0;
@@ -1175,7 +1175,6 @@ always @(posedge clk) begin
 end
 
 // MEM
-assign mem_req   = cur_valid[MEM] & mem_en[MEM];
 assign mem_va    = result[MEM];
 assign mem_abort = mem_excp | flush[MEM];
 
@@ -1497,14 +1496,13 @@ mmu u_mmu(
     .clk            (clk            ),
     .reset          (reset          ),
 
-    .if_req         (if_req         ),
+    .if_pre         (preif_req      ),
     .if_va          (pc[IF]         ),
     .if_allow       (allow[IF]      ),
     .if_pending     (if_pending     ),
     .if_rdata       (inst_rdata     ),
 
     .mem_pre        (premem_req     ),
-    .mem_req        (mem_req        ),
     .mem_va         (mem_va         ),
     .mem_wstrb      (mem_wstrb      ),
     .mem_stdata     (mem_stdata     ),
