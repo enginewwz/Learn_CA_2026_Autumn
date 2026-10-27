@@ -120,8 +120,7 @@ localparam [13:0] CSR_DMW1    = 14'h181;
 // EUEN (0x02) / CPUID (0x20) and anything else read 0 and ignore writes
 
 // masked software write of one field: take wdata on the selected bits
-`define CSR_FIELD(sel, cur, val, msk) \
-    ((sel) ? (((val) & (msk)) | ((cur) & ~(msk))) : (cur))
+`define CSR_FIELD(sel, cur, val, msk) ((sel) ? (((val) & (msk)) | ((cur) & ~(msk))) : (cur))
 
 // definitions
 

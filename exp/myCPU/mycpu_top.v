@@ -838,14 +838,13 @@ always @(posedge clk) begin
                            fw_valid_ex <= 1'b1;
 end
 
-assign fw_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB]
-                     & ~ mul_pos[MEM] & ~ div_pos[MEM];
+assign fw_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB] & ~ mul_pos[MEM] & ~ div_pos[MEM];
 
 always @(posedge clk) begin
     fw_data_ex <= ex_result;
 end
 
-assign fw_data_mem = result_mem;
+assign fw_data_mem = alu_result_mem;
 
 // CSR-writes-RF dependency: detect the csrrd in EX/MEM/WB.
 // CSR writes the RF at WB with no bypass, so ID waits for the write to land.
