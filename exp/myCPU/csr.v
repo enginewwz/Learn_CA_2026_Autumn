@@ -249,7 +249,7 @@ wire [31:0] dmw0_wmsk, dmw1_wmsk;
 
 // SAVE0..3
 reg  [31:0] save     [0:3];
-reg  [31:0] save_nxt [0:3];
+wire [31:0] save_nxt [0:3];
 genvar      si;
 
 wire        wr_save;
