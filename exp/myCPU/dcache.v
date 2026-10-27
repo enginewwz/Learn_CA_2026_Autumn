@@ -52,6 +52,7 @@ module dcache(
 
     // refill
     input  wire         refill_we,
+    input  wire         refill_dirty,   // d bit stored with the line
     input  wire [127:0] refill_data
 );
 
@@ -156,7 +157,7 @@ assign cacop_we_way [0] = cacop_en & (cacop_code[1] ? hit_way[0] : 1'b1);
 assign cacop_we_way [1] = cacop_en & (cacop_code[1] ? hit_way[1] : 1'b1);
 
 assign cacop_tagvd_data  = 22'b0;                           // invalidate: clear tag/v/d
-assign refill_tagvd_data = {pt, 2'b10};                     // {tag, v=1, d=0}
+assign refill_tagvd_data = {pt, 1'b1, refill_dirty};         // {tag, v=1, d}
 assign write_tagvd_data  = {rtagvd_tag[write_sel], 2'b11};  // {tag, v=1, d=1}
 
 assign wtagvd_data = refill_we ? refill_tagvd_data

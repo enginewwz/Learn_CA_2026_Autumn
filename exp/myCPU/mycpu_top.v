@@ -1423,6 +1423,11 @@ mmu u_mmu(
     .mem_dmw_hit    (mem_dmw_hit    ),
     .mem_dmw_pa     (mem_dmw_pa     ),
 
+    .if_pre_addr    (nextpc         ),   // VIPT index, one cycle early
+    .mem_pre_addr   (ex_result      ),
+    .mem_cacop      (1'b0           ),   // TODO: cacop decode
+    .mem_cacop_code (5'b0           ),
+
     .arid           (arid           ),
     .araddr         (araddr         ),
     .arlen          (arlen          ),
