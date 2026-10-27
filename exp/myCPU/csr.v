@@ -250,7 +250,7 @@ wire [31:0] dmw0_wmsk, dmw1_wmsk;
 // SAVE0..3
 reg  [31:0] save     [0:3];
 reg  [31:0] save_nxt [0:3];
-integer     si;
+genvar      si;
 
 wire        wr_save;
 wire [ 1:0] save_sel;
@@ -425,11 +425,11 @@ assign wr_save  = we_i & (waddr_i[13:2] == CSR_SAVE_H);
 assign save_sel = waddr_i[1:0];
 assign save_w   = (wdata_i & wmask_i) | (save[save_sel] & ~wmask_i);
 
-always @(*) begin
-    for (si = 0; si < 4; si = si + 1) begin
-        save_nxt[si] = (wr_save & (save_sel == si[1:0])) ? save_w : save[si];
+generate
+    for (si = 0; si < 4; si = si + 1) begin: save_assign
+        assign save_nxt[si] = (wr_save & (save_sel == si[1:0])) ? save_w : save[si];
     end
-end
+endgenerate
 
 // ECFG
 assign ecfg_lie_msk = wmask_i[12:0] & 13'h1bff;
