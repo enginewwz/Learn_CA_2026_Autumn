@@ -253,4 +253,129 @@ sram_axi_bridge u_bridge(
     .bready       (bready  )
 );
 
+//==============================================================================
+// caches
+//
+// VIPT: the low 12 bits (index + offset) are ready in the request cycle (va),
+// the physical tag (pt) arrives one cycle later from the tlb / dmw, so every
+// lookup costs two cycles: cycle 1 lookup, cycle 2 read_hit / read_data.
+//
+// TODO(FSM): drive the req / cacop / refill / write inputs below, and take the
+// CPU result from read_data instead of from the bridge.
+//==============================================================================
+
+//---------------------------------------------------------------- icache ----
+wire [ 11:0] ic_va;
+wire [ 19:0] ic_pt;
+wire         ic_read_req;
+wire         ic_read_hit;
+wire [ 31:0] ic_read_data;
+wire         ic_cacop_en;
+wire [  1:0] ic_cacop_code;
+wire         ic_refill_we;
+wire [127:0] ic_refill_data;
+
+assign ic_va = if_va  [11:0];       // index + offset, request cycle
+assign ic_pt = if_addr[31:12];      // physical tag, response cycle
+
+icache u_icache(
+    .clk         (clk            ),
+    .reset       (reset          ),
+    .va          (ic_va          ),
+    .pt          (ic_pt          ),
+    .read_req    (ic_read_req    ),
+    .read_hit    (ic_read_hit    ),
+    .read_data   (ic_read_data   ),
+    .cacop_en    (ic_cacop_en    ),
+    .cacop_code  (ic_cacop_code  ),
+    .refill_we   (ic_refill_we   ),
+    .refill_data (ic_refill_data )
+);
+
+//---------------------------------------------------------------- dcache ----
+wire [ 11:0] dc_va;
+wire [ 19:0] dc_pt;
+wire         dc_read_req;
+wire         dc_read_hit;
+wire [ 31:0] dc_read_data;
+wire         dc_d_way0;
+wire         dc_d_way1;
+wire         dc_lookup;
+wire [ 31:0] dc_pa_way0;
+wire [127:0] dc_data_way0;
+wire [ 31:0] dc_pa_way1;
+wire [127:0] dc_data_way1;
+wire         dc_replace_sel;
+wire         dc_write_req;
+wire [ 11:0] dc_write_va;
+wire         dc_write_sel;
+wire [ 31:0] dc_write_data;
+wire         dc_rw_conflict;
+wire         dc_cacop_en;
+wire [  1:0] dc_cacop_code;
+wire         dc_refill_we;
+wire [127:0] dc_refill_data;
+
+assign dc_va       = mem_va  [11:0];    // index + offset, request cycle
+assign dc_pt       = mem_addr[31:12];   // physical tag, response cycle
+assign dc_write_va = mem_va  [11:0];    // store: same address, second cycle
+
+dcache u_dcache(
+    .clk               (clk             ),
+    .reset             (reset           ),
+    .va                (dc_va           ),
+    .pt                (dc_pt           ),
+
+    .read_req          (dc_read_req     ),
+    .read_hit          (dc_read_hit     ),
+    .read_data         (dc_read_data    ),
+
+    .d_way0            (dc_d_way0       ),
+    .d_way1            (dc_d_way1       ),
+    .lookup            (dc_lookup       ),
+    .pa_way0           (dc_pa_way0      ),
+    .data_way0         (dc_data_way0    ),
+    .pa_way1           (dc_pa_way1      ),
+    .data_way1         (dc_data_way1    ),
+    .replace_sel       (dc_replace_sel  ),
+
+    .write_req         (dc_write_req    ),
+    .write_va          (dc_write_va     ),
+    .write_sel         (dc_write_sel    ),
+    .write_data        (dc_write_data   ),
+    .read_write_conflict(dc_rw_conflict ),
+
+    .cacop_en          (dc_cacop_en     ),
+    .cacop_code        (dc_cacop_code   ),
+
+    .refill_we         (dc_refill_we    ),
+    .refill_data       (dc_refill_data  )
+);
+
+//==============================================================================
+// TODO(FSM) -- what the new state machine has to do
+//
+// fetch (icache)
+//   ic_read_req is a one-cycle pulse; the answer (ic_read_hit / ic_read_data)
+//   comes the next cycle.  Miss: read 4 beats from the bridge, assemble
+//   ic_refill_data[127:0], pulse ic_refill_we (the cache picks the LRU way).
+//
+// mem (dcache)
+//   load : dc_read_req, next cycle dc_read_hit / dc_read_data.
+//   store: cycle 1 dc_read_req  -> dc_read_hit, dc_replace_sel, dc_data_wayN
+//          cycle 2 dc_write_req with dc_write_sel = dc_replace_sel and
+//                  dc_write_data = byte-merged word (dcache sets d)
+//   miss : dc_replace_sel is the victim way; if dc_d_wayN is set, pulse
+//          dc_lookup (full line appears in dc_data_wayN next cycle), write it
+//          back to dc_pa_wayN over the bridge, then pulse dc_refill_we.
+//
+// cacop
+//   pulse the matching *_cacop_en with *_cacop_code = code[4:3]; the hit form
+//   (code[4:3]=2) needs two cycles because read_hit is a cycle late.
+//
+// still open: if_rdata / mem_rdata are tied to the bridge below; switch them
+// to the cache outputs, and the bridge access size has to become a burst of 4
+// for a refill / write-back.
+//==============================================================================
+
 endmodule
