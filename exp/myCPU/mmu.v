@@ -250,7 +250,8 @@ assign cacop_wb      = ~ cacop_dc          ? 1'b0
 // the icache port is shared with the fetch: a refill write would spoil the read
 assign cacop_port_ok   = ~ cacop_ic | ~ ic_refill_we;
 assign cacop_lookup    = mem_state[tlb_acc] & mem_cacop & ~ cacop_looked & cacop_port_ok;
-assign cacop_act       = mem_state[tlb_acc] & mem_cacop &   cacop_looked & cacop_port_ok;
+assign cacop_act       = mem_state[tlb_acc] & mem_cacop &   cacop_looked & cacop_port_ok
+                       & ~ mem_abort;                           // a flushed cacop must not invalidate
 assign cacop_ic_in_mem = mem_state[tlb_acc] & cacop_ic;
 
 assign ic_cacop_en  = cacop_act & cacop_ic;
@@ -456,8 +457,8 @@ always @(*) begin
             end
             else if (mem_direct)                        next_mem_state = DIRECT_ACC; // uncached page
             else if (dc_read_hit) begin
-                if (~ dc_rw_conflict)                   next_mem_state = TLB_ACC;
-                else                                    next_mem_state = IDLE;       // lookup was dropped
+                if (~ dc_rw_conflict & mem_pre)          next_mem_state = TLB_ACC;
+                else                                     next_mem_state = IDLE;       // lookup was dropped
             end
             else if (should_write_back)                 next_mem_state = CACHE_LOOKUP;
             else                                        next_mem_state = MEM_READ;
@@ -604,7 +605,8 @@ assign dc_refill_data = dc_refill_merge;
 
 // on a read/write conflict the write still wins, only the pipelined lookup
 // is dropped (and mem_pending keeps the next access away for one cycle)
-assign dc_write_req = mem_state[tlb_acc] & ~ mem_cacop & ~ mem_direct & dc_read_hit
+// store hit.
+assign dc_write_req = mem_state[tlb_acc] & ~ mem_abort & ~ mem_cacop & ~ mem_direct & dc_read_hit
                     & (| mem_wstrb);                            // store hit
 
 // caches

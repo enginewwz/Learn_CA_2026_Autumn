@@ -108,17 +108,23 @@ assign write_bank  = write_va[3:2];
 assign last_index  = last_va[11:4];
 
 // read / write in the same cycle
-//   ok   : same line, different bank (different data RAMs, same tag address)
-//   stall: same bank, or different line while the tag still needs its d written
+//   ok   : same set, different bank -- the data RAMs are per bank, and the
+//          tagvd douta still holds this very set (only v/d change with a store)
+//   stall: different set -- the tagvd is a *single port* NO_CHANGE RAM, the
+//          store's tag write would swallow this cycle's lookup read and the
+//          next access would compare against another set's tags
+//   stall: same set, same bank -- one data RAM cannot be read and written
 // on conflict the write wins, the read is dropped (read_go = 0)
 assign same_index = (index == write_index);
 assign same_bank  = (va[3:2] == write_va[3:2]);
 assign need_d_we  = ~ rtagvd_d[write_sel];
 
-assign read_write_conflict = read_req & write_req & (same_bank | (~same_index & need_d_we));
+assign read_write_conflict = read_req & write_req & (~ same_index | same_bank);
 assign read_go = read_req & ~ read_write_conflict;
 
-// bank select
+// bank select.  A line lives in exactly one way: a lookup hits at most one way
+// and a refill only writes the LRU way of a miss, so for a store
+// write_sel == hit_way[1] and read_data may key off hit_way[0].
 assign rd_bank      = 4'b0001 << va[3:2];
 assign wr_way0      = write_req & ~ write_sel;
 assign wr_way1      = write_req &   write_sel;
