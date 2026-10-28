@@ -82,10 +82,10 @@ reg  [3:0] inst_state,      next_inst_state;
 reg  [3:0] mem_read_state,  next_mem_read_state;
 reg  [3:0] mem_write_state, next_mem_write_state;
 
-reg mem_write_entry_cycle;
 
 reg [31:0] inst_addr_r, rd_addr_r;
 reg [31:0] awaddr_r, wdata_r;
+reg [127:0] wdata128_r;   // whole line of a burst write, latched with the AW
 reg [ 3:0] wstrb_r;
 reg        inst_arprot0_r, mem_arprot0_r, awprot0_r;
 
@@ -97,6 +97,8 @@ reg  [ 1:0] icnt, mcnt;
 reg  [127:0] ibuf, mbuf;
 
 // write beat issue
+reg mem_write_entry_cycle;
+
 reg  [ 1:0] w_cnt;
 reg         aw_done, w_done;
 
@@ -113,7 +115,7 @@ wire        mem_r_fire;
 wire        inst_read_rsp_done;
 wire        mem_read_rsp_done;
 
-wire        aw_fire, w_fire;
+wire        aw_fire, w_fire, w_last_fire;
 wire        write_req_fire;
 wire        write_rsp_fire;
 wire        write_rsp_done;
@@ -177,6 +179,7 @@ always @(posedge clk) begin
     if (reset) begin
         awaddr_r  <= 32'b0;
         wdata_r   <= 32'b0;
+        wdata128_r<= 128'b0;
         wstrb_r   <= 4'b0;
         awprot0_r <= 1'b0;
         wr_line_r <= 1'b0;
@@ -184,6 +187,7 @@ always @(posedge clk) begin
     else if (mem_write_take) begin
         awaddr_r  <= data_addr;
         wdata_r   <= data_wdata[31:0];
+        wdata128_r<= data_wdata;
         wstrb_r   <= data_we;
         awprot0_r <= (crmd_plv == 2'b00);
         wr_line_r <= data_line;
@@ -227,11 +231,12 @@ assign awvalid = mem_write_state[req] & ~ aw_done;
 assign wvalid  = mem_write_state[req] & ~ w_done;
 assign wlast   = wvalid & (wr_line_r ? (w_cnt == 2'd3) : 1'b1);
 
-assign wdata   = wr_line_r ? data_wdata[32*w_cnt +: 32] : wdata_r;
+assign wdata   = wr_line_r ? wdata128_r[32*w_cnt +: 32] : wdata_r;
 assign wstrb   = wr_line_r ? 4'b1111 : wstrb_r;
 
 assign aw_fire = awvalid & awready;
 assign w_fire  = wvalid  & wready;
+assign w_last_fire = w_fire & (wr_line_r ? (w_cnt == 2'd3) : 1'b1);
 
 always @(posedge clk) begin
     if (reset | mem_write_take) begin
@@ -263,7 +268,7 @@ assign mem_read_rsp_done  = mem_r_fire      & rlast;
 assign read_req_fire  = arvalid & arready;
 assign read_rsp_fire  = rvalid & rready;
 
-assign write_req_fire = aw_done & w_done;
+assign write_req_fire = (aw_done | aw_fire) & (w_done | w_last_fire);
 assign write_rsp_fire = bvalid & bready;
 assign write_rsp_done = mem_write_state[rsp] & write_rsp_fire & (bid == mem_wid);
 assign write_slot_free = mem_write_state[ret] | write_rsp_done;
@@ -279,6 +284,11 @@ assign bready  = mem_write_state[rsp];
 assign inst_pending = ~ inst_state[ret] & ~ inst_read_rsp_done;
 assign mem_pending  = (~ mem_read_state[ret] & ~ mem_read_rsp_done)
                     | (~ mem_write_entry_cycle & ~ mem_write_state[ret]);
+
+always @(posedge clk) begin
+    if (mem_write_take) mem_write_entry_cycle <= 1'b1;
+    else mem_write_entry_cycle <= 1'b0;
+end
 
 // state machines
 always @(posedge clk) begin
@@ -364,21 +374,16 @@ always @(*) begin
         RSP: begin
             if (write_rsp_done) begin
                 if (mem_write_req) next_mem_write_state = REQ;
-                else next_mem_write_state = RET;
+                else               next_mem_write_state = RET;
             end
             else next_mem_write_state = RSP;
         end
         RET: begin
             if (mem_write_req) next_mem_write_state = REQ;
-            else next_mem_write_state = RET;
+            else               next_mem_write_state = RET;
         end
         default: next_mem_write_state = RET;
     endcase
-end
-
-always @(posedge clk) begin
-    if (mem_write_take) mem_write_entry_cycle <= 1'b1;
-    else mem_write_entry_cycle <= 1'b0;
 end
 
 endmodule

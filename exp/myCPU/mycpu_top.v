@@ -174,6 +174,7 @@ wire        id_src1_used, id_src2_used, id_res_from_mem;
 wire        id_mem_we, id_mem_en, id_mem_zext, id_gr_we;
 wire [ 2:0] id_mem_size;
 wire [ 4:0] id_dest, id_tlb_op, id_invtlb_op;
+wire [ 4:0] id_cacop_code;
 wire [13:0] id_csr_num;
 wire [ 8:0] id_csr_ctl;
 wire [12:0] id_excp_cause;
@@ -209,6 +210,8 @@ reg  [13:0] csr_num [WB:EX] /* verilator split_var */;
 reg  [ 8:0] csr_ctl [WB:EX] /* verilator split_var */;
 reg  [ 4:0] tlb_op [WB:EX] /* verilator split_var */;
 reg  [ 4:0] invtlb_op [WB:EX] /* verilator split_var */;
+reg         cacop [MEM:EX] /* verilator split_var */;
+reg  [ 4:0] cacop_code [MEM:EX] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:MEM] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:MEM] /* verilator split_var */;
 reg  [12:0] excp_cause [WB:IF] /* verilator split_var */;
@@ -244,9 +247,10 @@ wire [12:0] mem_excp_cause;
 reg         wb_excp_ertn;
 reg         wb_excp;
 reg         wb_ertn;
-reg         wb_crmd_tlb;
-wire        mem_crmd_tlb;
+reg         wb_crmd_tlb_cacop;
+wire        mem_crmd_tlb_cacop;
 wire        mem_tlb;
+wire        mem_cacop_ic;
 wire [ 5:0] excp_ecode;
 wire        excp_badv_en;
 reg  [31:0] wb_excp_badv;
@@ -254,6 +258,11 @@ reg  [31:0] wb_excp_badv;
 // TLB / DMW translation and the exceptions it can raise
 wire        map_mode;
 wire        if_xlat, mem_xlat;
+wire        inst_cacop;
+wire        mem_cacop;
+wire [ 4:0] mem_cacop_code;
+wire [ 1:0] if_mat, mem_mat;
+wire [ 1:0] tlb_s0_mat, tlb_s1_mat;
 wire        if_dmw_hit, mem_dmw_hit;
 wire [31:0] if_dmw_pa, mem_dmw_pa;
 wire        dmw0_hit_if, dmw1_hit_if, dmw0_hit_mem, dmw1_hit_mem;
@@ -347,7 +356,7 @@ wire [ 4:0] rf_waddr;
 wire [31:0] rf_wdata, rf_wdata_csr;
 
 // the top of the branch compare
-wire        sel_era, sel_eentry, sel_crmd, sel_br, sel_cur_br, sel_seq;
+wire        sel_era, sel_eentry, sel_wb_seq, sel_br, sel_cur_br, sel_seq;
 
 // ID decode helpers
 wire [ 5:0] op_31_26;
@@ -423,19 +432,19 @@ assign seq_pc       = pc[IF] + 32'h4;
 
 assign sel_era      = wb_ertn;
 assign sel_eentry   = wb_excp;
-assign sel_crmd     = ~ wb_excp_ertn & wb_crmd_tlb;
-assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb & br_reg;
-assign sel_cur_br   = ~ wb_excp_ertn & ~ wb_crmd_tlb & ~ br_reg & br_taken_id;
-assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb | br_reg | br_taken_id);
+assign sel_wb_seq   = ~ wb_excp_ertn & wb_crmd_tlb_cacop;
+assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & br_reg;
+assign sel_cur_br   = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & ~ br_reg & br_taken_id;
+assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb_cacop | br_reg | br_taken_id);
 
 assign nextpc       = ({32{sel_era    }} & era_o       ) |
                       ({32{sel_eentry }} & excp_entry  ) |
-                      ({32{sel_crmd   }} & (pc[WB] + 32'h4)) |
+                      ({32{sel_wb_seq }} & (pc[WB] + 32'h4)) |
                       ({32{sel_br     }} & br_pc_reg   ) |
                       ({32{sel_cur_br }} & br_target_id) |
                       ({32{sel_seq    }} & seq_pc      );
 
-assign br_redirect = br_taken_id | wb_excp_ertn | wb_crmd_tlb;
+assign br_redirect = br_taken_id | wb_excp_ertn | wb_crmd_tlb_cacop;
 
 always @(posedge clk) begin
     if (reset) begin
@@ -648,6 +657,11 @@ assign inst_tlbfill = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h
 assign inst_invtlb  = op_31_26_d[6'h01] & inst[25] & ~ inst[24] & op_19_15_d[5'h13];
 assign inst_tlb_any = inst_tlbsrch | inst_tlbrd | inst_tlbwr | inst_tlbfill | inst_invtlb;
 
+// cacop code, rj, si12  (opcode 0000 0110 00; code[2:0]: 0 icache / 1 dcache,
+// code[4:3]: 0 store tag / 1 index invalidate / 2 hit invalidate)
+assign inst_cacop    = op_31_26_d[6'h01] & op_25_22_d[4'h8];
+assign id_cacop_code = inst[4:0];
+
 assign inst_syscall = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h16];
 assign inst_break   = op_31_26_d[6'h00] & op_25_22_d[4'h0] & op_21_20_d[2'h2] & op_19_15_d[5'h14];
 
@@ -671,7 +685,7 @@ assign inst_ine = ~ (inst_lu12i_w | inst_add_w | inst_sub_w | inst_slt | inst_sl
                    | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
                    | inst_st_b | inst_st_h
                    | inst_csr_any | inst_ertn | inst_syscall | inst_break | inst_idle
-                   | inst_tlb_any
+                   | inst_tlb_any | inst_cacop
                    | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid);
 
 assign id_src1_used = inst_add_w | inst_sub_w | inst_slt | inst_sltu
@@ -686,7 +700,7 @@ assign id_src1_used = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
                   | inst_st_b | inst_st_h
                   | inst_csrxchg
-                  | inst_invtlb;
+                  | inst_invtlb | inst_cacop;
 assign id_src2_used = inst_add_w | inst_sub_w | inst_slt | inst_sltu
                   | inst_and | inst_or | inst_nor | inst_xor
                   | inst_st_w | inst_beq | inst_bne
@@ -701,7 +715,8 @@ assign id_src2_used = inst_add_w | inst_sub_w | inst_slt | inst_sltu
 assign id_alu_op[ 0] = inst_add_w | inst_addi_w | inst_ld_w | inst_st_w
                   | inst_jirl | inst_bl | inst_pcaddu12i
                   | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
-                  | inst_st_b | inst_st_h;
+                  | inst_st_b | inst_st_h
+                  | inst_cacop;                            // cacop address = rj + si12
 assign id_alu_op[ 1] = inst_sub_w;
 assign id_alu_op[ 2] = inst_slt | inst_slti;
 assign id_alu_op[ 3] = inst_sltu | inst_sltui;
@@ -732,7 +747,10 @@ assign id_mem_zext     = inst_ld_bu | inst_ld_hu;
 
 assign id_csr_num = inst_rdcntid ? 14'h040 : inst[23:10];
 assign id_excp_cause = excp_cause[ID] | excp_cause_id;
-assign id_csr_ctl[CSR_PRIV] = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any;
+// hit-class cacop (code[4:3]=2, i.e. 0x10 / 0x11) is allowed at PLV3, every
+// other cacop is privileged
+assign id_csr_ctl[CSR_PRIV] = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any
+                            | (inst_cacop & ~ (inst[4] & ~ inst[3]));
 assign id_tlb_op = {inst_invtlb, inst_tlbfill, inst_tlbwr, inst_tlbrd, inst_tlbsrch};
 assign id_csr_ctl[CSR_RD] = inst_csrrd | inst_csrwr | inst_csrxchg;
 assign id_csr_ctl[CSR_WE] = inst_csrwr | inst_csrxchg;
@@ -764,7 +782,7 @@ assign id_gr_we = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
               & ~inst_st_b & ~inst_st_h
               & ~inst_blt & ~inst_bge & ~inst_bltu & ~inst_bgeu
               & ~inst_ertn & ~inst_syscall & ~inst_break & ~inst_idle
-              & ~inst_tlb_any;
+              & ~inst_tlb_any & ~inst_cacop;
 assign id_dest = inst_bl ? 5'd1 : rd;
 
 assign need_ui12  = inst_andi | inst_ori | inst_xori;
@@ -791,7 +809,7 @@ assign id_src2_is_imm = inst_slli_w | inst_srli_w | inst_srai_w
                       | inst_ld_b | inst_ld_h | inst_ld_bu | inst_ld_hu
                       | inst_st_b | inst_st_h
                       | inst_lu12i_w | inst_pcaddu12i
-                      | inst_jirl | inst_bl;
+                      | inst_jirl | inst_bl | inst_cacop;
 
 assign id_rf_raddr1 = rj;
 assign id_rf_raddr2 = src_reg_is_rd ? rd : rk;
@@ -908,6 +926,8 @@ always @(posedge clk) begin
         csr_ctl[EX]      <= id_csr_ctl;
         tlb_op[EX]       <= id_tlb_op;
         invtlb_op[EX]    <= id_invtlb_op;
+        cacop[EX]        <= inst_cacop;
+        cacop_code[EX]   <= id_cacop_code;
         excp_cause[EX]   <= id_excp_cause;
     end
 end
@@ -929,6 +949,8 @@ always @(posedge clk) begin
         csr_ctl[MEM]      <= premem_csr_ctl;
         tlb_op[MEM]       <= tlb_op[EX];
         invtlb_op[MEM]    <= invtlb_op[EX];
+        cacop[MEM]        <= cacop[EX];
+        cacop_code[MEM]   <= cacop_code[EX];
         excp_cause[MEM]   <= premem_excp_cause;
         csr_wdata[MEM]    <= ex_csr_wdata;
         csr_mask[MEM]     <= ex_csr_mask;
@@ -1073,10 +1095,14 @@ assign premem_csr_ctl   = csr_ctl[EX] | (premem_excp ? (9'h1 << CSR_EXCP) : 9'h0
 assign premem_excp_cause = excp_cause[EX]
                          | (premem_ale ? (13'h1 << EXCP_ALE) : 13'h0)
                          | (premem_int_take ? (13'h1 << EXCP_INT) : 13'h0);
-assign premem_req   = cur_valid[EX] & mem_en[EX] & ~ premem_excp;
+assign premem_req   = cur_valid[EX] & (mem_en[EX] | cacop[EX]) & ~ premem_excp;
 
 // MEM: the address / byte lanes / store data were all computed in EX
 assign mem_va    = alu_result_mem;
+
+// cacop: no translation, the address is used as a physical address by the mmu
+assign mem_cacop        = cacop[MEM] & valid[MEM] & ~ mem_excp;
+assign mem_cacop_code   = cacop_code[MEM];
 assign mem_abort = mem_excp | flush[MEM];
 
 assign mem_byte = mem_size[MEM][SIZE_BYTE];
@@ -1122,17 +1148,19 @@ assign mem_map_wr   = csr_ctl[MEM][CSR_WE] & (csr_num[MEM] == CSR_CRMD
                                             | csr_num[MEM] == CSR_DMW1
                                             | csr_num[MEM] == CSR_ASID);
 
-assign mem_crmd_tlb = mem_map_wr | mem_tlb;
+assign mem_cacop_ic = mem_cacop & (cacop_code[MEM][2:0] == 3'd0) & allow[MEM];
+
+assign mem_crmd_tlb_cacop = mem_map_wr | mem_tlb | mem_cacop_ic;
 
 always @(posedge clk) begin
     if (reset) begin
-        wb_crmd_tlb     <= 1'b0;
+        wb_crmd_tlb_cacop     <= 1'b0;
         wb_excp         <= 1'b0;
         wb_ertn         <= 1'b0;
         wb_excp_ertn    <= 1'b0;
     end
     else begin
-        wb_crmd_tlb <= mem_crmd_tlb & cur_valid[MEM];
+        wb_crmd_tlb_cacop <= mem_crmd_tlb_cacop & cur_valid[MEM];
         wb_excp     <= mem_excp & cur_valid[MEM];
         wb_ertn     <= csr_ctl[MEM][CSR_ERTN] & ~ mem_excp & cur_valid[MEM];
         wb_excp_ertn<= (csr_ctl[MEM][CSR_ERTN] | mem_excp) & cur_valid[MEM];
@@ -1140,7 +1168,7 @@ always @(posedge clk) begin
 end
 
 // WB
-assign wb_flush = wb_excp_ertn | wb_crmd_tlb;
+assign wb_flush = wb_excp_ertn | wb_crmd_tlb_cacop;
 
 assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP] && ~ csr_ctl[WB][CSR_WB];
 assign rf_waddr = dest[WB];
@@ -1163,7 +1191,6 @@ assign rf_wdata_csr = csr_ctl[WB][CSR_RD]      ? csr_rdata      :
                                                  csr_rdata;
 
 assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
-                       excp_cause[WB][EXCP_IPE]  ? 6'he :
                        excp_cause[WB][EXCP_ALE]  ? 6'h9 :
                        excp_cause[WB][EXCP_ADEF] ? 6'h8 :
                        excp_cause[WB][EXCP_TLBR] ? 6'h3f :
@@ -1172,6 +1199,7 @@ assign excp_ecode    = excp_cause[WB][EXCP_INT]  ? 6'h0 :
                        excp_cause[WB][EXCP_PIS]  ? 6'h2 :
                        excp_cause[WB][EXCP_PPI]  ? 6'h7 :
                        excp_cause[WB][EXCP_PME]  ? 6'h4 :
+                       excp_cause[WB][EXCP_IPE]  ? 6'he :
                        excp_cause[WB][EXCP_INE]  ? 6'hd :
                        excp_cause[WB][EXCP_BRK]  ? 6'hc :
                                                    6'hb;
@@ -1207,6 +1235,12 @@ assign dmw1_hit_if  = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) 
 assign dmw0_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw0_o[0] : dmw0_o[3]) & (alu_result_mem[31:29] == dmw0_o[31:29]);
 assign dmw1_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) & (alu_result_mem[31:29] == dmw1_o[31:29]);
 
+// MAT of the access: the dmw window wins, otherwise the tlb entry decides
+assign if_mat  = if_dmw_hit  ? (dmw0_hit_if  ? dmw0_o[5:4] : dmw1_o[5:4])
+                             : (if_xlat  ? tlb_s0_mat : 2'b01);
+assign mem_mat = mem_dmw_hit ? (dmw0_hit_mem ? dmw0_o[5:4] : dmw1_o[5:4])
+                             : (mem_xlat ? tlb_s1_mat : 2'b01);
+
 assign if_dmw_hit  = dmw0_hit_if  | dmw1_hit_if;
 assign mem_dmw_hit = dmw0_hit_mem | dmw1_hit_mem;
 assign if_dmw_pa   = {(dmw0_hit_if  ? dmw0_o[27:25] : dmw1_o[27:25]), pc[IF][28:0]};
@@ -1221,7 +1255,10 @@ assign if_fetch_cause = (if_xlat | (~ if_dmw_hit & map_mode)) ?
                          (map_mode & ~ if_dmw_hit & (crmd_plv_o > tlb_s0_plv))  ? (13'h1 << EXCP_PPI ) : 13'h0)
                         : 13'h0;
 
-assign mem_tlb_chk = valid[MEM] & mem_en[MEM] & ~ csr_ctl[MEM][CSR_EXCP];
+// a hit-class cacop (code[4:3]=2) is translated like a load, so it may raise
+// the tlb exceptions; store-tag / index invalidate use the va as it is
+assign mem_tlb_chk = valid[MEM] & (mem_en[MEM] | (cacop[MEM] & cacop_code[MEM][4]))
+                   & ~ csr_ctl[MEM][CSR_EXCP];
 assign mem_tlb_cause = ({13{mem_tlb_chk}} &
                         ((map_mode & ~ mem_dmw_hit & ~ tlb_s1_found)            ? (13'h1 << EXCP_TLBR) :
                         (map_mode & ~ mem_dmw_hit & ~ tlb_s1_v)                 ? (13'h1 << (mem_we[MEM] ? EXCP_PIS : EXCP_PIL)) :
@@ -1256,7 +1293,7 @@ tlb u_tlb(
     .s0_ppn       (tlb_s0_ppn     ),
     .s0_ps        (tlb_s0_ps      ),
     .s0_plv       (tlb_s0_plv     ),
-    .s0_mat       (               ),
+    .s0_mat       (tlb_s0_mat      ),
     .s0_d         (               ),
     .s0_v         (tlb_s0_v       ),
 
@@ -1268,7 +1305,7 @@ tlb u_tlb(
     .s1_ppn       (tlb_s1_ppn     ),
     .s1_ps        (tlb_s1_ps      ),
     .s1_plv       (tlb_s1_plv     ),
-    .s1_mat       (               ),
+    .s1_mat       (tlb_s1_mat      ),
     .s1_d         (tlb_s1_d       ),
     .s1_v         (tlb_s1_v       ),
 
@@ -1423,10 +1460,12 @@ mmu u_mmu(
     .mem_dmw_hit    (mem_dmw_hit    ),
     .mem_dmw_pa     (mem_dmw_pa     ),
 
-    .if_pre_addr    (nextpc         ),   // VIPT index, one cycle early
-    .mem_pre_addr   (ex_result      ),
-    .mem_cacop      (1'b0           ),   // TODO: cacop decode
-    .mem_cacop_code (5'b0           ),
+    .if_pre_addr        (nextpc             ),   // VIPT index, one cycle early
+    .mem_pre_addr       (ex_result          ),
+    .mem_cacop          (mem_cacop          ),
+    .mem_cacop_code     (mem_cacop_code     ),
+    .if_mat             (if_mat             ),
+    .mem_mat            (mem_mat            ),
 
     .arid           (arid           ),
     .araddr         (araddr         ),

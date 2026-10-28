@@ -6,13 +6,14 @@ module icache(
     input  wire [19:0]  pt,     // should expand if it is runing at 4MB mode
 
     // read
-    input  wire         read_req,
+    input  wire         read_req,   // issue a lookup, data is valid one cycle later
+    input  wire         read_use,   // this cycle consumes the previous lookup's result
     output wire         read_hit,
     output wire [31:0]  read_data,
 
     // cacop
     input  wire         cacop_en,
-    input  wire [1:0]   cacop_code,     // ignore dirty
+    input  wire         cacop_hit,      // 1 = hit invalidate, 0 = direct index
 
     // refill
     input  wire         refill_we,
@@ -32,6 +33,7 @@ wire rtagvd_v [1:0];
 wire rtagvd_d [1:0];    // not used
 
 wire cacop_we_way [1:0];
+wire cacop_way0, cacop_way1;
 wire [21:0] cacop_tagvd_data;
 
 wire refill_we_way [1:0];
@@ -39,14 +41,13 @@ wire [21:0] refill_tagvd_data;
 
 wire [21:0] wtagvd_data;
 
-reg last_read_req;
 wire [ 7:0] last_index;
 reg [255:0] lru_table;
 reg  [11:0] last_va;
 
 assign en = read_req | cacop_en | refill_we;
 
-assign index = va[11:4];
+assign index      = va[11:4];
 assign last_index = last_va[11:4];
 
 genvar i;
@@ -76,8 +77,13 @@ assign hit_way[1] = (rtagvd_tag[1] == pt) & rtagvd_v[1];
 assign read_hit = hit_way[0] | hit_way[1];
 assign read_data = hit_way[0] ? rdata_way_word[0] : rdata_way_word [1];
 
-assign cacop_we_way [0] = cacop_en & (cacop_code[1] ? hit_way[0] : 1'b1);
-assign cacop_we_way [1] = cacop_en & (cacop_code[1] ? hit_way[1] : 1'b1);
+// direct index addressing: way = VA[Way-1:0], i.e. VA[0] for the two ways;
+// hit invalidate instead picks the way whose tag matches
+assign cacop_way0 = ~ va[0];
+assign cacop_way1 =   va[0];
+
+assign cacop_we_way [0] = cacop_en & (cacop_hit ? hit_way[0] : cacop_way0);
+assign cacop_we_way [1] = cacop_en & (cacop_hit ? hit_way[1] : cacop_way1);
 
 assign cacop_tagvd_data = 22'b0;
 assign refill_tagvd_data = {pt, 2'b10};
@@ -90,14 +96,15 @@ assign refill_we_way[1] = refill_we & lru_table[index];
 assign tag_we_way[0] = cacop_we_way[0] | refill_we_way[0];
 assign tag_we_way[1] = cacop_we_way[1] | refill_we_way[1];
 
+// the lookup address / offset of the access whose response is consumed this cycle
 always @(posedge clk) begin
-    last_read_req <= read_req;
-    last_va <= va;
+    if (read_req) last_va <= va;
 end
 
+// LRU: only the access that consumes its lookup result may touch it
 always @(posedge clk) begin
     if (reset)                          lru_table <= 256'b0;
-    else if (last_read_req & read_hit)  lru_table[last_index] <= hit_way[0];
+    else if (read_use & read_hit)       lru_table[last_index] <= hit_way[0];
     else if (refill_we)                 lru_table[index] <= ~ lru_table[index];
 end
 
