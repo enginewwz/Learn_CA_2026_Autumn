@@ -425,6 +425,7 @@ wire [ 9:0] asid_o;
 wire [31:0] tlbrentry_o;
 wire [ 5:0] estat_ecode_o;
 wire        crmd_da_o, crmd_pg_o;
+wire [ 1:0] crmd_datf_o, crmd_datm_o;
 
 
 // redirect logic
@@ -1235,11 +1236,17 @@ assign dmw1_hit_if  = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) 
 assign dmw0_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw0_o[0] : dmw0_o[3]) & (alu_result_mem[31:29] == dmw0_o[31:29]);
 assign dmw1_hit_mem = map_mode & ((crmd_plv_o == 2'd0) ? dmw1_o[0] : dmw1_o[3]) & (alu_result_mem[31:29] == dmw1_o[31:29]);
 
-// MAT of the access: the dmw window wins, otherwise the tlb entry decides
+// MAT of the access: the dmw window wins, then the tlb entry, and when nothing
+// is translated (PG=0 or DA=1: the va *is* the pa) the CRMD DATF / DATM field
+// decides.  That last case is the one the func tests run in (CRMD=0x28:
+// DA=1, DATF=01 cached fetch, DATM=00 uncached data), and it is what makes the
+// confreg / UART window uncached -- without it those writes sit in the dcache.
 assign if_mat  = if_dmw_hit  ? (dmw0_hit_if  ? dmw0_o[5:4] : dmw1_o[5:4])
-                             : (if_xlat  ? tlb_s0_mat : 2'b01);
+                             : (if_xlat  ? tlb_s0_mat
+                                         : (map_mode ? 2'b01 : crmd_datf_o));
 assign mem_mat = mem_dmw_hit ? (dmw0_hit_mem ? dmw0_o[5:4] : dmw1_o[5:4])
-                             : (mem_xlat ? tlb_s1_mat : 2'b01);
+                             : (mem_xlat ? tlb_s1_mat
+                                         : (map_mode ? 2'b01 : crmd_datm_o));
 
 assign if_dmw_hit  = dmw0_hit_if  | dmw1_hit_if;
 assign mem_dmw_hit = dmw0_hit_mem | dmw1_hit_mem;
@@ -1393,6 +1400,8 @@ csr u_csr(
     .tlbrentry_o     (tlbrentry_o   ),
     .estat_ecode_o   (estat_ecode_o ),
     .crmd_da_o       (crmd_da_o     ),
+    .crmd_datf_o     (crmd_datf_o   ),
+    .crmd_datm_o     (crmd_datm_o   ),
     .crmd_pg_o       (crmd_pg_o     ),
 
     .crmd_plv_o      (crmd_plv_o   ),

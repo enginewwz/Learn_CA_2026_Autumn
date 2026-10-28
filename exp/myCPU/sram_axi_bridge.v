@@ -102,6 +102,14 @@ reg mem_write_entry_cycle;
 reg  [ 1:0] w_cnt;
 reg         aw_done, w_done;
 
+reg [31:0]  awaddr_c;
+reg [31:0]  wdata_c;
+reg [127:0] wdata128_c;
+reg [3:0]   wstrb_c;
+reg         awprot0_c, wr_line_c;
+
+reg         waw_req;
+
 wire        mem_read_req;
 wire        mem_write_req;
 
@@ -175,6 +183,33 @@ always @(posedge clk) begin
     end
 end
 
+wire w_capture = mem_write_req & (~ mem_write_take | waw_req);
+
+always @(posedge clk) begin
+    if (reset)               waw_req <= 1'b0;
+    else if (w_capture)      waw_req <= 1'b1;   // the capture holds a request
+    else if (mem_write_take) waw_req <= 1'b0;   // held request issued
+end
+
+always @(posedge clk) begin
+    if (reset) begin
+        awaddr_c  <= 32'b0;
+        wdata_c   <= 32'b0;
+        wdata128_c<= 128'b0;
+        wstrb_c   <= 4'b0;
+        awprot0_c <= 1'b0;
+        wr_line_c <= 1'b0;
+    end
+    else if (w_capture) begin
+        awaddr_c  <= data_addr;
+        wdata_c   <= data_wdata[31:0];
+        wdata128_c<= data_wdata;
+        wstrb_c   <= data_we;
+        awprot0_c <= (crmd_plv == 2'b00);
+        wr_line_c <= data_line;
+    end
+end
+
 always @(posedge clk) begin
     if (reset) begin
         awaddr_r  <= 32'b0;
@@ -185,12 +220,12 @@ always @(posedge clk) begin
         wr_line_r <= 1'b0;
     end
     else if (mem_write_take) begin
-        awaddr_r  <= data_addr;
-        wdata_r   <= data_wdata[31:0];
-        wdata128_r<= data_wdata;
-        wstrb_r   <= data_we;
-        awprot0_r <= (crmd_plv == 2'b00);
-        wr_line_r <= data_line;
+        awaddr_r  <= waw_req ? awaddr_c : data_addr;
+        wdata_r   <= waw_req ? wdata_c : data_wdata[31:0];
+        wdata128_r<= waw_req ? wdata128_c : data_wdata;
+        wstrb_r   <= waw_req ? wstrb_c : data_we;
+        awprot0_r <= waw_req ? awprot0_c : (crmd_plv == 2'b00);
+        wr_line_r <= waw_req ? wr_line_c : data_line;
     end
 end
 
@@ -260,7 +295,7 @@ assign mem_read_req  = data_req & ~| data_we;
 assign mem_write_req = data_req &  | data_we;
 
 assign mem_read_take  = mem_read_req  & mem_read_state[ret];
-assign mem_write_take = mem_write_req & write_slot_free;
+assign mem_write_take = (mem_write_req | waw_req) & write_slot_free;
 
 assign inst_read_rsp_done = inst_r_fire     & rlast;
 assign mem_read_rsp_done  = mem_r_fire      & rlast;
@@ -373,14 +408,14 @@ always @(*) begin
         end
         RSP: begin
             if (write_rsp_done) begin
-                if (mem_write_req) next_mem_write_state = REQ;
-                else               next_mem_write_state = RET;
+                if (mem_write_req | waw_req) next_mem_write_state = REQ;
+                else                         next_mem_write_state = RET;
             end
             else next_mem_write_state = RSP;
         end
         RET: begin
-            if (mem_write_req) next_mem_write_state = REQ;
-            else               next_mem_write_state = RET;
+            if (mem_write_req | waw_req) next_mem_write_state = REQ;
+            else                         next_mem_write_state = RET;
         end
         default: next_mem_write_state = RET;
     endcase

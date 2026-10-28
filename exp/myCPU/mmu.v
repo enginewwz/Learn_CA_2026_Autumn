@@ -190,10 +190,12 @@ wire         if_lu_now;
 // fetch lookups: IDLE starts the upcoming fetch, the other cycles start the
 // fetch after the current one (which enters IF next cycle)
 assign if_lu_now = (if_state[idle]         & if_take)
-               | (if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)) & if_take)
-               | (if_state[cache_refill] & if_take)
-               | (if_state[direct_acc]   & ~ bridge_if_pending & if_take);
-assign ic_read_req = if_lu_now & ~ cacop_ic_in_mem;
+                 | (if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)) & if_take)
+                 | (if_state[cache_refill] & if_take)
+                 | (if_state[direct_acc]   & ~ bridge_if_pending & if_take);
+
+assign ic_read_req = (if_lu_now & ~ cacop_ic_in_mem)
+                   | (cacop_lookup & cacop_ic);
 
 // address translation: dmw window > tlb entry > the va as it is
 assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
@@ -347,11 +349,11 @@ assign should_write_back = mem_cacop ? cacop_wb
 
 // the refilled line is written to the cache at the end of the last MEM_READ
 // cycle, so its data is available in CACHE_REFILL
-assign if_rdata  = if_state[direct_acc]   ? bridge_inst_rdata[31:0]
+assign if_rdata  = if_direct              ? bridge_inst_rdata[31:0]
                  : if_state[cache_refill] ? ic_refill_data[{if_va[3:2], 5'b0} +: 32]
                  : ic_read_hit            ? ic_read_data
                                           : ic_refill_data[{if_va[3:2], 5'b0} +: 32];
-assign mem_rdata = mem_state[direct_acc]  ? bridge_data_rdata[31:0]
+assign mem_rdata = mem_direct             ? bridge_data_rdata[31:0]
                  : mem_state[cache_refill] ? dc_refill_data[{mem_va[3:2], 5'b0} +: 32]
                  : dc_read_hit            ? dc_read_data
                                           : dc_refill_data[{mem_va[3:2], 5'b0} +: 32];

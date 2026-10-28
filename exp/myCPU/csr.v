@@ -80,6 +80,8 @@ module csr(
     output wire [ 5:0] estat_ecode_o,
     output wire        crmd_da_o,
     output wire        crmd_pg_o,
+    output wire [ 1:0] crmd_datf_o,     // crmd[6:5], cache attr of a fetch
+    output wire [ 1:0] crmd_datm_o,     // crmd[8:7], cache attr of a load/store
 
     // pipeline side-band
     output wire [ 1:0] crmd_plv_o,
@@ -595,6 +597,8 @@ assign tlbrentry_o    = {tlbrentry_pa, 6'b0};
 assign estat_ecode_o  = estat_ecode;
 assign crmd_da_o      = csr_crmd_da;
 assign crmd_pg_o      = csr_crmd_pg;
+assign crmd_datf_o    = csr_crmd_datf;
+assign crmd_datm_o    = csr_crmd_datm;
 assign dmw0_o         = dmw0;
 assign dmw1_o         = dmw1;
 
