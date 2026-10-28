@@ -194,8 +194,12 @@ assign if_lu_now = (if_state[idle]         & if_take)
                  | (if_state[cache_refill] & if_take)
                  | (if_state[direct_acc]   & ~ bridge_if_pending & if_take);
 
-assign ic_read_req = (if_lu_now & ~ cacop_ic_in_mem)
-                   | (cacop_lookup & cacop_ic);
+// an icache hit-invalidate compares the tag in phase 2, so the cacop has to
+// issue its own tag read in phase 1 (it owns the port in both phases).  It gets
+// its own port so read_req stays the fetch-only lookup -- last_va and the
+// registered LRU bit inside icache must not be touched by a cacop.
+assign ic_read_req     = if_lu_now & ~ cacop_ic_in_mem;
+assign ic_cacop_lookup = cacop_lookup & cacop_ic;
 
 // address translation: dmw window > tlb entry > the va as it is
 assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
@@ -603,7 +607,9 @@ assign dc_refill_merge = (mem_va[3:2] == 2'd0) ? {bridge_data_rdata[127: 32], dc
                        : (mem_va[3:2] == 2'd1) ? {bridge_data_rdata[127: 64], dc_refill_word, bridge_data_rdata[ 31: 0]}
                        : (mem_va[3:2] == 2'd2) ? {bridge_data_rdata[127: 96], dc_refill_word, bridge_data_rdata[ 63: 0]}
                                                : {dc_refill_word, bridge_data_rdata[ 95: 0]};
-assign dc_refill_data = dc_refill_merge;
+// only a store miss has bytes to merge into the line; a load miss is the memory
+// line itself, so it bypasses the 128-bit word-merge mux
+assign dc_refill_data = (| mem_wstrb) ? dc_refill_merge : bridge_data_rdata;
 
 // on a read/write conflict the write still wins, only the pipelined lookup
 // is dropped (and mem_pending keeps the next access away for one cycle)
@@ -621,6 +627,7 @@ icache u_icache(
     .read_use    (ic_read_use    ),
     .read_hit    (ic_read_hit    ),
     .read_data   (ic_read_data   ),
+    .cacop_lookup(ic_cacop_lookup),
     .cacop_en    (ic_cacop_en    ),
     .cacop_hit   (ic_cacop_hit   ),
     .refill_we   (ic_refill_we   ),

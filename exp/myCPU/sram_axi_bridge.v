@@ -253,12 +253,14 @@ always @(posedge clk) begin
     if (mem_r_fire) mbuf[mcnt*32 +: 32] <= rdata;
 end
 
-wire [127:0] ilane = 128'hffff_ffff << {icnt, 5'b0};
-wire [127:0] mlane = 128'hffff_ffff << {mcnt, 5'b0};
-
-assign inst_rdata = inst_state[rsp]     ? ((ibuf & ~ ilane) | ({96'b0, rdata} << {icnt, 5'b0}))
+// A line refill is always a 4-beat burst (arlen=3), so on its last beat the
+// line is the three beats already collected in the buffer plus the beat on the
+// bus; an uncached access is a single beat at position 0.  Building the line
+// this way keeps the 128-bit variable shifter (a 4:1 mux on every bit) out of
+// the AXI rdata -> cache data RAM / load-data path.
+assign inst_rdata = inst_state[rsp]     ? (inst_line_r ? {rdata, ibuf[95:0]} : {96'b0, rdata})
                                         : ibuf;
-assign data_rdata = mem_read_state[rsp] ? ((mbuf & ~ mlane) | ({96'b0, rdata} << {mcnt, 5'b0}))
+assign data_rdata = mem_read_state[rsp] ? (rd_line_r   ? {rdata, mbuf[95:0]} : {96'b0, rdata})
                                         : mbuf;
 
 // write beats: AW is one beat, W is one or four

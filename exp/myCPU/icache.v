@@ -12,6 +12,7 @@ module icache(
     output wire [31:0]  read_data,
 
     // cacop
+    input  wire         cacop_lookup,   // issue the tag read of the cacop (phase 1)
     input  wire         cacop_en,
     input  wire         cacop_hit,      // 1 = hit invalidate, 0 = direct index
 
@@ -44,8 +45,9 @@ wire [21:0] wtagvd_data;
 wire [ 7:0] last_index;
 reg [255:0] lru_table;
 reg  [11:0] last_va;
+reg         lru_r;      // lru_table[index] of the lookup in flight
 
-assign en = read_req | cacop_en | refill_we;
+assign en = read_req | cacop_lookup | cacop_en | refill_we;
 
 assign index      = va[11:4];
 assign last_index = last_va[11:4];
@@ -90,8 +92,10 @@ assign refill_tagvd_data = {pt, 2'b10};
 
 assign wtagvd_data = refill_we ? refill_tagvd_data : cacop_tagvd_data;
 
-assign refill_we_way[0] = refill_we & ~ lru_table[index];
-assign refill_we_way[1] = refill_we & lru_table[index];
+// lru_table[i] is a 256:1 mux; the refill way uses the copy registered with the
+// lookup (below), so the way/RAM enable does not wait for that mux
+assign refill_we_way[0] = refill_we & ~ lru_r;
+assign refill_we_way[1] = refill_we & lru_r;
 
 assign tag_we_way[0] = cacop_we_way[0] | refill_we_way[0];
 assign tag_we_way[1] = cacop_we_way[1] | refill_we_way[1];
@@ -99,6 +103,15 @@ assign tag_we_way[1] = cacop_we_way[1] | refill_we_way[1];
 // the lookup address / offset of the access whose response is consumed this cycle
 always @(posedge clk) begin
     if (read_req) last_va <= va;
+end
+
+// read the LRU bit together with the tag / data RAMs, one cycle before the
+// refill needs it.  If the response this cycle updates the LRU of the very set
+// being looked up, take that post-update value.
+always @(posedge clk) begin
+    if (reset)         lru_r <= 1'b0;
+    else if (read_req) lru_r <= (read_use & read_hit & (last_index == index))
+                              ? hit_way[0] : lru_table[index];
 end
 
 // LRU: only the access that consumes its lookup result may touch it

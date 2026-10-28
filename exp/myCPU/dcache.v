@@ -89,6 +89,7 @@ wire [21:0] wtagvd_data;
 wire [ 7:0] last_index;
 reg [255:0] lru_table;
 reg  [11:0] last_va;
+reg         lru_r;      // lru_table[index] of the lookup in flight
 
 // read / write conflict, write port and per-bank enables
 wire        same_index, same_bank, need_d_we, read_go;
@@ -196,8 +197,10 @@ assign wtagvd_data = refill_we ? refill_tagvd_data
                    : write_req ? write_tagvd_data
                    :             cacop_tagvd_data;
 
-assign refill_we_way[0] = refill_we & ~ lru_table[index];
-assign refill_we_way[1] = refill_we &   lru_table[index];
+// lru_table[i] is a 256:1 mux; the refill way uses the copy registered with the
+// lookup (below), so the way/RAM enable does not wait for that mux
+assign refill_we_way[0] = refill_we & ~ lru_r;
+assign refill_we_way[1] = refill_we &   lru_r;
 
 assign tag_we_way[0] = cacop_we_way[0] | refill_we_way[0] | wr_tag_way0;
 assign tag_we_way[1] = cacop_we_way[1] | refill_we_way[1] | wr_tag_way1;
@@ -205,6 +208,16 @@ assign tag_we_way[1] = cacop_we_way[1] | refill_we_way[1] | wr_tag_way1;
 // the lookup address / offset of the access whose response is consumed this cycle
 always @(posedge clk) begin
     if (read_go) last_va <= va;
+end
+
+// read the LRU bit together with the tag / data RAMs: hit way / victim way, the
+// store way, the refill way and every RAM address/enable then come from a flop
+// instead of from the 256:1 LRU mux inside the response cycle.  If the response
+// this cycle updates the LRU of the set being looked up, take the new value.
+always @(posedge clk) begin
+    if (reset)         lru_r <= 1'b0;
+    else if (read_go)  lru_r <= (read_use & read_hit & (last_index == va[11:4]))
+                              ? hit_way[0] : lru_table[va[11:4]];
 end
 
 // LRU: only the access that consumes its lookup result may touch it
@@ -216,7 +229,7 @@ end
 
 // way select: hit -> hit way, miss -> LRU way.  Held after the response cycle
 // so the write-back / refill sequence can keep using it.
-assign sel_now = read_hit ? hit_way[1] : lru_table[last_index];
+assign sel_now = read_hit ? hit_way[1] : lru_r;
 reg  sel_r;
 
 always @(posedge clk) begin
