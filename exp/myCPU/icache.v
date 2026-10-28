@@ -54,7 +54,7 @@ genvar i;
 generate
     wire [31:0] rdata_way0_word_offset [3:0];
     wire [31:0] rdata_way1_word_offset [3:0];
-    for (i = 0; i < 4; i ++)begin: offset_sel
+    for (i = 0; i < 4; i = i + 1)begin: offset_sel
         assign rdata_way0_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [0][(i + 1) * 32 - 1: i * 32] : 32'b0;
         assign rdata_way1_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [1][(i + 1) * 32 - 1: i * 32] : 32'b0;
     end
