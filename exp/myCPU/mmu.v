@@ -127,10 +127,10 @@ wire [19:0] dc_pt;
 wire        if_take;
 
 // cacop view of the memory access in flight
-wire        cacop_ic, cacop_dc;
+wire        ic_cacop, dc_cacop;
 wire [ 1:0] cacop_op;
 wire        cacop_way, cacop_dirty, cacop_wb;
-wire        cacop_lookup, cacop_act, cacop_ic_in_mem;
+wire        cacop_lookup, cacop_act, ic_cacop_in_mem, ic_cacop_lookup;
 wire        cacop_port_ok;
 reg         cacop_looked;
 
@@ -171,7 +171,6 @@ wire [ 31:0] dc_read_data;
 wire         dc_lookup;
 wire         dc_write_req;
 wire [ 11:0] dc_write_va;
-wire         dc_write_sel;
 wire [ 31:0] dc_write_data;
 wire         dc_rw_conflict;
 wire         dc_cacop_en, dc_cacop_hit;
@@ -198,8 +197,8 @@ assign if_lu_now = (if_state[idle]         & if_take)
 // issue its own tag read in phase 1 (it owns the port in both phases).  It gets
 // its own port so read_req stays the fetch-only lookup -- last_va and the
 // registered LRU bit inside icache must not be touched by a cacop.
-assign ic_read_req     = if_lu_now & ~ cacop_ic_in_mem;
-assign ic_cacop_lookup = cacop_lookup & cacop_ic;
+assign ic_read_req     = if_lu_now & ~ ic_cacop_in_mem;
+assign ic_cacop_lookup = cacop_lookup & ic_cacop;
 
 // address translation: dmw window > tlb entry > the va as it is
 assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
@@ -239,8 +238,8 @@ always @(posedge clk) begin
     else if (cacop_act)       cacop_looked <= 1'b0;
 end
 
-assign cacop_ic      = mem_cacop & (mem_cacop_code[2:0] == 3'd0);
-assign cacop_dc      = mem_cacop & (mem_cacop_code[2:0] == 3'd1);
+assign ic_cacop      = mem_cacop & (mem_cacop_code[2:0] == 3'd0);
+assign dc_cacop      = mem_cacop & (mem_cacop_code[2:0] == 3'd1);
 assign cacop_op      = mem_cacop_code[4:3];             // 0 store tag / 1 index inv / 2 hit inv
 
 // direct index addressing: the line sits in way VA[0] (2 ways)
@@ -248,20 +247,20 @@ assign cacop_way     = (cacop_op == 2'b01) ? mem_va[0] : dc_replace_sel;
 assign cacop_dirty   = cacop_way ? dc_d_way1 : dc_d_way0;
 // store tag never writes back (initialisation); op1 / op2 write a dirty line back
 // first, but only for the dcache, and op2 only when it actually hit
-assign cacop_wb      = ~ cacop_dc          ? 1'b0
+assign cacop_wb      = ~ dc_cacop          ? 1'b0
                      : (cacop_op == 2'b00) ? 1'b0
                      : (cacop_op == 2'b10) ? (dc_read_hit & cacop_dirty)
                                            : cacop_dirty;
 
 // the icache port is shared with the fetch: a refill write would spoil the read
-assign cacop_port_ok   = ~ cacop_ic | ~ ic_refill_we;
+assign cacop_port_ok   = ~ ic_cacop | ~ ic_refill_we;
 assign cacop_lookup    = mem_state[tlb_acc] & mem_cacop & ~ cacop_looked & cacop_port_ok;
 assign cacop_act       = mem_state[tlb_acc] & mem_cacop &   cacop_looked & cacop_port_ok
                        & ~ mem_abort;                           // a flushed cacop must not invalidate
-assign cacop_ic_in_mem = mem_state[tlb_acc] & cacop_ic;
+assign ic_cacop_in_mem = mem_state[tlb_acc] & ic_cacop;
 
-assign ic_cacop_en  = cacop_act & cacop_ic;
-assign dc_cacop_en  = cacop_act & cacop_dc;
+assign ic_cacop_en  = cacop_act & ic_cacop;
+assign dc_cacop_en  = cacop_act & dc_cacop;
 // op2 is the hit invalidate, op0 / op1 use direct index addressing
 assign ic_cacop_hit = cacop_op[1];
 assign dc_cacop_hit = cacop_op[1];
@@ -270,14 +269,14 @@ assign dc_cacop_hit = cacop_op[1];
 //   lookup  : a request issued this cycle, the result is consumed next cycle
 //   read_use: the result of the request issued last cycle is consumed now
 assign ic_va = ic_refill_we      ? if_line_addr_r[11:0]   // refill write
-             : cacop_ic_in_mem   ? mem_va    [11:0]        // cacop lookup + tagvd write
+             : ic_cacop_in_mem   ? mem_va    [11:0]        // cacop lookup + tagvd write
                                  : if_pre_addr[11:0];      // fetch lookup, one cycle early
 assign ic_pt = ic_refill_we      ? if_line_addr_r[31:12]  // PA of the line being refilled
-             : cacop_ic_in_mem   ? mem_addr[31:12]         // tag compare of the cacop
+             : ic_cacop_in_mem   ? mem_addr[31:12]         // tag compare of the cacop
                                  : if_addr  [31:12];
 
 // fetch: no result while an icache cacop owns the port / the fetch is uncached
-assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ cacop_ic_in_mem;
+assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ ic_cacop_in_mem;
 
 // data: lookups are issued in IDLE / CACHE_REFILL (the access entering MEM),
 // in the response cycle of a cached hit (the next access), in the last
@@ -305,7 +304,6 @@ assign dc_read_use = mem_state[tlb_acc]
                    & ((mem_cacop & cacop_act) | (~ mem_cacop & ~ mem_direct));
 
 assign dc_write_va  = mem_va[11:0];
-assign dc_write_sel = dc_replace_sel;      // will not change as no more read-use issued
 assign dc_refill_dirty = | mem_wstrb;      // store miss: the merged line is dirty
 
 // store: byte-merge the new data into the word read back from the hit way
@@ -318,7 +316,7 @@ assign dc_write_data = { mem_wstrb[3] ? mem_stdata[31:24] : dc_read_data[31:24],
 // miss: read the whole victim line while the miss is known, so that the
 // write-back issues from complete data in CACHE_LOOKUP
 assign dc_lookup = mem_state[cache_lookup]
-                 | (cacop_lookup & cacop_dc)
+                 | (cacop_lookup & dc_cacop)
                  | (mem_state[tlb_acc] & ~ mem_cacop & ~ mem_direct
                                       & ~ dc_read_hit & should_write_back);
 
@@ -394,7 +392,7 @@ assign mem_direct = (mem_mat != 2'b01);
 assign if_take = if_pre & if_allow;
 
 // an icache cacop holds the fetch until it is done with the port
-assign if_pending = cacop_ic_in_mem
+assign if_pending = ic_cacop_in_mem
                   | (~ if_state[idle]
                      & ~(if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)))
                      & ~(if_state[direct_acc]   & ~ bridge_if_pending)
@@ -583,7 +581,7 @@ wire ic_refill_abandon;
 reg  ic_refill_kill;
 
 assign ic_refill_abandon = if_state[mem_read]
-                         & (if_abort | (cacop_ic & (mem_va[11:4] == if_line_addr_r[11:4])));
+                         & (if_abort | (ic_cacop & (mem_va[11:4] == if_line_addr_r[11:4])));
 
 always @(posedge clk) begin
     if (reset)                     ic_refill_kill <= 1'b0;
@@ -656,7 +654,6 @@ dcache u_dcache(
 
     .write_req          (dc_write_req    ),
     .write_va           (dc_write_va     ),
-    .write_sel          (dc_write_sel    ),
     .write_data         (dc_write_data   ),
     .read_write_conflict(dc_rw_conflict  ),
 

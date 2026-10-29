@@ -7,7 +7,7 @@
 //
 // Per-bank enable (bank = va[3:2] / write_va[3:2]):
 //   read    : bank va[3:2] of both ways          (rd_en)
-//   store   : bank write_va[3:2] of way write_sel
+//   store   : bank write_va[3:2] of the hit way
 //   refill  : all four banks of the replaced way
 //   lookup  : all four banks of both ways -> data_wayN holds the whole line
 // A read and a write may share a cycle iff same line and different bank.
@@ -49,7 +49,6 @@ module dcache(
     // write
     input  wire         write_req,
     input  wire [11:0]  write_va,
-    input  wire         write_sel,
     input  wire [31:0]  write_data,     // byte-merged by the mmu
     output wire         read_write_conflict,
 
@@ -118,17 +117,18 @@ assign last_index  = last_va[11:4];
 // on conflict the write wins, the read is dropped (read_go = 0)
 assign same_index = (index == write_index);
 assign same_bank  = (va[3:2] == write_va[3:2]);
-assign need_d_we  = ~ rtagvd_d[write_sel];
+assign need_d_we  = ~ rtagvd_d[hit_way[1]];
 
 assign read_write_conflict = read_req & write_req & (~ same_index | same_bank);
 assign read_go = read_req & ~ read_write_conflict;
 
 // bank select.  A line lives in exactly one way: a lookup hits at most one way
-// and a refill only writes the LRU way of a miss, so for a store
-// write_sel == hit_way[1] and read_data may key off hit_way[0].
+// and a refill only writes the LRU way of a miss.  A store is written on the
+// response cycle of its own lookup, so the way is simply the hit way held by
+// the tag compare (hit_way[1]); read_data may key off hit_way[0].
 assign rd_bank      = 4'b0001 << va[3:2];
-assign wr_way0      = write_req & ~ write_sel;
-assign wr_way1      = write_req &   write_sel;
+assign wr_way0      = write_req & ~ hit_way[1];
+assign wr_way1      = write_req &   hit_way[1];
 assign wr_tag_way0  = wr_way0 & need_d_we;      // d already set -> no tag write
 assign wr_tag_way1  = wr_way1 & need_d_we;
 assign wr_bank_way0 = {4{wr_way0}} & (4'b0001 << write_bank);
@@ -191,7 +191,7 @@ assign cacop_we_way [1] = cacop_en & (cacop_hit ? hit_way[1] : cacop_way1);
 
 assign cacop_tagvd_data  = 22'b0;                           // invalidate: clear tag/v/d
 assign refill_tagvd_data = {pt, 1'b1, refill_dirty};         // {tag, v=1, d}
-assign write_tagvd_data  = {rtagvd_tag[write_sel], 2'b11};  // {tag, v=1, d=1}
+assign write_tagvd_data  = {rtagvd_tag[hit_way[1]], 2'b11}; // {tag, v=1, d=1}
 
 assign wtagvd_data = refill_we ? refill_tagvd_data
                    : write_req ? write_tagvd_data
