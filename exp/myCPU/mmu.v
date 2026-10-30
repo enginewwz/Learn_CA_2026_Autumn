@@ -108,12 +108,8 @@ localparam DIRECT_ACC       = 7'b1 << direct_acc;
 reg  [stagecnt - 1:0] if_state,      mem_state;
 reg  [stagecnt - 1:0] next_if_state, next_mem_state;
 
-// cacop control generated from mem_cacop / mem_cacop_code
-reg         write_back_twice;
-
 reg  [31:0] if_line_addr_r, mem_line_addr_r;  // 16B line address of the access in flight
                                               // (its [31:12] *is* the physical tag)
-reg         wb_way_r;               // way being written back
 
 // addresses
 wire [31:0] if_pa, mem_pa;
@@ -129,9 +125,8 @@ wire        if_take;
 // cacop view of the memory access in flight
 wire        ic_cacop, dc_cacop;
 wire [ 1:0] cacop_op;
-wire        cacop_way, cacop_dirty, cacop_wb;
-wire        cacop_lookup, cacop_act, ic_cacop_in_mem, ic_cacop_lookup;
-wire        cacop_port_ok;
+wire        cacop_wb;
+wire        cacop_read, cacop_act, ic_cacop_lookup;
 reg         cacop_looked;
 
 // cached or direct (uncached) access, decoded from the MAT field
@@ -143,7 +138,7 @@ wire [ 31:0] dc_refill_word;
 wire [127:0] dc_refill_merge;
 
 wire        should_write_back;
-wire        wb_pass2, wb_way_now, wb_sel;
+wire        wb_sel;
 wire [31:0]  wb_pa;
 wire [127:0] wb_line;
 
@@ -160,7 +155,7 @@ wire [127:0] bridge_inst_rdata, bridge_data_rdata;
 wire         ic_read_req, ic_read_use;
 wire         ic_read_hit;
 wire [ 31:0] ic_read_data;
-wire         ic_cacop_en, ic_cacop_hit;
+wire         ic_cacop_en, ic_cacop_hit_mode;
 wire         ic_refill_we;
 wire [127:0] ic_refill_data;
 
@@ -173,15 +168,14 @@ wire         dc_write_req;
 wire [ 11:0] dc_write_va;
 wire [ 31:0] dc_write_data;
 wire         dc_rw_conflict;
-wire         dc_cacop_en, dc_cacop_hit;
+wire         dc_cacop_en, dc_cacop_hit_mode;
 wire         dc_refill_we;
 wire         dc_refill_dirty;
 wire [127:0] dc_refill_data;
 
-wire         dc_d_way0, dc_d_way1;
-wire [ 31:0] dc_pa_way0, dc_pa_way1;
-wire [127:0] dc_data_way0, dc_data_way1;
-wire         dc_replace_sel;
+wire         dc_lookup_d;
+wire [ 31:0] dc_lookup_pa;
+wire [127:0] dc_lookup_line;
 wire         mem_hit_done, dc_lu_now;
 
 wire         if_lu_now;
@@ -197,8 +191,7 @@ assign if_lu_now = (if_state[idle]         & if_take)
 // issue its own tag read in phase 1 (it owns the port in both phases).  It gets
 // its own port so read_req stays the fetch-only lookup -- last_va and the
 // registered LRU bit inside icache must not be touched by a cacop.
-assign ic_read_req     = if_lu_now & ~ ic_cacop_in_mem;
-assign ic_cacop_lookup = cacop_lookup & ic_cacop;
+assign ic_read_req     = if_lu_now & ~ ic_cacop;
 
 // address translation: dmw window > tlb entry > the va as it is
 assign if_pa  = (if_ps  == 6'd21) ? {if_ppn[19:9],  if_va[20:0]}
@@ -227,14 +220,15 @@ always @(posedge clk) begin
     end
 end
 
-// cacop: the FSM spends two TLB_ACC cycles on it.  cycle 1 (cacop_lookup)
-// issues the tag / whole-line read, cycle 2 (cacop_act) consumes it and writes
-// the tagvd (and, for a dirty dcache line that is about to be invalidated,
-// hands the line to the write-back).
+// cacop: an icache cacop always takes two TLB_ACC cycles -- cycle 1 (cacop_read)
+// drains the port and reads the tagvd, cycle 2 (cacop_act) writes it, so the
+// icache port is clean before the invalidate.  A dcache cacop has already been
+// looked up one cycle early (the lookup issued for the access entering MEM), so
+// it acts in its very first TLB_ACC cycle and saves that cycle.
 always @(posedge clk) begin
     if (reset)                cacop_looked <= 1'b0;
     else if (~ mem_cacop)     cacop_looked <= 1'b0;
-    else if (cacop_lookup)    cacop_looked <= 1'b1;
+    else if (cacop_read)      cacop_looked <= 1'b1;
     else if (cacop_act)       cacop_looked <= 1'b0;
 end
 
@@ -242,41 +236,43 @@ assign ic_cacop      = mem_cacop & (mem_cacop_code[2:0] == 3'd0);
 assign dc_cacop      = mem_cacop & (mem_cacop_code[2:0] == 3'd1);
 assign cacop_op      = mem_cacop_code[4:3];             // 0 store tag / 1 index inv / 2 hit inv
 
-// direct index addressing: the line sits in way VA[0] (2 ways)
-assign cacop_way     = (cacop_op == 2'b01) ? mem_va[0] : dc_replace_sel;
-assign cacop_dirty   = cacop_way ? dc_d_way1 : dc_d_way0;
-// store tag never writes back (initialisation); op1 / op2 write a dirty line back
-// first, but only for the dcache, and op2 only when it actually hit
+// store tag never writes back (initialisation); op1 / op2 write a dirty line
+// back first, but only for the dcache, and op2 only when it actually hit.  The
+// way to touch is the one the cache itself picked as the lookup: VA[Way-1:0]
+// (VA[0] for the two ways) for the index ops, the hit way for op2.
 assign cacop_wb      = ~ dc_cacop          ? 1'b0
                      : (cacop_op == 2'b00) ? 1'b0
-                     : (cacop_op == 2'b10) ? (dc_read_hit & cacop_dirty)
-                                           : cacop_dirty;
+                     : (cacop_op == 2'b10) ? (dc_read_hit & dc_lookup_d)
+                                           : dc_lookup_d;
 
-// the icache port is shared with the fetch: a refill write would spoil the read
-assign cacop_port_ok   = ~ ic_cacop | ~ ic_refill_we;
-assign cacop_lookup    = mem_state[tlb_acc] & mem_cacop & ~ cacop_looked & cacop_port_ok;
-assign cacop_act       = mem_state[tlb_acc] & mem_cacop &   cacop_looked & cacop_port_ok
+// the icache is only driven by the fetch, so a cacop targeting it reads the
+// tagvd with its own port; the refill write is off meanwhile (see ic_refill_we),
+// so that read is the only access and the next cycle can write the tag.
+assign cacop_read      = mem_state[tlb_acc] & mem_cacop & ~ cacop_looked & ic_cacop;
+assign ic_cacop_lookup = cacop_read;
+
+assign cacop_act       = mem_state[tlb_acc] & mem_cacop
+                       & (cacop_looked | ~ ic_cacop)            // dcache: already looked up
                        & ~ mem_abort;                           // a flushed cacop must not invalidate
-assign ic_cacop_in_mem = mem_state[tlb_acc] & ic_cacop;
 
 assign ic_cacop_en  = cacop_act & ic_cacop;
 assign dc_cacop_en  = cacop_act & dc_cacop;
 // op2 is the hit invalidate, op0 / op1 use direct index addressing
-assign ic_cacop_hit = cacop_op[1];
-assign dc_cacop_hit = cacop_op[1];
+assign ic_cacop_hit_mode = cacop_op[1];
+assign dc_cacop_hit_mode = cacop_op[1];
 
 // cache ports
 //   lookup  : a request issued this cycle, the result is consumed next cycle
 //   read_use: the result of the request issued last cycle is consumed now
 assign ic_va = ic_refill_we      ? if_line_addr_r[11:0]   // refill write
-             : ic_cacop_in_mem   ? mem_va    [11:0]        // cacop lookup + tagvd write
+             : ic_cacop          ? mem_va    [11:0]        // cacop tag read + tagvd write
                                  : if_pre_addr[11:0];      // fetch lookup, one cycle early
 assign ic_pt = ic_refill_we      ? if_line_addr_r[31:12]  // PA of the line being refilled
-             : ic_cacop_in_mem   ? mem_addr[31:12]         // tag compare of the cacop
+             : ic_cacop          ? mem_addr[31:12]         // tag compare of the cacop
                                  : if_addr  [31:12];
 
 // fetch: no result while an icache cacop owns the port / the fetch is uncached
-assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ ic_cacop_in_mem;
+assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ ic_cacop;
 
 // data: lookups are issued in IDLE / CACHE_REFILL (the access entering MEM),
 // in the response cycle of a cached hit (the next access), in the last
@@ -288,7 +284,7 @@ assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ ic_cacop_in_mem;
 assign mem_hit_done = ~ mem_cacop & ~ mem_direct & dc_read_hit;
 assign dc_lu_now    = mem_pre
                     & (mem_state[idle] | mem_state[cache_refill]
-                       | mem_state[mem_writeback] & mem_cacop & ~ bridge_mem_pending & ~ write_back_twice
+                       | mem_state[mem_writeback] & dc_cacop & ~ bridge_mem_pending
                        | mem_state[direct_acc] & ~ bridge_mem_pending
                        | mem_state[tlb_acc] & (mem_hit_done | mem_abort));
 
@@ -301,7 +297,7 @@ assign dc_pt = (mem_state[idle] | mem_state[tlb_acc]) ? mem_addr[31:12]
 
 // the response of the lookup issued last cycle belongs to the access in MEM
 assign dc_read_use = mem_state[tlb_acc]
-                   & ((mem_cacop & cacop_act) | (~ mem_cacop & ~ mem_direct));
+                   & ((dc_cacop & cacop_act) | (~ mem_cacop & ~ mem_direct));
 
 assign dc_write_va  = mem_va[11:0];
 assign dc_refill_dirty = | mem_wstrb;      // store miss: the merged line is dirty
@@ -313,41 +309,26 @@ assign dc_write_data = { mem_wstrb[3] ? mem_stdata[31:24] : dc_read_data[31:24],
                          mem_wstrb[1] ? mem_stdata[15: 8] : dc_read_data[15: 8],
                          mem_wstrb[0] ? mem_stdata[ 7: 0] : dc_read_data[ 7: 0] };
 
-// miss: read the whole victim line while the miss is known, so that the
-// write-back issues from complete data in CACHE_LOOKUP
-assign dc_lookup = mem_state[cache_lookup]
-                 | (cacop_lookup & dc_cacop)
-                 | (mem_state[tlb_acc] & ~ mem_cacop & ~ mem_direct
-                                      & ~ dc_read_hit & should_write_back);
+// the whole line has to be read out before it is handed to the write-back: a
+// miss with a dirty victim, and a dcache cacop that will write its line back --
+// its own lookup only read the bank of the access, so the rest of the line is
+// not in the RAM outputs.  A plain hit needs nothing, an icache cacop never
+// touches this cache, and CACHE_LOOKUP then uses the outputs of this read (it
+// does not issue one of its own).
+assign dc_lookup = mem_state[tlb_acc] & ~ mem_direct & ~ mem_abort & should_write_back
+                 & (~ mem_cacop ? ~ dc_read_hit        // miss, dirty victim
+                                : dc_cacop);           // cacop, dirty line
 
-// write-back: one pass per dirty way.  entering the second pass clears
-// write_back_twice and flips wb_way_r
-assign wb_pass2   = mem_state[mem_writeback] & ~ bridge_mem_pending & write_back_twice;
-assign wb_way_now = mem_state[cache_lookup] ? (mem_cacop ? cacop_way : dc_replace_sel)
-                  : wb_pass2                ? ~ wb_way_r
-                                            : wb_way_r;
-assign wb_sel     = mem_state[cache_lookup]                                      // first pass
-                  | (mem_state[mem_writeback] & write_back_twice & ~ bridge_mem_pending); // second
-assign wb_pa      = wb_way_now ? dc_pa_way1   : dc_pa_way0;
-assign wb_line    = wb_way_now ? dc_data_way1 : dc_data_way0;
+// write-back: only the evicted line leaves the cache -- the LRU way of a miss,
+// or the single way a cacop selected before invalidating it.  The other way,
+// even if dirty, stays resident and is written back when it is evicted itself.
+// The cache itself has already picked that line (lookup_*), so the write-back
+// only forwards it in the cycle that hands it to the bridge.
+assign wb_sel  = mem_state[cache_lookup];
+assign wb_pa   = dc_lookup_pa;
+assign wb_line = dc_lookup_line;
 
-always @(posedge clk) begin
-    if (reset) begin
-        wb_way_r         <= 1'b0;
-        write_back_twice <= 1'b0;
-    end
-    else if (mem_state[cache_lookup]) begin
-        wb_way_r         <= mem_cacop ? cacop_way : dc_replace_sel;   // victim / cacop way
-        write_back_twice <= ~ mem_cacop & dc_d_way0 & dc_d_way1;      // cacop touches one way
-    end
-    else if (wb_pass2) begin
-        wb_way_r         <= ~ wb_way_r;
-        write_back_twice <= 1'b0;
-    end
-end
-
-assign should_write_back = mem_cacop ? cacop_wb
-                                     : (dc_replace_sel ? dc_d_way1 : dc_d_way0);
+assign should_write_back = mem_cacop ? cacop_wb : dc_lookup_d;
 
 // the refilled line is written to the cache at the end of the last MEM_READ
 // cycle, so its data is available in CACHE_REFILL
@@ -373,7 +354,7 @@ assign bridge_data_req = (mem_state[tlb_acc] & mem_direct & ~ mem_abort & ~ mem_
                        | (mem_state[tlb_acc] & ~ mem_abort & ~ mem_direct & ~ mem_cacop
                                             & ~ dc_read_hit & ~ should_write_back)     // refill read, no wb
                        | (mem_state[mem_writeback] & ~ bridge_mem_pending
-                                                  & ~ write_back_twice & ~ mem_cacop)  // refill read after wb
+                                                  & ~ mem_cacop)                       // refill read after wb
                        | wb_sel;                                                       // write-back
 
 assign bridge_data_addr  = wb_sel ? wb_pa
@@ -391,8 +372,9 @@ assign mem_direct = (mem_mat != 2'b01);
 // fetch path
 assign if_take = if_pre & if_allow;
 
-// an icache cacop holds the fetch until it is done with the port
-assign if_pending = ic_cacop_in_mem
+// an icache cacop owns the icache port for its whole stay in MEM: hold IF so no
+// lookup is issued (and lost) while it is in flight
+assign if_pending = ic_cacop
                   | (~ if_state[idle]
                      & ~(if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)))
                      & ~(if_state[direct_acc]   & ~ bridge_if_pending)
@@ -405,15 +387,18 @@ always @(*) begin
             else            next_if_state = IDLE;
         end
         TLB_ACC: begin
-            // an aborted fetch still lets the next one enter IF: keep the
-            // pipeline going and look that one up
-            if (if_abort)       next_if_state = if_take ? TLB_ACC : IDLE;
-            else if (if_direct) next_if_state = DIRECT_ACC;   // uncached page
+            // an icache cacop owns the port: drop this slot and wait in IDLE
+            // (if_pending holds IF meanwhile, so nothing enters IF).  An aborted
+            // fetch still lets the next one enter IF: keep the pipeline going
+            // and consume the lookup issued for it last cycle.
+            if (ic_cacop)               next_if_state = IDLE;
+            else if (if_abort)          next_if_state = if_take ? TLB_ACC : IDLE;
+            else if (if_direct)         next_if_state = DIRECT_ACC;   // uncached page
             else if (ic_read_hit) begin
-                if (if_take)    next_if_state = TLB_ACC;
-                else            next_if_state = IDLE;
+                if (if_take)            next_if_state = TLB_ACC;
+                else                    next_if_state = IDLE;
             end
-            else                next_if_state = MEM_READ;
+            else                        next_if_state = MEM_READ;
         end
         MEM_READ: begin
             if (~ bridge_if_pending) next_if_state = CACHE_REFILL;
@@ -442,7 +427,7 @@ end
 assign mem_pending = ~ mem_state[idle]
                    & ~(mem_state[cache_refill]  & mem_pre)
                    & ~(mem_state[mem_writeback] & mem_cacop & ~ bridge_mem_pending
-                                                & ~ write_back_twice & mem_pre)
+                                                & mem_pre)
                    & ~(mem_state[tlb_acc]       & (mem_abort | (mem_hit_done & ~ dc_rw_conflict)))
                    & ~(mem_state[direct_acc]    & ~ bridge_mem_pending & mem_pre);
 
@@ -470,8 +455,7 @@ always @(*) begin
         CACHE_LOOKUP:       next_mem_state = MEM_WRITEBACK;
         MEM_WRITEBACK: begin
             if (~ bridge_mem_pending) begin
-                if (write_back_twice)                   next_mem_state = MEM_WRITEBACK;
-                else if (mem_cacop) begin
+                if (mem_cacop) begin
                     if (mem_pre)                        next_mem_state = TLB_ACC;   // cacop_act takes place earlier
                     else                                next_mem_state = IDLE;
                 end                    
@@ -580,8 +564,7 @@ sram_axi_bridge u_bridge(
 wire ic_refill_abandon;
 reg  ic_refill_kill;
 
-assign ic_refill_abandon = if_state[mem_read]
-                         & (if_abort | (ic_cacop & (mem_va[11:4] == if_line_addr_r[11:4])));
+assign ic_refill_abandon = if_state[mem_read] & (if_abort | ic_cacop);
 
 always @(posedge clk) begin
     if (reset)                     ic_refill_kill <= 1'b0;
@@ -590,7 +573,10 @@ always @(posedge clk) begin
 end
 
 // refill data: a store miss comes back from memory with this store's bytes merged in, a load miss is stored clean
-assign ic_refill_we = if_state[mem_read] & ~ bridge_if_pending & ~ if_direct & ~ ic_refill_kill;
+// ... and it stays off while an icache cacop is in MEM: that cacop's two phases
+// own the port, and the fetch will be re-fetched after the cacop's flush
+assign ic_refill_we = if_state[mem_read] & ~ bridge_if_pending & ~ if_direct & ~ ic_refill_kill
+                    & ~ ic_refill_abandon;
 assign dc_refill_we = mem_state[mem_read] & ~ bridge_mem_pending & ~ mem_direct & ~ mem_cacop;
 
 assign ic_refill_data = bridge_inst_rdata;
@@ -617,52 +603,48 @@ assign dc_write_req = mem_state[tlb_acc] & ~ mem_abort & ~ mem_cacop & ~ mem_dir
 
 // caches
 icache u_icache(
-    .clk         (clk            ),
-    .reset       (reset          ),
-    .va          (ic_va          ),
-    .pt          (ic_pt          ),
-    .read_req    (ic_read_req    ),
-    .read_use    (ic_read_use    ),
-    .read_hit    (ic_read_hit    ),
-    .read_data   (ic_read_data   ),
-    .cacop_lookup(ic_cacop_lookup),
-    .cacop_en    (ic_cacop_en    ),
-    .cacop_hit   (ic_cacop_hit   ),
-    .refill_we   (ic_refill_we   ),
-    .refill_data (ic_refill_data )
+    .clk            (clk                ),
+    .reset          (reset              ),
+    .va             (ic_va              ),
+    .pt             (ic_pt              ),
+    .read_req       (ic_read_req        ),
+    .read_use       (ic_read_use        ),
+    .read_hit       (ic_read_hit        ),
+    .read_data      (ic_read_data       ),
+    .cacop_lookup   (ic_cacop_lookup    ),
+    .cacop_en       (ic_cacop_en        ),
+    .cacop_hit_mode (ic_cacop_hit_mode  ),
+    .refill_we      (ic_refill_we       ),
+    .refill_data    (ic_refill_data     )
 );
 
 dcache u_dcache(
-    .clk                (clk             ),
-    .reset              (reset           ),
-    .va                 (dc_va           ),
-    .pt                 (dc_pt           ),
+    .clk                (clk                ),
+    .reset              (reset              ),
+    .va                 (dc_va              ),
+    .pt                 (dc_pt              ),
+    
+    .read_req           (dc_read_req        ),
+    .read_use           (dc_read_use        ),
+    .read_hit           (dc_read_hit        ),
+    .read_data          (dc_read_data       ),
+    
+    .lookup             (dc_lookup          ),
+    .lookup_d           (dc_lookup_d        ),
+    .lookup_pa          (dc_lookup_pa       ),
+    .lookup_line        (dc_lookup_line     ),
+    
+    .write_req          (dc_write_req       ),
+    .write_va           (dc_write_va        ),
+    .write_data         (dc_write_data      ),
+    .read_write_conflict(dc_rw_conflict     ),
+    
+    .cacop_en           (dc_cacop_en        ),
+    .cacop_hit_mode     (dc_cacop_hit_mode  ),
 
-    .read_req           (dc_read_req     ),
-    .read_use           (dc_read_use     ),
-    .read_hit           (dc_read_hit     ),
-    .read_data          (dc_read_data    ),
-
-    .d_way0             (dc_d_way0       ),
-    .d_way1             (dc_d_way1       ),
-    .lookup             (dc_lookup       ),
-    .pa_way0            (dc_pa_way0      ),
-    .data_way0          (dc_data_way0    ),
-    .pa_way1            (dc_pa_way1      ),
-    .data_way1          (dc_data_way1    ),
-    .replace_sel        (dc_replace_sel  ),
-
-    .write_req          (dc_write_req    ),
-    .write_va           (dc_write_va     ),
-    .write_data         (dc_write_data   ),
-    .read_write_conflict(dc_rw_conflict  ),
-
-    .cacop_en           (dc_cacop_en     ),
-    .cacop_hit          (dc_cacop_hit    ),
-
-    .refill_we          (dc_refill_we    ),
-    .refill_dirty       (dc_refill_dirty ),
-    .refill_data        (dc_refill_data  )
+    .refill_we          (dc_refill_we       ),
+    .refill_dirty       (dc_refill_dirty    ),
+    .refill_data        (dc_refill_data     )
 );
 
 endmodule

@@ -14,7 +14,7 @@ module icache(
     // cacop
     input  wire         cacop_lookup,   // issue the tag read of the cacop (phase 1)
     input  wire         cacop_en,
-    input  wire         cacop_hit,      // 1 = hit invalidate, 0 = direct index
+    input  wire         cacop_hit_mode,      // 1 = hit invalidate, 0 = direct index
 
     // refill
     input  wire         refill_we,
@@ -84,8 +84,8 @@ assign read_data = hit_way[0] ? rdata_way_word[0] : rdata_way_word [1];
 assign cacop_way0 = ~ va[0];
 assign cacop_way1 =   va[0];
 
-assign cacop_we_way [0] = cacop_en & (cacop_hit ? hit_way[0] : cacop_way0);
-assign cacop_we_way [1] = cacop_en & (cacop_hit ? hit_way[1] : cacop_way1);
+assign cacop_we_way [0] = cacop_en & (cacop_hit_mode ? hit_way[0] : cacop_way0);
+assign cacop_we_way [1] = cacop_en & (cacop_hit_mode ? hit_way[1] : cacop_way1);
 
 assign cacop_tagvd_data = 22'b0;
 assign refill_tagvd_data = {pt, 2'b10};

@@ -13,12 +13,12 @@
 // A read and a write may share a cycle iff same line and different bank.
 //
 // Lookup / response is pipelined: read_req in cycle N, read_hit / read_data /
-// replace_sel / d_wayN in cycle N+1 with read_use high.  read_use qualifies
-// every state update, so a lookup whose result is not consumed (e.g. a
-// conflict with a store, or an access that turns out to be uncached) cannot
-// corrupt the LRU or the kept victim way.
+// lookup_d in cycle N+1 with read_use high.  read_use qualifies every state
+// update, so a lookup whose result is not consumed (e.g. a conflict with a
+// store, or an access that turns out to be uncached) cannot corrupt the LRU or
+// the kept lookup way.
 //
-// Store: cycle 1 read_req (data_wayN / read_hit / replace_sel),
+// Store: cycle 1 read_req (data_wayN / read_hit / lookup_d),
 //        cycle 2 write_req with the byte-merged word; d is set there.
 //==============================================================================
 module dcache(
@@ -34,17 +34,13 @@ module dcache(
     output wire         read_hit,
     output wire [31:0]  read_data,
 
-    // miss / cacop view, valid in the response cycle
-    output wire         d_way0,         // dirty
-    output wire         d_way1,
-
+    // miss / cacop view: the one line this access would evict / invalidate.
+    // lookup_d is valid on the response cycle, lookup_pa / lookup_line while
+    // `lookup` has read the line out; the way itself is chosen inside the cache
     input  wire         lookup,         // 1: also read the other banks -> full line
-    output wire [31:0]  pa_way0,        // {tag, index, 4'b0}
-    output wire [127:0] data_way0,      // {w12, w8, w4, w0}
-    output wire [31:0]  pa_way1,
-    output wire [127:0] data_way1,
-
-    output wire         replace_sel,    // hit -> hit way, miss -> LRU way
+    output wire         lookup_d,       // d bit of that line
+    output wire [31:0]  lookup_pa,      // {tag, index, 4'b0}
+    output wire [127:0] lookup_line,    // {w12, w8, w4, w0}
 
     // write
     input  wire         write_req,
@@ -54,7 +50,7 @@ module dcache(
 
     // cacop
     input  wire         cacop_en,
-    input  wire         cacop_hit,      // 1 = hit invalidate, 0 = direct index
+    input  wire         cacop_hit_mode,      // 1 = hit invalidate, 0 = direct index
 
     // refill
     input  wire         refill_we,
@@ -100,7 +96,9 @@ wire [ 7:0] addr0_b0, addr0_b1, addr0_b2, addr0_b3;
 wire [ 7:0] addr1_b0, addr1_b1, addr1_b2, addr1_b3;
 wire [127:0] bank_din;
 
-wire        sel_now;
+wire        lookup_sel;
+wire        lookup_sel_wire;
+reg         lookup_sel_reg;
 
 assign index       = va[11:4];
 assign write_index = write_va[11:4];
@@ -186,8 +184,8 @@ assign read_data = hit_way[0] ? rdata_way_word[0] : rdata_way_word [1];
 assign cacop_way0 = ~ va[0];
 assign cacop_way1 =   va[0];
 
-assign cacop_we_way [0] = cacop_en & (cacop_hit ? hit_way[0] : cacop_way0);
-assign cacop_we_way [1] = cacop_en & (cacop_hit ? hit_way[1] : cacop_way1);
+assign cacop_we_way [0] = cacop_en & (cacop_hit_mode ? hit_way[0] : cacop_way0);
+assign cacop_we_way [1] = cacop_en & (cacop_hit_mode ? hit_way[1] : cacop_way1);
 
 assign cacop_tagvd_data  = 22'b0;                           // invalidate: clear tag/v/d
 assign refill_tagvd_data = {pt, 1'b1, refill_dirty};         // {tag, v=1, d}
@@ -210,14 +208,14 @@ always @(posedge clk) begin
     if (read_go) last_va <= va;
 end
 
-// read the LRU bit together with the tag / data RAMs: hit way / victim way, the
+// read the LRU bit together with the tag / data RAMs: hit way / lookup way, the
 // store way, the refill way and every RAM address/enable then come from a flop
 // instead of from the 256:1 LRU mux inside the response cycle.  If the response
 // this cycle updates the LRU of the set being looked up, take the new value.
 always @(posedge clk) begin
     if (reset)         lru_r <= 1'b0;
-    else if (read_go)  lru_r <= (read_use & read_hit & (last_index == va[11:4]))
-                              ? hit_way[0] : lru_table[va[11:4]];
+    else if (read_go)  lru_r <= (read_use & read_hit & (last_index == index))
+                              ? hit_way[0] : lru_table[index];
 end
 
 // LRU: only the access that consumes its lookup result may touch it
@@ -227,26 +225,27 @@ always @(posedge clk) begin
     else if (refill_we)                 lru_table[index] <= ~ lru_table[index];
 end
 
-// way select: hit -> hit way, miss -> LRU way.  Held after the response cycle
-// so the write-back / refill sequence can keep using it.
-assign sel_now = read_hit ? hit_way[1] : lru_r;
-reg  sel_r;
+// way select: hit -> hit way, miss -> LRU way, and for a cacop the way it
+// addresses (VA[Way-1:0] = VA[0] for store tag / index invalidate, the hit way
+// for hit invalidate).  Held after the response cycle so the write-back
+// sequence keeps using the way that was chosen when the line was read out.
+assign lookup_sel_wire = cacop_en ? (cacop_hit_mode ? hit_way[1] : va[0])
+                    : lru_r;    // read / write hit case should not need to look up
 
 always @(posedge clk) begin
-    if (reset)         sel_r <= 1'b0;
-    else if (read_use) sel_r <= sel_now;
+    if (reset)         lookup_sel_reg <= 1'b0;
+    else if (read_use) lookup_sel_reg <= lookup_sel_wire;
 end
 
-assign replace_sel = read_use ? sel_now : sel_r;
+assign lookup_sel = read_use ? lookup_sel_wire : lookup_sel_reg;
 
-// view for the mmu.  va is the line of interest in every cycle that reads
-// these (response cycle, cache_lookup, mem_writeback), so it gives the index.
-assign d_way0    = rtagvd_d[0];
-assign d_way1    = rtagvd_d[1];
-assign pa_way0   = {rtagvd_tag[0], va[11:4], 4'b0};
-assign pa_way1   = {rtagvd_tag[1], va[11:4], 4'b0};
-assign data_way0 = rdata_way_line[0];
-assign data_way1 = rdata_way_line[1];
+// view for the mmu: only the lookup line.  lookup_d is read while the result is
+// consumed (read_use, i.e. the cacop act / a miss), lookup_pa and lookup_line
+// only one cycle later in cache_lookup, where lookup_sel_reg still holds the way.
+// va is the line of interest in both, so it gives the index.
+assign lookup_d    = lookup_sel   ? rtagvd_d[1]    : rtagvd_d[0];
+assign lookup_pa   = {lookup_sel ? rtagvd_tag[1] : rtagvd_tag[0], va[11:4], 4'b0};
+assign lookup_line = lookup_sel ? rdata_way_line[1] : rdata_way_line[0];
 
 // RAM instances
 tagvd u_tagvd_way0(
