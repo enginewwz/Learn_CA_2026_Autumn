@@ -241,7 +241,7 @@ end
 // only one cycle later in cache_lookup, where lookup_sel_reg still holds the way.
 // va is the line of interest in both, so it gives the index.
 assign lookup_d    = lookup_sel_wire   ? rtagvd_d[1]    : rtagvd_d[0];
-assign lookup_pa   = {lookup_sel_reg ? rtagvd_tag[1] : rtagvd_tag[0], va[11:4], 4'b0};
+assign lookup_pa   = {lookup_sel_reg ? rtagvd_tag[1] : rtagvd_tag[0], last_index, 4'b0};
 assign lookup_line = lookup_sel_reg ? rdata_way_line[1] : rdata_way_line[0];
 
 // RAM instances
