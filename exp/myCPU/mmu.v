@@ -296,8 +296,7 @@ assign dc_pt = (mem_state[idle] | mem_state[tlb_acc]) ? mem_addr[31:12]
                                                       : mem_line_addr_r[31:12];
 
 // the response of the lookup issued last cycle belongs to the access in MEM
-assign dc_read_use = mem_state[tlb_acc]
-                   & ((dc_cacop & cacop_act) | (~ mem_cacop & ~ mem_direct));
+assign dc_read_use = mem_state[tlb_acc] & ~ mem_abort & ((dc_cacop & cacop_act) | (~ mem_cacop & ~ mem_direct));
 
 assign dc_write_va  = mem_va[11:0];
 assign dc_refill_dirty = | mem_wstrb;      // store miss: the merged line is dirty
