@@ -197,6 +197,12 @@ reg         csr_mask_ones_ex;
 reg  [31:0] alu_result_mem;
 reg  [MOD_WU:0] md_op_mem;
 
+// div / mod operands are prepared in ID (like the branch operands) and reach
+// the divider through the ex_rdata flops, so its inputs never go through the
+// EX forwarding muxes
+wire        id_div_fw_needed;
+wire        div_in_ex;
+
 // payload arrays (birth stage .. last use)
 reg         res_from_mem [MEM:EX] /* verilator split_var */;
 reg         mem_we [MEM:EX] /* verilator split_var */;
@@ -500,11 +506,16 @@ assign allow[EX]  = ~ stall[EX] & allow[MEM];
 assign allow[ID]  = ~ stall[ID]  & allow[EX];
 assign allow[IF]  = ~ stall[IF]  & allow[ID];
 
-// ID waits for branch / jump operands and for a CSR write to the RF;
-// EX waits for its own operands; MEM waits for the mmu / the divider.
+// ID waits for branch / jump / div operands and for a CSR write to the RF;
+// EX waits for its own operands (the divider does not: its operands are already
+// latched); MEM waits for the mmu / the divider.
+assign id_div_fw_needed = | id_md_op[6:3];              // div / mod
+assign div_in_ex        = | md_op_ex[6:3];              // the EX slot is a div / mod
+
 assign stall[IF]  = if_pending;
-assign stall[ID]  = cur_valid[ID] & ((id_br_fw_needed & id_fw_pending) | csr_dep);
-assign stall[EX]  = cur_valid[EX] & (ex_fw_pending | div_hold);
+assign stall[ID]  = cur_valid[ID]
+                  & (((id_br_fw_needed | id_div_fw_needed) & id_fw_pending) | csr_dep);
+assign stall[EX]  = cur_valid[EX] & ((ex_fw_pending & ~ div_in_ex) | div_hold);
 assign stall[MEM] = mem_pending | (cur_div_pos[MEM] & div_busy);
 assign stall[WB]  = 1'b0;
 
@@ -1014,7 +1025,7 @@ assign div_is_signed   = md_op_ex[DIV_W] | md_op_ex[MOD_W];
 assign div_is_mod      = md_op_mem[MOD_W] | md_op_mem[MOD_WU];
 assign div_result      = div_is_mod ? div_rem : div_quot;
 assign div_leave       = cur_div_pos[MEM] & ~ div_busy & allow[MEM];
-assign div_start       = cur_div_pos[EX] & ~ div_started & ~ ex_fw_pending
+assign div_start       = cur_div_pos[EX] & ~ div_started
                        & (~ div_pos[MEM] | div_leave);
 assign div_hold        = cur_div_pos[EX] & ~ div_started & ~ div_start;
 assign div_reset       = reset | flush[EX] | flush[MEM];
@@ -1031,13 +1042,14 @@ assign ex_mem_wdata = ex_fw2_data;
 assign ex_csr_wdata = ex_fw2_data;
 assign ex_csr_mask  = csr_mask_ones_ex ? 32'hffffffff : ex_fw1_data;
 
-// EX sticky operand copies (separate from the payload registers):
-// seed from the ID read, then latch any valid producer forward so it survives
-// after that producer leaves MEM/WB.
+// EX sticky operand copies (separate from the payload registers): seed from the
+// value ID has already resolved (id_fw*_data includes the EX / MEM forwards that
+// ID waited for), then latch any valid producer forward so it survives after
+// that producer leaves MEM/WB.  The divider takes these flops directly.
 always @(posedge clk) begin
     if (allow[EX]) begin
-        ex_rdata1 <= id_rf_rdata1;
-        ex_rdata2 <= id_rf_rdata2;
+        ex_rdata1 <= id_fw1_data;
+        ex_rdata2 <= id_fw2_data;
     end
     else if (cur_valid[EX]) begin
         if ((ex_fw1_sel_mem | ex_fw1_sel_wb) & ~ ex_fw1_pending)
@@ -1070,8 +1082,8 @@ div u_div(
     .reset     (div_reset      ),
     .start     (div_start      ),
     .is_signed (div_is_signed  ),
-    .src1      (ex_src1        ),
-    .src2      (ex_src2        ),
+    .src1      (ex_rdata1      ),
+    .src2      (ex_rdata2      ),
     .busy      (div_busy       ),
     .done      (               ),
     .quot      (div_quot       ),
