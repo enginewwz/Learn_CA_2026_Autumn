@@ -1,23 +1,25 @@
 // 2-cycle 32x32 multiplier: radix-4 modified Booth + Wallace CSA tree
 //
-//   src1 / src2 / md_op   (already the caller's stage-0 registered operands)
+//   src1 / src2 / md_op   (the caller's stage-0 operands)
 //        -> s0: Booth encode (17 digits) + partial products + the correction
 //               constant + the WHOLE Wallace tree L1..L6 (18 -> 2 vectors),
 //               registered as (ws, wc)
 //        -> combinational tail: 64-bit CPA + high/low select
 //
-// The tree is nothing but wide XOR/OR LUT chains, so it fits in the same cycle
-// as the operand registers; the only deep structure left is the final carry
-// chain.  Keeping that CPA combinational after the (ws, wc) register is what
-// lets EX be two stages: the tree is computed in the stage-0 cycle and the CPA
-// in the stage-1 cycle, the last one before MEM.
+// The tree is nothing but wide XOR/OR LUT chains; the only deep structure left
+// is the final carry chain.  Keeping that CPA combinational after the (ws, wc)
+// register is what lets the two halves live in two pipeline stages: the tree is
+// computed in the stage-0 cycle (now ID, on the operands ID has resolved) and
+// the CPA in the stage-1 cycle (MEM), where the result mux also picks the
+// product.
 //
 // allow: the single internal register stage is frozen while allow is low.
 // There is no valid here - the caller tracks positions (mul_pos).
 //
 // The result is combinational: it is ready while the caller's stage-1 registers
-// hold the instruction, and MEM registers it.  mul is therefore never forwarded
-// to ID from inside EX.
+// hold the instruction, and the top's MEM result mux selects it.  mul is
+// therefore never forwarded from MEM; consumers see it through WB / the RF
+// write-first bypass.
 //
 // md_op is the one-hot mul/div select shared with the top:
 //   MUL_W    : low  32 bits of the product         (mul.w)

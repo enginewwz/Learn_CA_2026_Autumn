@@ -62,7 +62,7 @@ wire resetn = aresetn;
 // mmu: the fetch / memory-access stage controller.
 wire        preif_req;         // a fetch enters IF
 wire [31:0] inst_rdata;        // returns after an arbitrary latency
-wire        premem_req;        // a load / store in EX that enters MEM at this edge
+wire        premem_req;        // a load / store in ID that enters MEM at this edge
 wire [31:0] mem_va;            // its virtual address (= alu_result_mem)
 wire        mem_abort;         // this access has been found illegal
 wire [ 3:0] mem_wstrb;         // byte strobes; 4'b0 means read
@@ -71,17 +71,24 @@ wire [31:0] mem_rdata;
 wire        if_pending;        // from the mmu: this fetch should wait
 wire        mem_pending;       // from the mmu: this access should wait
 
-// pipeline: IF -> ID -> EX -> MEM -> WB
+// pipeline: IF -> ID -> MEM -> WB
+//
+// ID and EX are merged: the ALU (and the stage-0 Booth/Wallace tree of the
+// multiplier) runs in ID on the operands the ID forwarding network has already
+// resolved, and the ALU result is registered into MEM.  MEM is therefore both
+// the memory-access stage and the "result select" stage (ALU / mul CPA / div /
+// load data), exactly as it used to be one cycle after EX.  The divider is
+// started from MEM and its result is consumed there, so it no longer has any
+// handshake with an EX slot.
 
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
 
 localparam IF                = 0;
 localparam ID                = 1;
-localparam EX                = 2;
-localparam MEM               = 3;
-localparam WB                = 4;
-localparam TOTAL_STAGE_WIDTH = 5;
+localparam MEM               = 2;
+localparam WB                = 3;
+localparam TOTAL_STAGE_WIDTH = 4;
 
 // md_op bit positions: one-hot mul/div operation select
 localparam MUL_W             = 0;
@@ -143,17 +150,15 @@ wire [TOTAL_STAGE_WIDTH - 1: 0] flush;
 wire [TOTAL_STAGE_WIDTH - 1: 0] cur_valid;
 wire [TOTAL_STAGE_WIDTH - 1: 0] next_valid;
 
-// EX unit position: each EX slot is exactly one of alu / mul / div.
-// mul / div also carry their position into MEM, where their result appears.
-reg             alu_pos;
-reg  [MEM:EX]   mul_pos /* verilator split_var */;
-reg  [MEM:EX]   div_pos /* verilator split_var */;
-wire            cur_alu_pos;
-wire [MEM:EX]   cur_mul_pos;
-wire [MEM:EX]   cur_div_pos;
-wire            next_alu_pos;
-wire [MEM:EX]   next_mul_pos;
-wire [MEM:EX]   next_div_pos;
+// unit position: the instruction born in ID carries its mul / div flag into
+// MEM, where the product / quotient appears.  The ALU flag is no longer needed
+// (an ALU result is simply alu_result_mem at MEM).
+reg             mul_pos;
+reg             div_pos;
+wire            cur_mul_pos;
+wire            cur_div_pos;
+wire            next_mul_pos;
+wire            next_div_pos;
 
 wire [31:0] nextpc;
 (* keep = "true" *) wire [31:0] seq_pc;
@@ -167,7 +172,7 @@ reg  [31:0] inst;
 reg  [31:0] br_pc_reg;
 reg         br_reg;
 
-// ID -> EX: combinational at ID
+// ID -> MEM: combinational at ID
 wire [11:0] id_alu_op;
 wire [MOD_WU:0] id_md_op;
 wire        id_src1_used, id_src2_used, id_res_from_mem;
@@ -182,42 +187,34 @@ wire        id_src1_is_pc, id_src2_is_imm, id_csr_mask_ones;
 wire [31:0] id_rf_rdata1, id_rf_rdata2;
 wire [ 4:0] id_rf_raddr1, id_rf_raddr2;
 wire [31:0] id_imm;
+wire [31:0] id_src1, id_src2;
+wire [31:0] alu_result_id;
 
-// EX stage registers
-reg  [11:0] alu_op_ex;
-reg  [MOD_WU:0] md_op_ex;
-reg  [31:0] imm_ex;
-reg  [ 4:0] rf_raddr1_ex, rf_raddr2_ex;
-reg         src1_used_ex, src2_used_ex;
-reg         src1_is_pc_ex, src2_is_imm_ex;
-reg         csr_mask_ones_ex;
-
-// MEM stage registers: the EX ALU result and the mul/div select travel with
-// the instruction into MEM, where the result mux below picks the final value
+// MEM stage registers: the ID ALU result and the mul/div select travel with the
+// instruction into MEM, where the result mux below picks the final value
 reg  [31:0] alu_result_mem;
 reg  [MOD_WU:0] md_op_mem;
 
-// div / mod operands are prepared in ID (like the branch operands) and reach
-// the divider through the ex_rdata flops, so its inputs never go through the
-// EX forwarding muxes
-wire        id_div_fw_needed;
-wire        div_in_ex;
+// div / mod operands are resolved in ID (like the branch operands) and latched
+// into MEM together with the instruction; the divider is a MEM-stage unit now
+reg  [31:0] div_src1_mem, div_src2_mem;
 
-// payload arrays (birth stage .. last use)
-reg         res_from_mem [MEM:EX] /* verilator split_var */;
-reg         mem_we [MEM:EX] /* verilator split_var */;
-reg         mem_en [MEM:EX] /* verilator split_var */;
+// payload arrays (birth stage .. last use).  With EX merged into ID the
+// mul/div/ALU payload below has a single registered slot (MEM).
+reg         res_from_mem [MEM:MEM] /* verilator split_var */;
+reg         mem_we [MEM:MEM] /* verilator split_var */;
+reg         mem_en [MEM:MEM] /* verilator split_var */;
 reg  [31:0] mem_wdata_mem /* verilator split_var */;
-reg  [ 2:0] mem_size [MEM:EX] /* verilator split_var */;
-reg         mem_zext [MEM:EX] /* verilator split_var */;
-reg         gr_we [WB:EX] /* verilator split_var */;
-reg  [ 4:0] dest [WB:EX] /* verilator split_var */;
-reg  [13:0] csr_num [WB:EX] /* verilator split_var */;
-reg  [ 8:0] csr_ctl [WB:EX] /* verilator split_var */;
-reg  [ 4:0] tlb_op [WB:EX] /* verilator split_var */;
-reg  [ 4:0] invtlb_op [WB:EX] /* verilator split_var */;
-reg         cacop [MEM:EX] /* verilator split_var */;
-reg  [ 4:0] cacop_code [MEM:EX] /* verilator split_var */;
+reg  [ 2:0] mem_size [MEM:MEM] /* verilator split_var */;
+reg         mem_zext [MEM:MEM] /* verilator split_var */;
+reg         gr_we [WB:MEM] /* verilator split_var */;
+reg  [ 4:0] dest [WB:MEM] /* verilator split_var */;
+reg  [13:0] csr_num [WB:MEM] /* verilator split_var */;
+reg  [ 8:0] csr_ctl [WB:MEM] /* verilator split_var */;
+reg  [ 4:0] tlb_op [WB:MEM] /* verilator split_var */;
+reg  [ 4:0] invtlb_op [WB:MEM] /* verilator split_var */;
+reg         cacop [MEM:MEM] /* verilator split_var */;
+reg  [ 4:0] cacop_code [MEM:MEM] /* verilator split_var */;
 reg  [31:0] csr_wdata [WB:MEM] /* verilator split_var */;
 reg  [31:0] csr_mask [WB:MEM] /* verilator split_var */;
 reg  [12:0] excp_cause [WB:IF] /* verilator split_var */;
@@ -282,57 +279,34 @@ wire        mem_map_wr;
 wire [31:0] excp_entry;
 wire        excp_tlb;
 
-// EX -> MEM hand-off
+// ID -> MEM hand-off (combinational in ID, registered into MEM)
 wire        premem_ale;
 wire        premem_int_take;
 wire        premem_excp;
 wire [ 8:0] premem_csr_ctl;
 wire [12:0] premem_excp_cause;
 
-// fw src
-reg         fw_valid_ex;
+// fw src: the value MEM holds last cycle is the only register-level source a
+// consumer in ID can see in time (WB is covered by the RF write-first bypass).
 wire        fw_valid_mem;
-reg  [31:0] fw_data_ex;
 wire [31:0] fw_data_mem;
 
-// WB -> EX bypass: normal GPR write only (CSR is waited on in ID)
-wire        wb_fw_we;
-wire [ 4:0] wb_fw_dest;
-wire [31:0] wb_fw_data;
 // CSR-write-RF dependency: any in-flight stage writing the RF from CSR
 reg         csr_dep;
-// sticky EX operand copies (replace the removed EX RF read ports)
-reg  [31:0] ex_rdata1, ex_rdata2;
 
-// ID -> EX forwarding network (branch operands only, resolved and waited at ID)
-wire        id_fw1_hit_ex, id_fw1_hit_mem;
+// ID forwarding network: MEM -> ID.  Operands are resolved (and waited for)
+// here because the ALU / mul / div operands are all consumed at ID now.
+wire        id_fw1_hit_mem;
 wire        id_fw1_pending;
-wire        id_fw1_sel_ex, id_fw1_sel_mem, id_fw1_sel_rf;
+wire        id_fw1_sel_mem, id_fw1_sel_rf;
 wire [31:0] id_fw1_data;
-wire        id_fw2_hit_ex, id_fw2_hit_mem;
+wire        id_fw2_hit_mem;
 wire        id_fw2_pending;
-wire        id_fw2_sel_ex, id_fw2_sel_mem, id_fw2_sel_rf;
+wire        id_fw2_sel_mem, id_fw2_sel_rf;
 wire [31:0] id_fw2_data;
 wire        id_fw_pending;
-wire        id_br_fw_needed;
 wire        id_br_valid;
 reg         id_br_sent;
-
-// EX -> ALU/mul/div forwarding network
-wire        ex_fw1_hit_mem, ex_fw1_hit_wb;
-wire        ex_fw1_pending;
-wire        ex_fw1_sel_mem, ex_fw1_sel_wb, ex_fw1_sel_rf;
-wire [31:0] ex_fw1_data;
-wire        ex_fw2_hit_mem, ex_fw2_hit_wb;
-wire        ex_fw2_pending;
-wire        ex_fw2_sel_mem, ex_fw2_sel_wb, ex_fw2_sel_rf;
-wire [31:0] ex_fw2_data;
-wire        ex_fw1_used, ex_fw2_used;
-wire        ex_fw_pending;
-
-wire [31:0] ex_src1, ex_src2;
-wire [31:0] ex_result;
-wire [31:0] ex_mem_wdata, ex_csr_wdata, ex_csr_mask;
 
 // unit results
 wire [31:0] mul_result;
@@ -340,7 +314,7 @@ wire [31:0] div_result;
 wire        div_busy;
 wire [31:0] div_quot, div_rem;
 wire        div_is_signed, div_is_mod;
-wire        div_start, div_leave, div_hold;
+wire        div_start;
 reg         div_started;
 wire        div_reset;
 
@@ -474,15 +448,13 @@ always @(posedge clk) begin
     if (reset) begin
         pc[IF]  <= 32'h1bfffffc; // trick: first fetched pc is 0x1c000000
         pc[ID]  <= 32'h0;
-        pc[EX]  <= 32'h0;
         pc[MEM] <= 32'h0;
         pc[WB]  <= 32'h0;
     end
     else begin
         if (allow[IF] ) pc[IF]  <= nextpc;
         if (allow[ID] ) pc[ID]  <= pc[IF];
-        if (allow[EX] ) pc[EX]  <= pc[ID];
-        if (allow[MEM]) pc[MEM] <= pc[EX];
+        if (allow[MEM]) pc[MEM] <= pc[ID];
         if (allow[WB] ) pc[WB]  <= pc[MEM];
     end
 end
@@ -492,57 +464,42 @@ assign cur_valid = valid & ~ flush;
 assign next_valid = {cur_valid[MEM:IF] & ~ stall[MEM:IF], 1'b1} & allow | (~ allow & cur_valid);
 
 always @(posedge clk) begin
-    if (reset) valid <= 5'b0;
+    if (reset) valid <= 4'b0;
     else       valid <= next_valid;
 end
 
-assign flush    = wb_flush    ? 5'b01111 :
-                  br_taken_id ? 5'b00001 :
-                                5'b00000;
+assign flush    = wb_flush    ? 4'b0111 :
+                  br_taken_id ? 4'b0001 :
+                                4'b0000;
 
 assign allow[WB]  = 1'b1;
 assign allow[MEM] = ~ stall[MEM] & allow[WB];
-assign allow[EX]  = ~ stall[EX] & allow[MEM];
-assign allow[ID]  = ~ stall[ID]  & allow[EX];
+assign allow[ID]  = ~ stall[ID]  & allow[MEM];
 assign allow[IF]  = ~ stall[IF]  & allow[ID];
 
-// ID waits for branch / jump / div operands and for a CSR write to the RF;
-// EX waits for its own operands (the divider does not: its operands are already
-// latched); MEM waits for the mmu / the divider.
-assign id_div_fw_needed = | id_md_op[6:3];              // div / mod
-assign div_in_ex        = | md_op_ex[6:3];              // the EX slot is a div / mod
-
+// ID now owns the ALU / mul / div operands, so it waits for every unresolved
+// source (id_fw_pending already folds in the CSR-write dependency).  MEM waits
+// for the mmu and for the divider, which both finish there.
 assign stall[IF]  = if_pending;
-assign stall[ID]  = cur_valid[ID]
-                  & (((id_br_fw_needed | id_div_fw_needed) & id_fw_pending) | csr_dep);
-assign stall[EX]  = cur_valid[EX] & ((ex_fw_pending & ~ div_in_ex) | div_hold);
-assign stall[MEM] = mem_pending | (cur_div_pos[MEM] & div_busy);
+assign stall[ID]  = cur_valid[ID] & id_fw_pending;
+assign stall[MEM] = mem_pending | (cur_div_pos & (div_busy | ~ div_started));
 assign stall[WB]  = 1'b0;
 
-// unit position flags
-assign cur_alu_pos = alu_pos & ~ flush[EX];
-assign cur_mul_pos = mul_pos & ~ flush[MEM:EX];
-assign cur_div_pos = div_pos & ~ flush[MEM:EX];
+// unit position flags: born in ID, used in MEM
+assign cur_mul_pos = mul_pos & ~ flush[MEM];
+assign cur_div_pos = div_pos & ~ flush[MEM];
 
-assign next_alu_pos = (cur_valid[ID] & ~ stall[ID] & ~ (| id_md_op) & allow[EX])
-                    | (~ allow[EX] & cur_alu_pos);
-assign next_mul_pos[EX] = (cur_valid[ID] & ~ stall[ID] & (| id_md_op[2:0]) & allow[EX])
-                        | (~ allow[EX] & cur_mul_pos[EX]);
-assign next_div_pos[EX] = (cur_valid[ID] & ~ stall[ID] & (| id_md_op[6:3]) & allow[EX])
-                        | (~ allow[EX] & cur_div_pos[EX]);
-assign next_mul_pos[MEM] = (cur_mul_pos[EX] & ~ stall[EX] & allow[MEM])
-                         | (~ allow[MEM] & cur_mul_pos[MEM]);
-assign next_div_pos[MEM] = (cur_div_pos[EX] & ~ stall[EX] & allow[MEM])
-                         | (~ allow[MEM] & cur_div_pos[MEM]);
+assign next_mul_pos = (cur_valid[ID] & ~ stall[ID] & (| id_md_op[2:0]) & allow[MEM])
+                    | (~ allow[MEM] & cur_mul_pos);
+assign next_div_pos = (cur_valid[ID] & ~ stall[ID] & (| id_md_op[6:3]) & allow[MEM])
+                    | (~ allow[MEM] & cur_div_pos);
 
 always @(posedge clk) begin
     if (reset) begin
-        alu_pos <= 1'b0;
-        mul_pos <= 2'b0;
-        div_pos <= 2'b0;
+        mul_pos <= 1'b0;
+        div_pos <= 1'b0;
     end
     else begin
-        alu_pos <= next_alu_pos;
         mul_pos <= next_mul_pos;
         div_pos <= next_div_pos;
     end
@@ -834,8 +791,6 @@ assign id_br_op      = {inst_jirl | inst_b | inst_bl,
                         inst_bgeu, inst_bltu, inst_bge, inst_blt, inst_bne, inst_beq};
 assign id_br_base    = inst_jirl ? id_fw1_data : pc[ID];
 assign id_br_offs    = (inst_b | inst_bl) ? br_offs_i26 : br_offs_i16;
-assign id_br_fw_needed = inst_beq | inst_bne | inst_blt | inst_bge
-                       | inst_bltu | inst_bgeu | inst_jirl;
 assign id_fw_pending = id_fw1_pending | id_fw2_pending;
 assign id_br_valid   = valid[ID] & ~ id_br_sent & ~ id_fw_pending;
 
@@ -857,115 +812,69 @@ br u_br(
 );
 
 // fw src
-// fw_valid_ex: the EX stage is frozen on a (non-memory, non-CSR) ALU result, so
-// that result is stable and can be handed to ID.  fw_valid_mem: the MEM stage
-// holds a result that is ready to be forwarded (the ALU result only: a load
-// waits for its data and mul/div are forwarded from WB, so WB never blocks).
-always @(posedge clk) begin
-    if (reset | flush[EX]) fw_valid_ex <= 1'b0;
-    else if (allow[EX])    fw_valid_ex <= 1'b0;
-    else if (~ ex_fw_pending & alu_pos & ~ mem_en[EX] & ~ csr_ctl[EX][CSR_WB])
-                           fw_valid_ex <= 1'b1;
-end
-
-assign fw_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB] & ~ mul_pos[MEM] & ~ div_pos[MEM];
-
-always @(posedge clk) begin
-    fw_data_ex <= ex_result;
-end
+// fw_valid_mem: MEM holds a result that is ready to be handed to ID.  Only the
+// plain ALU result qualifies: a load needs its data, mul/div results are only
+// selected at the MEM/WB edge, and a CSR write goes through the dedicated RF
+// port (ID waits for it via csr_dep).  Everything that is not forwarded here
+// reaches ID through the RF write-first bypass one cycle later (WB).
+assign fw_valid_mem  = ~ mem_en[MEM] & ~ csr_ctl[MEM][CSR_WB] & ~ mul_pos & ~ div_pos;
 
 assign fw_data_mem = alu_result_mem;
 
-// CSR-writes-RF dependency: detect the csrrd in EX/MEM/WB.
-// CSR writes the RF at WB with no bypass, so ID waits for the write to land.
+// CSR-writes-RF dependency: a csrrd/csrwr/... writes the RF through the CSR
+// data port at WB with no read bypass, so ID waits until the write has landed.
 always @(posedge clk) begin
     if (reset | flush[ID])                      csr_dep <= 1'b0;
-    else if (allow[EX] & valid[ID] & ~ csr_dep & id_csr_ctl[CSR_WB])
+    else if (allow[ID] & valid[ID] & ~ csr_dep & id_csr_ctl[CSR_WB])
                                                 csr_dep <= 1'b1;
     else if (valid[WB] & csr_ctl[WB][CSR_WB])   csr_dep <= 1'b0;
 end
 
-// id_fw(dst): branch operands
-assign id_fw1_hit_ex  = valid[EX] & gr_we[EX] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[EX]);
+// id_fw(dst): the (only) register source a consumer in ID can see in time.
+// A hit whose value is not ready yet (load / mul / div / CSR) makes ID wait;
+// the producer then reaches WB and the RF read port covers it.
 assign id_fw1_hit_mem = valid[MEM] & gr_we[MEM] & id_src1_used & (id_rf_raddr1 != 5'd0) & (id_rf_raddr1 == dest[MEM]);
-assign id_fw1_pending = (id_fw1_sel_ex & ~ fw_valid_ex)
-                      | (id_fw1_sel_mem & ~ fw_valid_mem)
-                      | csr_dep;
+assign id_fw1_pending = (id_fw1_sel_mem & ~ fw_valid_mem) | csr_dep;
 
-assign id_fw1_sel_ex  = id_fw1_hit_ex;
-assign id_fw1_sel_mem = ~ id_fw1_hit_ex & id_fw1_hit_mem;
-assign id_fw1_sel_rf  = ~ id_fw1_hit_ex & ~ id_fw1_hit_mem;
+assign id_fw1_sel_mem = id_fw1_hit_mem;
+assign id_fw1_sel_rf  = ~ id_fw1_hit_mem;
 
-assign id_fw1_data = ({32{id_fw1_sel_ex }} & fw_data_ex)  |
-                     ({32{id_fw1_sel_mem}} & fw_data_mem) |
+assign id_fw1_data = ({32{id_fw1_sel_mem}} & fw_data_mem) |
                      ({32{id_fw1_sel_rf }} & id_rf_rdata1);
 
-assign id_fw2_hit_ex  = valid[EX] & gr_we[EX] & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[EX]);
 assign id_fw2_hit_mem = valid[MEM] & gr_we[MEM] & id_src2_used & (id_rf_raddr2 != 5'd0) & (id_rf_raddr2 == dest[MEM]);
-assign id_fw2_pending = (id_fw2_sel_ex & ~ fw_valid_ex)
-                      | (id_fw2_sel_mem & ~ fw_valid_mem)
-                      | csr_dep;
+assign id_fw2_pending = (id_fw2_sel_mem & ~ fw_valid_mem) | csr_dep;
 
-assign id_fw2_sel_ex  = id_fw2_hit_ex;
-assign id_fw2_sel_mem = ~ id_fw2_hit_ex & id_fw2_hit_mem;
-assign id_fw2_sel_rf  = ~ id_fw2_hit_ex & ~ id_fw2_hit_mem;
+assign id_fw2_sel_mem = id_fw2_hit_mem;
+assign id_fw2_sel_rf  = ~ id_fw2_hit_mem;
 
-assign id_fw2_data = ({32{id_fw2_sel_ex }} & fw_data_ex)  |
-                     ({32{id_fw2_sel_mem}} & fw_data_mem) |
+assign id_fw2_data = ({32{id_fw2_sel_mem}} & fw_data_mem) |
                      ({32{id_fw2_sel_rf }} & id_rf_rdata2);
 
-// EX <- ID
-always @(posedge clk) begin
-    if (allow[EX]) begin
-        alu_op_ex        <= id_alu_op;
-        md_op_ex         <= id_md_op;
-        imm_ex           <= id_imm;
-        rf_raddr1_ex     <= id_rf_raddr1;
-        rf_raddr2_ex     <= id_rf_raddr2;
-        src1_used_ex     <= id_src1_used;
-        src2_used_ex     <= id_src2_used;
-        src1_is_pc_ex    <= id_src1_is_pc;
-        src2_is_imm_ex   <= id_src2_is_imm;
-        csr_mask_ones_ex <= id_csr_mask_ones;
-        res_from_mem[EX] <= id_res_from_mem;
-        mem_we[EX]       <= id_mem_we;
-        mem_en[EX]       <= id_mem_en;
-        mem_size[EX]     <= id_mem_size;
-        mem_zext[EX]     <= id_mem_zext;
-        gr_we[EX]        <= id_gr_we;
-        dest[EX]         <= id_dest;
-        csr_num[EX]      <= id_csr_num;
-        csr_ctl[EX]      <= id_csr_ctl;
-        tlb_op[EX]       <= id_tlb_op;
-        invtlb_op[EX]    <= id_invtlb_op;
-        cacop[EX]        <= inst_cacop;
-        cacop_code[EX]   <= id_cacop_code;
-        excp_cause[EX]   <= id_excp_cause;
-    end
-end
-
-// MEM <- EX / WB <- MEM
+// ID -> MEM
 always @(posedge clk) begin
     if (allow[MEM]) begin
-        alu_result_mem    <= ex_result;
-        md_op_mem         <= md_op_ex;
-        res_from_mem[MEM] <= res_from_mem[EX];
-        mem_we[MEM]       <= mem_we[EX];
-        mem_en[MEM]       <= mem_en[EX];
-        mem_wdata_mem     <= ex_mem_wdata;
-        mem_size[MEM]     <= mem_size[EX];
-        mem_zext[MEM]     <= mem_zext[EX];
-        gr_we[MEM]        <= gr_we[EX];
-        dest[MEM]         <= dest[EX];
-        csr_num[MEM]      <= csr_num[EX];
+        alu_result_mem    <= alu_result_id;
+        md_op_mem         <= id_md_op;
+        div_src1_mem      <= id_src1;
+        div_src2_mem      <= id_src2;
+        res_from_mem[MEM] <= id_res_from_mem;
+        mem_we[MEM]       <= id_mem_we;
+        mem_en[MEM]       <= id_mem_en;
+        mem_wdata_mem     <= id_fw2_data;
+        mem_size[MEM]     <= id_mem_size;
+        mem_zext[MEM]     <= id_mem_zext;
+        gr_we[MEM]        <= id_gr_we;
+        dest[MEM]         <= id_dest;
+        csr_num[MEM]      <= id_csr_num;
         csr_ctl[MEM]      <= premem_csr_ctl;
-        tlb_op[MEM]       <= tlb_op[EX];
-        invtlb_op[MEM]    <= invtlb_op[EX];
-        cacop[MEM]        <= cacop[EX];
-        cacop_code[MEM]   <= cacop_code[EX];
+        tlb_op[MEM]       <= id_tlb_op;
+        invtlb_op[MEM]    <= id_invtlb_op;
+        cacop[MEM]        <= inst_cacop;
+        cacop_code[MEM]   <= id_cacop_code;
         excp_cause[MEM]   <= premem_excp_cause;
-        csr_wdata[MEM]    <= ex_csr_wdata;
-        csr_mask[MEM]     <= ex_csr_mask;
+        csr_wdata[MEM]    <= id_fw2_data;
+        csr_mask[MEM]     <= id_csr_mask_ones ? 32'hffffffff : id_fw1_data;
     end
     if (allow[WB]) begin
         result_wb         <= result_mem;
@@ -983,134 +892,78 @@ always @(posedge clk) begin
     end
 end
 
-// ex_fw(dst)
-assign ex_fw1_used = src1_used_ex & ~ src1_is_pc_ex;
-assign ex_fw2_used = src2_used_ex;
-assign ex_fw1_hit_mem = valid[MEM] & gr_we[MEM] & ex_fw1_used & (rf_raddr1_ex != 5'd0) & (rf_raddr1_ex == dest[MEM]);
+// ID datapath: the operands are already resolved by the ID forwarding network
+assign id_src1 = id_src1_is_pc  ? pc[ID] : id_fw1_data;
+assign id_src2 = id_src2_is_imm ? id_imm : id_fw2_data;
 
-assign ex_fw1_hit_wb  = wb_fw_we & ex_fw1_used & (rf_raddr1_ex != 5'd0) & (rf_raddr1_ex == wb_fw_dest);
-
-assign ex_fw1_pending = ex_fw1_sel_mem & ~ fw_valid_mem;
-
-assign ex_fw1_sel_mem = ex_fw1_hit_mem;
-assign ex_fw1_sel_wb  = ~ ex_fw1_hit_mem & ex_fw1_hit_wb;
-assign ex_fw1_sel_rf  = ~ ex_fw1_hit_mem & ~ ex_fw1_hit_wb;
-
-assign ex_fw1_data = ({32{ex_fw1_sel_mem}} & fw_data_mem) |
-                     ({32{ex_fw1_sel_wb }} & wb_fw_data)  |
-                     ({32{ex_fw1_sel_rf }} & ex_rdata1);
-
-assign ex_fw2_hit_mem = valid[MEM] & gr_we[MEM] & ex_fw2_used & (rf_raddr2_ex != 5'd0) & (rf_raddr2_ex == dest[MEM]);
-
-assign ex_fw2_hit_wb  = wb_fw_we & ex_fw2_used & (rf_raddr2_ex != 5'd0) & (rf_raddr2_ex == wb_fw_dest);
-
-assign ex_fw2_pending = ex_fw2_sel_mem & ~ fw_valid_mem;
-
-assign ex_fw2_sel_mem = ex_fw2_hit_mem;
-assign ex_fw2_sel_wb  = ~ ex_fw2_hit_mem & ex_fw2_hit_wb;
-assign ex_fw2_sel_rf  = ~ ex_fw2_hit_mem & ~ ex_fw2_hit_wb;
-
-assign ex_fw2_data = ({32{ex_fw2_sel_mem}} & fw_data_mem) |
-                     ({32{ex_fw2_sel_wb }} & wb_fw_data)  |
-                     ({32{ex_fw2_sel_rf }} & ex_rdata2);
-
-// EX datapath
-assign ex_fw_pending = ex_fw1_pending | ex_fw2_pending;
-
-assign ex_src1 = src1_is_pc_ex  ? pc[EX] : ex_fw1_data;
-assign ex_src2 = src2_is_imm_ex ? imm_ex : ex_fw2_data;
-
-// div handshake: start in EX, wait for the result in MEM
-assign div_is_signed   = md_op_ex[DIV_W] | md_op_ex[MOD_W];
-assign div_is_mod      = md_op_mem[MOD_W] | md_op_mem[MOD_WU];
-assign div_result      = div_is_mod ? div_rem : div_quot;
-assign div_leave       = cur_div_pos[MEM] & ~ div_busy & allow[MEM];
-assign div_start       = cur_div_pos[EX] & ~ div_started
-                       & (~ div_pos[MEM] | div_leave);
-assign div_hold        = cur_div_pos[EX] & ~ div_started & ~ div_start;
-assign div_reset       = reset | flush[EX] | flush[MEM];
-
-always @(posedge clk) begin
-    if (div_reset)                     div_started <= 1'b0;
-    else if (div_start & ~ allow[EX])  div_started <= 1'b1;
-    else if (allow[EX])                div_started <= 1'b0;
-end
-
-// EX operands rebuilt from the (possibly late) forwarded register values.
-// A store's data and a CSR write's payload are ready here, at EX.
-assign ex_mem_wdata = ex_fw2_data;
-assign ex_csr_wdata = ex_fw2_data;
-assign ex_csr_mask  = csr_mask_ones_ex ? 32'hffffffff : ex_fw1_data;
-
-// EX sticky operand copies (separate from the payload registers): seed from the
-// value ID has already resolved (id_fw*_data includes the EX / MEM forwards that
-// ID waited for), then latch any valid producer forward so it survives after
-// that producer leaves MEM/WB.  The divider takes these flops directly.
-always @(posedge clk) begin
-    if (allow[EX]) begin
-        ex_rdata1 <= id_fw1_data;
-        ex_rdata2 <= id_fw2_data;
-    end
-    else if (cur_valid[EX]) begin
-        if ((ex_fw1_sel_mem | ex_fw1_sel_wb) & ~ ex_fw1_pending)
-            ex_rdata1 <= ex_fw1_data;
-        if ((ex_fw2_sel_mem | ex_fw2_sel_wb) & ~ ex_fw2_pending)
-            ex_rdata2 <= ex_fw2_data;
-    end
-end
-
-// EX units
-alu u_alu_ex(
-    .alu_op     (alu_op_ex      ),
-    .src1       (ex_src1        ),
-    .src2       (ex_src2        ),
-    .alu_result (ex_result      )
+// ID units: the ALU computes the result / the load-store address here, and the
+// multiplier's Booth + Wallace tree collapses the product to (ws, wc) here.
+// Both results are registered into MEM at the ID/MEM edge.
+alu u_alu_id(
+    .alu_op     (id_alu_op     ),
+    .src1       (id_src1       ),
+    .src2       (id_src2       ),
+    .alu_result (alu_result_id )
 );
 
 mul u_mul(
     .clk    (clk            ),
     .reset  (reset          ),
-    .allow  (allow[EX]      ),
-    .src1   (ex_src1        ),
-    .src2   (ex_src2        ),
-    .md_op  (md_op_ex       ),
+    .allow  (allow[ID]      ),
+    .src1   (id_src1        ),
+    .src2   (id_src2        ),
+    .md_op  (id_md_op       ),
     .result (mul_result     )
 );
+
+// div handshake: entirely in MEM.  The operands were latched from ID, start is
+// asserted for the first MEM cycle, and MEM waits until the divider drops busy.
+assign div_is_signed   = md_op_mem[DIV_W] | md_op_mem[MOD_W];
+assign div_is_mod      = md_op_mem[MOD_W] | md_op_mem[MOD_WU];
+assign div_result      = div_is_mod ? div_rem : div_quot;
+assign div_start       = cur_div_pos & ~ div_started & ~ div_busy;
+assign div_reset       = reset | flush[MEM];
+
+always @(posedge clk) begin
+    if (div_reset)                     div_started <= 1'b0;
+    else if (div_start & ~ allow[MEM]) div_started <= 1'b1;
+    else if (allow[MEM])               div_started <= 1'b0;
+end
 
 div u_div(
     .clk       (clk            ),
     .reset     (div_reset      ),
     .start     (div_start      ),
     .is_signed (div_is_signed  ),
-    .src1      (ex_rdata1      ),
-    .src2      (ex_rdata2      ),
+    .src1      (div_src1_mem   ),
+    .src2      (div_src2_mem   ),
     .busy      (div_busy       ),
     .done      (               ),
     .quot      (div_quot       ),
     .rem       (div_rem        )
 );
 
-// MEM result mux: the ALU result latched at the EX/MEM edge, the mul result
+// MEM result mux: the ID ALU result latched at the ID/MEM edge, the mul result
 // (the CPA finishes here), the div result (ready when busy drops) or the load
 // data.  It is latched into WB; the ALU / load values are also forwarded from
 // MEM, while mul / div are only forwarded from WB (see fw_valid_mem).
-assign result_mem = ({32{mul_pos[MEM]}} & mul_result) |
-                    ({32{div_pos[MEM]}} & div_result) |
-                    ({32{~ mul_pos[MEM] & ~ div_pos[MEM]}} &
+assign result_mem = ({32{mul_pos}} & mul_result) |
+                    ({32{div_pos}} & div_result) |
+                    ({32{~ mul_pos & ~ div_pos}} &
                      (res_from_mem[MEM] ? mem_result : alu_result_mem));
 
-// EX -> MEM / MEM -> WB
-assign premem_ale   = mem_en[EX] & ((mem_size[EX][SIZE_HALF] &    ex_result[0]   |
-                                     mem_size[EX][SIZE_WORD] & (| ex_result[1:0])));
+// ID -> MEM / MEM -> WB (pre-MEM signals are computed combinationally at ID)
+assign premem_ale   = id_mem_en & ((id_mem_size[SIZE_HALF] &    alu_result_id[0]   |
+                                    id_mem_size[SIZE_WORD] & (| alu_result_id[1:0])));
 assign premem_int_take = int_o;
-assign premem_excp  = premem_ale | premem_int_take | csr_ctl[EX][CSR_EXCP];
-assign premem_csr_ctl   = csr_ctl[EX] | (premem_excp ? (9'h1 << CSR_EXCP) : 9'h0);
-assign premem_excp_cause = excp_cause[EX]
+assign premem_excp  = premem_ale | premem_int_take | id_csr_ctl[CSR_EXCP];
+assign premem_csr_ctl   = id_csr_ctl | (premem_excp ? (9'h1 << CSR_EXCP) : 9'h0);
+assign premem_excp_cause = id_excp_cause
                          | (premem_ale ? (13'h1 << EXCP_ALE) : 13'h0)
                          | (premem_int_take ? (13'h1 << EXCP_INT) : 13'h0);
-assign premem_req   = cur_valid[EX] & (mem_en[EX] | cacop[EX]) & ~ premem_excp;
+assign premem_req   = cur_valid[ID] & ~ stall[ID] & (id_mem_en | inst_cacop) & ~ premem_excp;
 
-// MEM: the address / byte lanes / store data were all computed in EX
+// MEM: the address / byte lanes / store data were all computed in ID
 assign mem_va    = alu_result_mem;
 
 // cacop: no translation, the address is used as a physical address by the mmu
@@ -1187,10 +1040,9 @@ assign rf_we    = gr_we[WB] && valid[WB] && ~ csr_ctl[WB][CSR_EXCP] && ~ csr_ctl
 assign rf_waddr = dest[WB];
 assign rf_wdata = result_wb;
 
-// WB -> EX bypass (normal GPR writes; CSR has no bypass, ID waits)
-assign wb_fw_we   = rf_we;
-assign wb_fw_dest = rf_waddr;
-assign wb_fw_data = rf_wdata;
+// WB normal GPR writes reach ID / MEM through the RF write-first read bypass
+// (and the MEM -> ID forward for the same-cycle case), so there is no explicit
+// WB forwarding network any more.
 
 // CSR GPR write: same address port as the pipeline write (the address is the
 // registered dest[WB]), separate data port, no write-first read bypass.  The
@@ -1482,7 +1334,7 @@ mmu u_mmu(
     .mem_dmw_pa     (mem_dmw_pa     ),
 
     .if_pre_addr        (nextpc             ),   // VIPT index, one cycle early
-    .mem_pre_addr       (ex_result          ),
+    .mem_pre_addr       (alu_result_id      ),
     .mem_cacop          (mem_cacop          ),
     .mem_cacop_code     (mem_cacop_code     ),
     .if_mat             (if_mat             ),

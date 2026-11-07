@@ -289,7 +289,7 @@ assign dc_lu_now    = mem_pre
                        | mem_state[tlb_acc] & (mem_hit_done | mem_abort));
 
 assign dc_read_req = dc_lu_now;
-assign dc_va = dc_lu_now            ? mem_pre_addr[11:0]   // lookup for the access in EX
+assign dc_va = dc_lu_now            ? mem_pre_addr[11:0]   // lookup for the access in ID
              : mem_state[tlb_acc]   ? mem_va       [11:0]   // translation / cacop response
                                     : mem_line_addr_r[11:0]; // write-back / refill
 assign dc_pt = (mem_state[idle] | mem_state[tlb_acc]) ? mem_addr[31:12]
