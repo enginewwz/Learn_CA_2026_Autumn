@@ -7,7 +7,8 @@ module mmu(
     input  wire [31:0] if_va,           // = pc[IF]
     input  wire        if_allow,        // = allow[IF]
     output wire        if_pending,      // -> stall[IF]
-    output wire [31:0] if_rdata,
+    output wire [31:0] if_rdata_0,      // instruction at if_va
+    output wire [31:0] if_rdata_1,      // instruction at if_va + 4 (0 when it crosses a line)
 
     // CPU side: load / store
     input  wire        mem_pre,         // the access enters MEM at this edge
@@ -154,7 +155,11 @@ wire [127:0] bridge_inst_rdata, bridge_data_rdata;
 // icache
 wire         ic_read_req, ic_read_use;
 wire         ic_read_hit;
-wire [ 31:0] ic_read_data;
+wire [ 31:0] ic_read_data_0;
+wire [ 31:0] ic_read_data_1;
+
+// second word of a fetch pair: same 16B line, one word up
+wire [  1:0] if_wsel_1;
 wire         ic_cacop_en, ic_cacop_hit_mode;
 wire         ic_refill_we;
 wire [127:0] ic_refill_data;
@@ -331,10 +336,21 @@ assign should_write_back = mem_cacop ? cacop_wb : dc_lookup_d;
 
 // the refilled line is written to the cache at the end of the last MEM_READ
 // cycle, so its data is available in CACHE_REFILL
-assign if_rdata  = if_direct              ? bridge_inst_rdata[31:0]
-                 : if_state[cache_refill] ? ic_refill_data[{if_va[3:2], 5'b0} +: 32]
-                 : ic_read_hit            ? ic_read_data
-                                          : ic_refill_data[{if_va[3:2], 5'b0} +: 32];
+assign if_wsel_1 = if_va[3:2] + 2'd1;
+
+assign if_rdata_0 = if_direct              ? bridge_inst_rdata[31:0]
+                  : if_state[cache_refill] ? ic_refill_data[{if_va[3:2], 5'b0} +: 32]
+                  : ic_read_hit            ? ic_read_data_0
+                                           : ic_refill_data[{if_va[3:2], 5'b0} +: 32];
+
+// the pair is only returned when if_va + 4 is still inside the same 16B line
+// (a simple low-bit mux; the "nextpc" fetch just carries the same line) -- an
+// uncached fetch has one beat only, so it can never return a pair either
+assign if_rdata_1 = (if_va[3:2] == 2'b11) ? 32'b0
+                  : if_direct              ? 32'b0
+                  : if_state[cache_refill] ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
+                  : ic_read_hit            ? ic_read_data_1
+                                           : ic_refill_data[{if_wsel_1, 5'b0} +: 32];
 assign mem_rdata = mem_direct             ? bridge_data_rdata[31:0]
                  : mem_state[cache_refill] ? dc_refill_data[{mem_va[3:2], 5'b0} +: 32]
                  : dc_read_hit            ? dc_read_data
@@ -609,7 +625,8 @@ icache u_icache(
     .read_req       (ic_read_req        ),
     .read_use       (ic_read_use        ),
     .read_hit       (ic_read_hit        ),
-    .read_data      (ic_read_data       ),
+    .read_data_0    (ic_read_data_0     ),
+    .read_data_1    (ic_read_data_1     ),
     .cacop_lookup   (ic_cacop_lookup    ),
     .cacop_en       (ic_cacop_en        ),
     .cacop_hit_mode (ic_cacop_hit_mode  ),

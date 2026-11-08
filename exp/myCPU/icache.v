@@ -9,7 +9,8 @@ module icache(
     input  wire         read_req,   // issue a lookup, data is valid one cycle later
     input  wire         read_use,   // this cycle consumes the previous lookup's result
     output wire         read_hit,
-    output wire [31:0]  read_data,
+    output wire [31:0]  read_data_0,    // word at last_va[3:2]       (fetched pc)
+    output wire [31:0]  read_data_1,    // word at last_va[3:2] + 1   (pc + 4 of a pair)
 
     // cacop
     input  wire         cacop_lookup,   // issue the tag read of the cacop (phase 1)
@@ -27,7 +28,8 @@ wire en;
 wire tag_we_way [1:0];
 
 wire [127:0] rdata_way_line [1:0];
-wire [31:0] rdata_way_word [1:0];
+wire [31:0] rdata_way_word_0 [1:0];
+wire [31:0] rdata_way_word_1 [1:0];
 wire [21:0] rtagvd_way [1:0];
 wire [19:0] rtagvd_tag [1:0];
 wire rtagvd_v [1:0];
@@ -52,22 +54,42 @@ assign en = read_req | cacop_lookup | cacop_en | refill_we;
 assign index      = va[11:4];
 assign last_index = last_va[11:4];
 
+// the word inside the 16B line: the first fetched instruction, and the second
+// one of a pair (wraps to 0 at the line end; the caller gates that case out)
+wire [1:0] last_wsel_0;
+wire [1:0] last_wsel_1;
+
+assign last_wsel_0 = last_va[3:2];
+assign last_wsel_1 = last_va[3:2] + 2'd1;
+
 genvar i;
 generate
     wire [31:0] rdata_way0_word_offset [3:0];
     wire [31:0] rdata_way1_word_offset [3:0];
+    wire [31:0] rdata_way0_word_offset_1 [3:0];
+    wire [31:0] rdata_way1_word_offset_1 [3:0];
     for (i = 0; i < 4; i = i + 1)begin: offset_sel
-        assign rdata_way0_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [0][(i + 1) * 32 - 1: i * 32] : 32'b0;
-        assign rdata_way1_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [1][(i + 1) * 32 - 1: i * 32] : 32'b0;
+        assign rdata_way0_word_offset [i] = (last_wsel_0 == i[1:0])   ? rdata_way_line [0][(i + 1) * 32 - 1: i * 32] : 32'b0;
+        assign rdata_way1_word_offset [i] = (last_wsel_0 == i[1:0])   ? rdata_way_line [1][(i + 1) * 32 - 1: i * 32] : 32'b0;
+        assign rdata_way0_word_offset_1 [i] = (last_wsel_1 == i[1:0]) ? rdata_way_line [0][(i + 1) * 32 - 1: i * 32] : 32'b0;
+        assign rdata_way1_word_offset_1 [i] = (last_wsel_1 == i[1:0]) ? rdata_way_line [1][(i + 1) * 32 - 1: i * 32] : 32'b0;
     end
-    assign rdata_way_word [0] = rdata_way0_word_offset [0] 
+    assign rdata_way_word_0 [0] = rdata_way0_word_offset [0] 
                               | rdata_way0_word_offset [1] 
                               | rdata_way0_word_offset [2] 
                               | rdata_way0_word_offset [3];
-    assign rdata_way_word [1] = rdata_way1_word_offset [0] 
+    assign rdata_way_word_0 [1] = rdata_way1_word_offset [0] 
                               | rdata_way1_word_offset [1] 
                               | rdata_way1_word_offset [2] 
                               | rdata_way1_word_offset [3];
+    assign rdata_way_word_1 [0] = rdata_way0_word_offset_1 [0] 
+                              | rdata_way0_word_offset_1 [1] 
+                              | rdata_way0_word_offset_1 [2] 
+                              | rdata_way0_word_offset_1 [3];
+    assign rdata_way_word_1 [1] = rdata_way1_word_offset_1 [0] 
+                              | rdata_way1_word_offset_1 [1] 
+                              | rdata_way1_word_offset_1 [2] 
+                              | rdata_way1_word_offset_1 [3];
 endgenerate
 
 assign {rtagvd_tag[0], rtagvd_v[0], rtagvd_d[0]} = rtagvd_way[0];
@@ -77,7 +99,8 @@ assign hit_way[0] = (rtagvd_tag[0] == pt) & rtagvd_v[0];
 assign hit_way[1] = (rtagvd_tag[1] == pt) & rtagvd_v[1];
 
 assign read_hit = hit_way[0] | hit_way[1];
-assign read_data = hit_way[0] ? rdata_way_word[0] : rdata_way_word [1];
+assign read_data_0 = hit_way[0] ? rdata_way_word_0[0] : rdata_way_word_0 [1];
+assign read_data_1 = hit_way[0] ? rdata_way_word_1[0] : rdata_way_word_1 [1];
 
 // direct index addressing: way = VA[Way-1:0], i.e. VA[0] for the two ways;
 // hit invalidate instead picks the way whose tag matches

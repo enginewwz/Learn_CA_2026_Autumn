@@ -86,6 +86,11 @@ wire [31:0] debug_wb_pc;
 wire [3 :0] debug_wb_rf_we;
 wire [4 :0] debug_wb_rf_wnum;
 wire [31:0] debug_wb_rf_wdata;
+// dual issue: the second write-back port (slot 1 of the pair)
+wire [31:0] debug_wb_pc_1;
+wire [3 :0] debug_wb_rf_we_1;
+wire [4 :0] debug_wb_rf_wnum_1;
+wire [31:0] debug_wb_rf_wdata_1;
 
 //clk and resetn
 wire cpu_clk;
@@ -317,7 +322,11 @@ mycpu_top u_cpu(
     .debug_wb_pc      (debug_wb_pc      ),
     .debug_wb_rf_we   (debug_wb_rf_we   ),
     .debug_wb_rf_wnum (debug_wb_rf_wnum ),
-    .debug_wb_rf_wdata(debug_wb_rf_wdata)
+    .debug_wb_rf_wdata(debug_wb_rf_wdata),
+    .debug_wb_pc_1      (debug_wb_pc_1      ),
+    .debug_wb_rf_we_1   (debug_wb_rf_we_1   ),
+    .debug_wb_rf_wnum_1 (debug_wb_rf_wnum_1 ),
+    .debug_wb_rf_wdata_1(debug_wb_rf_wdata_1)
 );
 //cpu axi wrap
 axi_wrap u_cpu_axi_wrap(
