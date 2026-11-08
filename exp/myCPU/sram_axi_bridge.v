@@ -5,9 +5,9 @@ module sram_axi_bridge(
     // fetch side: inst_req is a single-cycle pulse
     input  wire        inst_req,
     input  wire [31:0] inst_addr,
-    input  wire        inst_line,    // 1: 4-beat burst (16B line), 0: single beat
+    input  wire        inst_line,    // 1: 16-beat burst (64B line), 0: single beat
     input  wire        inst_flush,   // drop a queued request
-    output wire [127:0] inst_rdata,  // beat 0 at [31:0], single access -> [31:0]
+    output wire [511:0] inst_rdata,  // beat 0 at [31:0], single access -> [31:0]
     output wire        inst_pending,
 
     input  wire [ 1:0] crmd_plv,
@@ -92,9 +92,12 @@ reg        inst_arprot0_r, mem_arprot0_r, awprot0_r;
 // burst flags, latched with the address
 reg inst_line_r, rd_line_r, wr_line_r;
 
-// read beat collection, one set per read channel
-reg  [ 1:0] icnt, mcnt;
-reg  [127:0] ibuf, mbuf;
+// read beat collection, one set per read channel.  The icache line is 64B (16
+// beats), the dcache line stays 16B (4 beats).
+reg  [ 3:0] icnt;
+reg  [ 1:0] mcnt;
+reg  [511:0] ibuf;
+reg  [127:0] mbuf;
 
 // write beat issue
 reg mem_write_entry_cycle;
@@ -138,7 +141,8 @@ assign arsize  = 3'd2;  // 4 bytes
 assign arburst = 2'b01; // INCR
 assign arlock  = 2'b0;
 assign arcache = 4'b0011;
-assign arlen   = (inst_state[req] ? inst_line_r : rd_line_r) ? 8'd3 : 8'd0;
+assign arlen   = inst_state[req] ? (inst_line_r ? 8'd15 : 8'd0)
+                                 : (rd_line_r   ? 8'd3  : 8'd0);
 
 assign awsize  = 3'd2;
 assign awburst = 2'b01;
@@ -236,8 +240,8 @@ assign inst_r_fire = inst_state[rsp]     & rvalid & rready & (rid == inst_rid);
 assign mem_r_fire  = mem_read_state[rsp] & rvalid & rready & (rid == mem_rid);
 
 always @(posedge clk) begin
-    if (reset | inst_req)     icnt <= 2'b0;
-    else if (inst_r_fire)     icnt <= icnt + 2'd1;
+    if (reset | inst_req)     icnt <= 4'b0;
+    else if (inst_r_fire)     icnt <= icnt + 4'd1;
 end
 
 always @(posedge clk) begin
@@ -258,7 +262,7 @@ end
 // bus; an uncached access is a single beat at position 0.  Building the line
 // this way keeps the 128-bit variable shifter (a 4:1 mux on every bit) out of
 // the AXI rdata -> cache data RAM / load-data path.
-assign inst_rdata = inst_state[rsp]     ? (inst_line_r ? {rdata, ibuf[95:0]} : {96'b0, rdata})
+assign inst_rdata = inst_state[rsp]     ? (inst_line_r ? {rdata, ibuf[479:0]} : {480'b0, rdata})
                                         : ibuf;
 assign data_rdata = mem_read_state[rsp] ? (rd_line_r   ? {rdata, mbuf[95:0]} : {96'b0, rdata})
                                         : mbuf;

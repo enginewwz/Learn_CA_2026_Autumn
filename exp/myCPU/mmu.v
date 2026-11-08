@@ -109,8 +109,10 @@ localparam DIRECT_ACC       = 7'b1 << direct_acc;
 reg  [stagecnt - 1:0] if_state,      mem_state;
 reg  [stagecnt - 1:0] next_if_state, next_mem_state;
 
-reg  [31:0] if_line_addr_r, mem_line_addr_r;  // 16B line address of the access in flight
-                                              // (its [31:12] *is* the physical tag)
+reg  [31:0] if_line_addr_r, mem_line_addr_r;  // line address of the access in flight
+                                              // (the icache line is 64B, the dcache 16B;
+                                              //  both stay inside one 4KB page, so the
+                                              //  tag compare is still addr[31:12])
 
 // addresses
 wire [31:0] if_pa, mem_pa;
@@ -150,7 +152,8 @@ wire        bridge_data_req, bridge_mem_pending;
 wire [31:0] bridge_data_addr;
 wire [127:0] bridge_data_wdata;
 wire [ 3:0] bridge_data_we;
-wire [127:0] bridge_inst_rdata, bridge_data_rdata;
+wire [511:0] bridge_inst_rdata;   // 64B icache line, 16 beats
+wire [127:0] bridge_data_rdata;   // 16B dcache line, 4 beats
 
 // icache
 wire         ic_read_req, ic_read_use;
@@ -159,10 +162,10 @@ wire [ 31:0] ic_read_data_0;
 wire [ 31:0] ic_read_data_1;
 
 // second word of a fetch pair: same 16B line, one word up
-wire [  1:0] if_wsel_1;
+wire [  3:0] if_wsel_1;
 wire         ic_cacop_en, ic_cacop_hit_mode;
 wire         ic_refill_we;
-wire [127:0] ic_refill_data;
+wire [511:0] ic_refill_data;
 
 // dcache
 wire         dc_read_req, dc_read_use;
@@ -217,10 +220,10 @@ always @(posedge clk) begin
     end
     else begin
         if (if_state[tlb_acc]) begin
-            if_line_addr_r <= {if_addr[31:4], 4'b0};
+            if_line_addr_r <= {if_addr[31:6], 6'b0};   // 64B icache line
         end
         if (mem_state[tlb_acc]) begin
-            mem_line_addr_r <= {mem_addr[31:4], 4'b0};
+            mem_line_addr_r <= {mem_addr[31:4], 4'b0};  // 16B dcache line
         end
     end
 end
@@ -336,18 +339,18 @@ assign should_write_back = mem_cacop ? cacop_wb : dc_lookup_d;
 
 // the refilled line is written to the cache at the end of the last MEM_READ
 // cycle, so its data is available in CACHE_REFILL
-assign if_wsel_1 = if_va[3:2] + 2'd1;
+assign if_wsel_1 = if_va[5:2] + 4'd1;
 
 assign if_rdata_0 = if_direct              ? bridge_inst_rdata[31:0]
-                  : if_state[cache_refill] ? ic_refill_data[{if_va[3:2], 5'b0} +: 32]
+                  : if_state[cache_refill] ? ic_refill_data[{if_va[5:2], 5'b0} +: 32]
                   : ic_read_hit            ? ic_read_data_0
-                                           : ic_refill_data[{if_va[3:2], 5'b0} +: 32];
+                                           : ic_refill_data[{if_va[5:2], 5'b0} +: 32];
 
-// the pair is only returned when if_va + 4 is still inside the same 16B line
+// the pair is only returned when if_va + 4 is still inside the same 64B line
 // (a simple low-bit mux; the "nextpc" fetch just carries the same line) -- an
 // uncached fetch has one beat only, so it can never return a pair either
-assign if_rdata_1 = (if_va[3:2] == 2'b11) ? 32'b0
-                  : if_direct              ? 32'b0
+assign if_rdata_1 = (if_va[5:2] == 4'hf) ? 32'b0
+                  : if_direct           ? 32'b0
                   : if_state[cache_refill] ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
                   : ic_read_hit            ? ic_read_data_1
                                            : ic_refill_data[{if_wsel_1, 5'b0} +: 32];
@@ -361,7 +364,7 @@ assign bridge_if_req   = if_state[tlb_acc] & ~ if_abort
                        & (if_direct | ~ ic_read_hit);    // refill read / uncached fetch
 // a refill reads the 16B line, an uncached fetch / access must use the exact
 // address (the bridge issues a single beat for those)
-assign bridge_if_addr  = if_state[tlb_acc] ? (if_direct ? if_addr : {if_addr[31:4], 4'b0})
+assign bridge_if_addr  = if_state[tlb_acc] ? (if_direct ? if_addr : {if_addr[31:6], 6'b0})
                                            : if_line_addr_r;
 assign bridge_if_flush = if_abort;
 

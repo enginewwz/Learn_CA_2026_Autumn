@@ -34,18 +34,20 @@ foreach xci $IpXciList {
     read_ip $xci
 }
 
-# --- the three cache RAM IPs -------------------------------------------------
-# icache.v / dcache.v instantiate three MORE RAMs that are not in
+# --- the four cache RAM IPs --------------------------------------------------
+# icache.v / dcache.v instantiate FOUR MORE RAMs that are not in
 # rtl/xilinx_ip; they used to live only in the git-ignored project/ tree that
 # this script deletes at the top.  Regenerate them as blk_mem_gen 8.4:
-#   inst_ram : 256 x 128, WRITE_FIRST  (icache line data)
-#   data_ram : 256 x  32, NO_CHANGE    (dcache data bank)
-#   tagvd    : 256 x  22, NO_CHANGE    (tag + valid + dirty)
-# All three are single port, one ena pin, no reset, read latency 1:
-#   clka, ena, wea[0:0], addra[7:0], dina[W-1:0], douta[W-1:0]
+#   inst_ram :  64 x 512, WRITE_FIRST  (64B icache line: 2-way x 64-set x 64B)
+#   data_ram : 256 x  32, NO_CHANGE    (16B dcache data bank)
+#   tagvd    : 256 x  22, NO_CHANGE    (dcache tag + valid + dirty)
+#   tagvd64  :  64 x  22, NO_CHANGE    (icache tag + valid + dirty)
+# All four are single port, one ena pin, no reset, read latency 1:
+#   clka, ena, wea[0:0], addra[A-1:0], dina[W-1:0], douta[W-1:0]
+# (addra is 6 bits for the icache RAMs -- 64 sets -- and 8 for data_ram)
 # local_testbench/cache_ram_sim.v is the iverilog stand-in for the same
 # contract.
-proc make_cache_ram {name width mode} {
+proc make_cache_ram {name width depth mode} {
     global ScriptDir
     if {[file exists $ScriptDir/../rtl/xilinx_ip/$name/$name.xci]} {
         puts "cache RAM IP $name: using checked-in ../rtl/xilinx_ip/$name/$name.xci"
@@ -57,7 +59,7 @@ proc make_cache_ram {name width mode} {
         CONFIG.Memory_Type {Single_Port_RAM} \
         CONFIG.PRIM_type_to_Implement {BRAM} \
         CONFIG.Write_Width_A $width \
-        CONFIG.Write_Depth_A 256 \
+        CONFIG.Write_Depth_A $depth \
         CONFIG.Read_Width_A $width \
         CONFIG.Operating_Mode_A $mode \
         CONFIG.Enable_A {Use_ENA_Pin} \
@@ -68,16 +70,17 @@ proc make_cache_ram {name width mode} {
         CONFIG.Load_Init_File {false} \
     ] [get_ips $name]
     generate_target {instantiation_template synthesis simulation} [get_ips $name]
-    puts "cache RAM IP $name: generated (256 x $width, $mode)"
+    puts "cache RAM IP $name: generated ($depth x $width, $mode)"
 }
 
-make_cache_ram inst_ram 128 WRITE_FIRST
-make_cache_ram data_ram  32 NO_CHANGE
-make_cache_ram tagvd     22 NO_CHANGE
+make_cache_ram inst_ram 512 64 WRITE_FIRST
+make_cache_ram data_ram  32 256 NO_CHANGE
+make_cache_ram tagvd     22 256 NO_CHANGE
+make_cache_ram tagvd64   22  64 NO_CHANGE
 
 # Fail loudly if any IP did not make it into the project, instead of letting
 # synthesis/simulation report "module not found" much later.
-foreach ip {axi_ram clk_pll axi_crossbar_1x2 inst_ram data_ram tagvd} {
+foreach ip {axi_ram clk_pll axi_crossbar_1x2 inst_ram data_ram tagvd tagvd64} {
     if {[llength [get_ips -quiet $ip]] == 0} {
         error "IP '$ip' is missing from the project (see the messages above)"
     }

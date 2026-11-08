@@ -488,10 +488,10 @@ wire        src_reg_is_rd;
 assign preif_adef = | nextpc[1:0];
 assign preif_req  = ~ preif_adef;
 
-// can the fetch in flight return two words?  It must not cross the 16B line
-// and it must be cacheable (an uncached fetch is one bridge beat, so it can
-// never return the second word)
-assign if_fetch_pair   = ~ (| pc_0[IF][1:0]) & (pc_0[IF][3:2] != 2'b11) & (if_mat == 2'b01);
+// can the fetch in flight return two words?  It must not cross the 64B icache
+// line (word 15 is the last one) and it must be cacheable (an uncached fetch is
+// one bridge beat, so it can never return the second word)
+assign if_fetch_pair   = ~ (| pc_0[IF][1:0]) & ~ (& pc_0[IF][5:2]) & (if_mat == 2'b01);
 assign if_fetch_single = ~ if_fetch_pair | if_excp;
 
 assign seq_pc = pc_0[IF] + (if_fetch_pair ? 32'h8 : 32'h4);
