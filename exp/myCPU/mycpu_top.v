@@ -210,7 +210,7 @@ wire [ 4:0] id_rf_raddr1_0, id_rf_raddr2_0;
 wire [31:0] id_imm_0, id_src1_0, id_src2_0, alu_result_id_0;
 wire        inst_cacop_0;
 
-// ID decode, slot 1 (alu / mul only) --> use id_alu_mul_dec module
+// ID decode, slot 1 (alu / mul only) --> id_alu_mul_decoder module
 wire        id_legal_1;
 wire [11:0] id_alu_op_1;
 wire [MOD_WU:0] id_md_op_1;

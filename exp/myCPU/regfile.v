@@ -36,7 +36,7 @@ end
 
 // READ: write-first bypass for both pipeline ports (slot 1 checked first: it is
 // the younger of the pair).  The CSR data exchange keeps its "no bypass" rule --
-// the CSR-write-RF dependency is resolved by waiting in ID (csr_dep).
+// the CSR-write-RF dependency is resolved by waiting in ID (csr_wb_flying).
 assign rdata1_0 = (raddr1_0 == 5'b0) ? 32'b0
                 : (we_1 & (raddr1_0 == waddr_1)) ? wdata_1
                 : (we_0 & (raddr1_0 == waddr_0)) ? wdata_0
