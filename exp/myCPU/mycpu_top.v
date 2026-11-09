@@ -576,7 +576,7 @@ assign id_shift_valid = (id_deq == 2'd0) ? {cur_valid_2[ID], cur_valid_1[ID], cu
 assign id_fill_pc_0   = pc_0[IF];
 assign id_fill_inst_0 = adef_if ? 32'h0340_0000 : inst_rdata_0; // only adef should overwrite inst
 assign id_fill_excp_0 = if_excp_cause;
-assign id_fill_pc_1   = pc_0[IF] + 32'h4;
+assign id_fill_pc_1   = {pc_0[IF][31:6], pc_0[IF][5:0] + 6'h4};
 assign id_fill_inst_1 = inst_rdata_1;
 assign id_fill_excp_1 = 13'h0;
 
