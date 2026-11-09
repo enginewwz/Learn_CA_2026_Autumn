@@ -73,7 +73,6 @@ module mycpu_top(
     output wire [31:0] debug_wb_rf_wdata_1
 );
 
-
 wire clk;
 wire resetn;
 
@@ -116,7 +115,7 @@ localparam CSR_RDCNTID       = 6;
 localparam CSR_WB            = 7;
 localparam CSR_PRIV          = 8;
 
-// excp_cause bit positions: one-hot
+// excp_cause bit positions
 localparam EXCP_SYS          = 0;
 localparam EXCP_BRK          = 1;
 localparam EXCP_INE          = 2;
@@ -143,110 +142,8 @@ localparam TLB_WR   = 2;
 localparam TLB_FILL = 3;
 localparam TLB_INV  = 4;
 
-// ===========================================================================
-// pipeline control (every control signal lives in this block)
-// ---------------------------------------------------------------------------
-// Stage vectors, exactly like the single-issue core: [WB:IF] = [3:0].
-//   valid_0 / valid_1 : lane 0 (slot 0) and lane 1 (slot 1) of a pair
-//   valid_2           : the ID-only storage slot (slot 2)
-//   stall / allow / flush : one stage vector each
-//   cur_valid_k = valid_k & ~flush_k        next_valid_k = the stage shift
-// ===========================================================================
-reg  [TOTAL_STAGE_WIDTH-1:0] valid_0;    // [WB:IF]  slot 0 (always present)
-reg  [TOTAL_STAGE_WIDTH-1:0] valid_1;    // [WB:IF]  slot 1 (IF bit never set)
-reg  [TOTAL_STAGE_WIDTH-1:0] valid_2;    // [WB:IF]  slot 2 (ID bit only)
-
-wire        wb_flush;                   // slot 0 in WB redirects (see MEM / WB below)
-
-// allow[IF] consumes allow[ID] only, while stall[IF] consumes the ID dequeue
-// (which in turn uses allow[ID] / stall[ID] / stall[MEM]): the four bits form a
-// DAG.  split_var lets the lint pass look at the bits instead of the vector.
-wire [TOTAL_STAGE_WIDTH-1:0] stall /* verilator split_var */;
-wire [TOTAL_STAGE_WIDTH-1:0] allow /* verilator split_var */;
-wire [TOTAL_STAGE_WIDTH-1:0] flush, flush_slot_1_2;
-wire [TOTAL_STAGE_WIDTH-1:0] cur_valid_0, cur_valid_1, cur_valid_2;
-wire [TOTAL_STAGE_WIDTH-1:0] next_valid_0, next_valid_1, next_valid_2;
-
-// ---- flush: only slot 0 can raise one -------------------------------------
-//   wb_flush      : slot 0 in WB reports an exception / ertn / tlb / cacop
-//   br_taken_id_0 : slot 0 in ID takes a branch
-assign flush   = wb_flush      ? 4'b0111 :    // IF / ID / MEM die, WB keeps going
-                 br_taken_id_0 ? 4'b0001 :    // only the wrong-path fetch dies
-                                 4'b0000;
-// slot 1 / slot 2 differ from slot 0 in exactly two places:
-//   ID bit : a taken branch in slot 0 makes them the wrong path
-//   WB bit : slot 1 of the pair whose slot 0 reports an exception / ertn / tlb /
-//            cacop in WB is younger and must not commit either
-assign flush_slot_1_2 = flush | {wb_flush, 1'b0, br_taken_id_0, 1'b0};
-
-assign cur_valid_0 = valid_0 & ~flush;
-assign cur_valid_1 = valid_1 & ~flush_slot_1_2;
-assign cur_valid_2 = valid_2 & ~flush_slot_1_2;
-
-// ---- stall: this stage cannot advance -------------------------------------
-//   IF  : the fetch has not come back / the ID queue cannot take a whole pair
-//   ID  : only slot 0 can hold the pipe (its operands are not forwarded yet).
-//         Slot 1 not being ready does NOT stall: its next_valid_mem bit is
-//         simply lowered, which sends a bubble down the pipe.
-//   MEM : the memory access is not done / the divider is still busy
-assign stall[IF]  = if_pending | ~id_room;
-assign stall[ID]  = cur_valid_0[ID] & id_fw_pending_0;
-assign stall[MEM] = mem_pending | (cur_div_pos_0 & (div_busy | ~ div_started));
-assign stall[WB]  = 1'b0;
-
-// ---- allow: chained WB -> IF, same as the single-issue core ---------------
-assign allow[WB]  = 1'b1;
-assign allow[MEM] = ~stall[MEM] & allow[WB];
-assign allow[ID]  = ~stall[ID]  & allow[MEM];
-assign allow[IF]  = ~stall[IF]  & allow[ID];
-
-// ---- issue = dequeue from the ID queue ------------------------------------
-// Slot 0 leaves ID when neither ID (its operands) nor MEM blocks; slot 1 also
-// needs its own qualification.  This is the same condition as cur_valid & allow,
-// written from the stalls: stall[IF] needs the dequeue count for its room check,
-// so it must not be derived from the allow chain (that would be a cycle).
-assign id_issue_0 = cur_valid_0[ID] & ~stall[ID] & ~stall[MEM];
-assign id_issue_1 = cur_valid_1[ID] & ~stall[ID] & ~stall[MEM] & id_issue_1_ok;
-
-// ---- next_valid: the usual stage shift ------------------------------------
-// The source of the ID bit is the ID queue fill (id_next_valid_k) instead of the
-// IF instruction; everything else is the single-issue formula, including the
-// ~allow & cur_valid hold term (without it a stage would lose its instruction
-// while it is stalled).
-assign next_valid_0 = {cur_valid_0[MEM:ID] & ~stall[MEM:ID],   // -> WB, MEM
-                       id_next_valid_0,                        // -> ID
-                       1'b1}                                   // -> IF: a new fetch starts
-                    & allow | (~allow & cur_valid_0);
-
-// lane 1: the MEM bit also needs the slot 1 issue qualification, so a slot 1
-// that does not issue sends a bubble instead
-assign next_valid_1 = {cur_valid_1[MEM] & ~stall[MEM],                  // -> WB
-                       cur_valid_1[ID]  & ~stall[ID] & id_issue_1_ok,   // -> MEM (or bubble)
-                       id_next_valid_1,                                 // -> ID
-                       1'b0}                                            // -> IF
-                    & allow | (~allow & cur_valid_1);
-
-// slot 2 is storage only: it never leaves ID (slot 1 shifts into slot 0, so a
-// slot 2 instruction reaches MEM only after it has become slot 1)
-assign next_valid_2 = {2'b0, id_next_valid_2, 1'b0} & allow
-                    | (~allow & cur_valid_2);
-
-always @(posedge clk) begin
-    if (reset) begin
-        valid_0 <= 4'b0;
-        valid_1 <= 4'b0;
-        valid_2 <= 4'b0;
-    end
-    else begin
-        valid_0 <= next_valid_0;
-        valid_1 <= next_valid_1;
-        valid_2 <= next_valid_2;
-    end
-end
-
-// ===========================================================================
 // declarations
-// ===========================================================================
+
 // mmu: the fetch / memory-access stage controller.
 wire        preif_req;         // a fetch enters IF
 wire [31:0] inst_rdata_0;      // first word, returns after an arbitrary latency
@@ -266,20 +163,21 @@ reg         mul_pos_0, mul_pos_1, div_pos_0;
 wire        cur_mul_pos_0, cur_mul_pos_1, cur_div_pos_0;
 wire        next_mul_pos_0, next_mul_pos_1, next_div_pos_0;
 
-// pc per slot, indexed by stage: pc_0[IF] is the fetch address (the original
-// pc[IF]); slot 2 only exists in ID.
+// pc per slot, indexed by stage: pc_0[IF] is the fetch address; slot 2 only exists in ID.
 reg  [31:0] pc_0 [WB:IF] /* verilator split_var */;
 reg  [31:0] pc_1 [WB:ID] /* verilator split_var */;
 reg  [31:0] pc_2;
 
 // fetch / redirect
 wire [31:0] nextpc, seq_pc;
-wire        preif_adef, if_fetch_pair, if_fetch_single, if_excp, if_abort;
+wire        preif_adef, if_fetch_single, if_excp, if_abort;
 wire [12:0] if_excp_cause, if_fetch_cause;
-wire        br_taken_id_0, br_redirect;
+reg         adef_if;  // store preif adef
+wire        br_taken_id_0;
+wire        pc_redirect;
 wire [31:0] br_target_id_0;
-reg         br_reg;
-reg  [31:0] br_pc_reg;
+reg         pc_redirected;
+reg  [31:0] redirected_pc_reg;
 wire        sel_era, sel_eentry, sel_wb_seq, sel_br, sel_cur_br, sel_seq;
 
 // ID queue
@@ -306,13 +204,13 @@ wire [ 2:0] id_mem_size_0;
 wire [ 4:0] id_dest_0, id_tlb_op_0, id_invtlb_op_0, id_cacop_code_0;
 wire [13:0] id_csr_num_0;
 wire [ 8:0] id_csr_ctl_0;
-wire [12:0] id_excp_dec_0, id_excp_cause_0;
+wire [12:0] id_excp_decode_0, id_excp_cause_0;
 wire        id_src1_is_pc_0, id_src2_is_imm_0, id_csr_mask_ones_0;
 wire [ 4:0] id_rf_raddr1_0, id_rf_raddr2_0;
 wire [31:0] id_imm_0, id_src1_0, id_src2_0, alu_result_id_0;
 wire        inst_cacop_0;
 
-// ID decode, slot 1 (alu / mul only)
+// ID decode, slot 1 (alu / mul only) --> use id_alu_mul_dec module
 wire        id_legal_1;
 wire [11:0] id_alu_op_1;
 wire [MOD_WU:0] id_md_op_1;
@@ -321,7 +219,7 @@ wire        id_src1_used_1, id_src2_used_1, id_src1_is_pc_1, id_src2_is_imm_1;
 wire [31:0] id_imm_1, id_src1_1, id_src2_1, alu_result_id_1;
 
 // ID issue helpers
-wire        id_csr_block_0, id_dep_0_1;
+wire        id_csr_block_0;
 
 // MEM stage registers
 reg  [31:0] alu_result_mem_0, alu_result_mem_1;
@@ -387,10 +285,11 @@ wire [31:0] fw_data_mem_0, fw_data_mem_1;
 wire [31:0] id_fw1_data_0, id_fw2_data_0, id_fw1_data_1, id_fw2_data_1;
 wire        id_fw1_pend_0, id_fw2_pend_0, id_fw1_pend_1, id_fw2_pend_1;
 wire        id_fw_pending_0, id_fw_pending_1;
-wire        id_fw1_hit_m1_0, id_fw1_hit_m0_0, id_fw2_hit_m1_0, id_fw2_hit_m0_0;
-wire        id_fw1_hit_m1_1, id_fw1_hit_m0_1, id_fw2_hit_m1_1, id_fw2_hit_m0_1;
+wire        id_fw1_hit_mem_slot1_0, id_fw1_hit_mem_slot0_0, id_fw2_hit_mem_slot1_0, id_fw2_hit_mem_slot0_0;
+wire        id_fw1_hit_id_slot0_1, id_fw2_hit_id_slot0_1;  
+wire        id_fw1_hit_mem_slot1_1, id_fw1_hit_mem_slot0_1, id_fw2_hit_mem_slot1_1, id_fw2_hit_mem_slot0_1;
 wire [31:0] id_rf_rdata1_0, id_rf_rdata2_0, id_rf_rdata1_1, id_rf_rdata2_1;
-reg         csr_dep;
+reg         csr_wb_flying;
 
 // branch
 wire [ 6:0] id_br_op_0;
@@ -480,67 +379,155 @@ wire [31:0] br_offs_i26, br_offs_i16;
 wire        src_reg_is_rd;
 
 // ===========================================================================
-// fetch: preif / IF / redirect
+// pipeline control
+// ---------------------------------------------------------------------------
+//   valid_0 / valid_1 : lane 0 (slot 0) and lane 1 (slot 1) of a pair
+//   valid_2           : the ID-only storage slot (slot 2)
+//   stall / allow / flush : one stage vector each
+//   cur_valid_k = valid_k & ~flush_k        next_valid_k = the stage shift
 // ===========================================================================
-// preif hands nextpc to the mmu (if_pre_addr); the low bits alone decide
-// whether nextpc + 4 is still inside the same 16B line.  An unaligned nextpc
-// kills the fetch (ADEF) instead.
+
+reg  [TOTAL_STAGE_WIDTH-1:0] valid_0;    // [WB:IF]  slot 0 (always present)
+reg  [TOTAL_STAGE_WIDTH-1:0] valid_1;    // [WB:IF]  slot 1 (IF bit never set)
+reg  [TOTAL_STAGE_WIDTH-1:0] valid_2;    // [WB:IF]  slot 2 (ID bit used only)
+
+wire        wb_flush;                   // slot 0 in WB redirects (see MEM / WB below)
+
+// allow[IF] consumes allow[ID] only, while stall[IF] consumes the ID dequeue
+// (which in turn uses allow[ID] / stall[ID] / stall[MEM])
+wire [TOTAL_STAGE_WIDTH-1:0] stall /* verilator split_var */;
+wire [TOTAL_STAGE_WIDTH-1:0] allow /* verilator split_var */;
+wire [TOTAL_STAGE_WIDTH-1:0] flush, flush_slot_1_2;
+wire [TOTAL_STAGE_WIDTH-1:0] cur_valid_0, cur_valid_1, cur_valid_2;
+wire [TOTAL_STAGE_WIDTH-1:0] next_valid_0, next_valid_1, next_valid_2;
+
+// ---- flush: only slot 0 can raise one -------------------------------------
+//   wb_flush      : slot 0 in WB reports an exception / ertn / tlb / cacop
+//   br_taken_id_0 : slot 0 in ID takes a branch
+assign flush   = wb_flush      ? 4'b0111 :    // IF / ID / MEM die, WB keeps going
+                 br_taken_id_0 ? 4'b0001 :    // only the wrong-path fetch dies
+                                 4'b0000;
+
+// slot 1 / slot 2 should flush when slot0 flushs at wb/id --> as they are younger than slot 0
+assign flush_slot_1_2 = flush | {wb_flush, 1'b0, br_taken_id_0, 1'b0};
+
+assign cur_valid_0 = valid_0 & ~ flush;
+assign cur_valid_1 = valid_1 & ~ flush_slot_1_2;
+assign cur_valid_2 = valid_2 & ~ flush_slot_1_2;
+
+// ---- stall: this stage cannot advance -------------------------------------
+//   IF  : the fetch has not come back / the ID queue cannot take a whole pair
+//   ID/MEM : only slot 0 can hold the pipeline
+assign stall[IF]  = if_pending | ~ id_room;
+assign stall[ID]  = cur_valid_0[ID] & id_fw_pending_0;
+assign stall[MEM] = mem_pending | (cur_div_pos_0 & (div_busy | ~ div_started));
+assign stall[WB]  = 1'b0;
+
+// ---- allow ----------------------------------------------------------------
+assign allow[WB]  = 1'b1;
+assign allow[MEM] = ~ stall[MEM] & allow[WB];
+assign allow[ID]  = ~ stall[ID]  & allow[MEM];
+assign allow[IF]  = ~ stall[IF]  & allow[ID];
+
+// ---- issue = dequeue from the ID queue ------------------------------------
+// Slot 0 leaves ID when neither ID (its operands) nor MEM blocks; slot 1 also
+// needs its own qualification.
+assign id_issue_0 = cur_valid_0[ID] & ~ id_fw_pending_0 & ~ stall[MEM];
+assign id_issue_1 = cur_valid_1[ID] & ~ id_fw_pending_0 & ~ stall[MEM] & id_issue_1_ok;
+
+// ---- next_valid -----------------------------------------------------------
+// The source of the ID bit is the ID queue fill (id_next_valid_k) instead of
+// cur_valid & stall
+assign next_valid_0 = {cur_valid_0[MEM:ID] & ~ stall[MEM:ID],  // -> WB, MEM
+                       id_next_valid_0,                        // -> ID
+                       1'b1}                                   // -> IF: a new fetch starts
+                    & allow | (~ allow & cur_valid_0);
+
+// lane 1: the MEM bit also needs the slot 1 issue qualification, so a slot 1
+// that does not issue sends a bubble instead
+assign next_valid_1 = {cur_valid_1[MEM] & ~ stall[MEM],                 // -> WB
+                       cur_valid_1[ID]  & ~ stall[ID] & id_issue_1_ok,  // -> MEM (or bubble)
+                       id_next_valid_1,                                 // -> ID
+                       1'b0}                                            // -> IF
+                    & allow | (~ allow & cur_valid_1);
+
+// slot 2 is storage only: it never leaves ID
+assign next_valid_2 = {2'b0, id_next_valid_2, 1'b0} & allow
+                    | (~allow & cur_valid_2);
+
+always @(posedge clk) begin
+    if (reset) begin
+        valid_0 <= 4'b0;
+        valid_1 <= 4'b0;
+        valid_2 <= 4'b0;
+    end
+    else begin
+        valid_0 <= next_valid_0;
+        valid_1 <= next_valid_1;
+        valid_2 <= next_valid_2;
+    end
+end
+
+// fetch: preif / IF / redirect
 assign preif_adef = | nextpc[1:0];
 assign preif_req  = ~ preif_adef;
 
 // can the fetch in flight return two words?  It must not cross the 64B icache
 // line (word 15 is the last one) and it must be cacheable (an uncached fetch is
 // one bridge beat, so it can never return the second word)
-assign if_fetch_pair   = ~ (| pc_0[IF][1:0]) & ~ (& pc_0[IF][5:2]) & (if_mat == 2'b01);
-assign if_fetch_single = ~ if_fetch_pair | if_excp;
+assign if_fetch_single = (& pc_0[IF][5:2]) | ~ (if_mat == 2'b01) | if_excp;
 
-assign seq_pc = pc_0[IF] + (if_fetch_pair ? 32'h8 : 32'h4);
+assign seq_pc = pc_0[IF] + (if_fetch_single ? 32'h4 : 32'h8);
 
 assign sel_era      = wb_ertn;
 assign sel_eentry   = wb_excp;
 assign sel_wb_seq   = ~ wb_excp_ertn & wb_crmd_tlb_cacop;
-assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & br_reg;
-assign sel_cur_br   = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & ~ br_reg & br_taken_id_0;
-assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb_cacop | br_reg | br_taken_id_0);
+assign sel_br       = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & pc_redirected;
+assign sel_cur_br   = ~ wb_excp_ertn & ~ wb_crmd_tlb_cacop & ~ pc_redirected & br_taken_id_0;
+assign sel_seq      = ~ (wb_excp_ertn | wb_crmd_tlb_cacop | pc_redirected | br_taken_id_0);
 
-assign nextpc       = ({32{sel_era    }} & era_o         ) |
-                      ({32{sel_eentry }} & excp_entry    ) |
-                      ({32{sel_wb_seq }} & (pc_0[WB] + 32'h4)) |
-                      ({32{sel_br     }} & br_pc_reg     ) |
-                      ({32{sel_cur_br }} & br_target_id_0) |
-                      ({32{sel_seq    }} & seq_pc        );
+assign nextpc       = ({32{sel_era    }} & era_o                ) |
+                      ({32{sel_eentry }} & excp_entry           ) |
+                      ({32{sel_wb_seq }} & (pc_0[WB] + 32'h4)   ) |
+                      ({32{sel_br     }} & redirected_pc_reg    ) |
+                      ({32{sel_cur_br }} & br_target_id_0       ) |
+                      ({32{sel_seq    }} & seq_pc               );
 
-assign br_redirect = br_taken_id_0 | wb_excp_ertn | wb_crmd_tlb_cacop;
+assign pc_redirect = br_taken_id_0 | wb_excp_ertn | wb_crmd_tlb_cacop;
 
 always @(posedge clk) begin
     if (reset) begin
-        br_reg    <= 1'b0;
-        br_pc_reg <= 32'b0;
+        pc_redirected     <= 1'b0;
+        redirected_pc_reg <= 32'b0;
     end
     else begin
         if (allow[IF]) begin
-            br_reg    <= 1'b0;
-            br_pc_reg <= 32'b0;
+            pc_redirected     <= 1'b0;
+            redirected_pc_reg <= 32'b0;
         end
-        else if (br_redirect && ~ allow[IF]) begin
-            br_reg    <= 1'b1;
-            br_pc_reg <= nextpc;
+        else if (pc_redirect && ~ allow[IF]) begin
+            pc_redirected     <= 1'b1;
+            redirected_pc_reg <= nextpc;
         end
     end
 end
 
 always @(posedge clk) begin
     if (reset) begin
-        pc_0[IF] <= 32'h1bfffffc; // trick: first fetched pc is 0x1c000000
+        pc_0[IF]    <= 32'h1bfffffc; // trick: first fetched pc is 0x1c000000 --> use single fetch route
+        adef_if     <= 1'b0;
     end
     else begin
-        if (allow[IF]) pc_0[IF] <= nextpc;
+        if (allow[IF]) begin
+            pc_0[IF]    <= nextpc;
+            adef_if     <= preif_adef;
+        end
     end
 end
 
 // a fetch that carries an exception (ADEF or a TLB class one) drops the whole
 // pair: only one nop carrying the exception enters the queue
-assign if_excp_cause = (| pc_0[IF][1:0] ? (13'h1 << EXCP_ADEF) : 13'h0) | if_fetch_cause;
+assign if_excp_cause = ({12'b0, adef_if} << EXCP_ADEF) | if_fetch_cause;
 assign if_excp       = | if_excp_cause;
 assign if_abort      = | if_fetch_cause | flush[IF];
 
@@ -555,6 +542,7 @@ assign if_abort      = | if_fetch_cause | flush[IF];
 //   slot 0 occupied, slot 1 empty    -> fill slot 1 / slot 2
 //   otherwise                        -> stall[IF] = 1, IF is blocked
 // ===========================================================================
+
 assign id_deq  = {1'b0, id_issue_0} + {1'b0, id_issue_1};
 assign id_occ  = {1'b0, cur_valid_0[ID]} + {1'b0, cur_valid_1[ID]} + {1'b0, cur_valid_2[ID]};
 assign id_tail = id_occ - id_deq;              // enqueue base = occupancy after the dequeue
@@ -563,11 +551,11 @@ assign id_tail = id_occ - id_deq;              // enqueue base = occupancy after
 // (valid = 0) when the fetch really returned one word only: an exception, an
 // uncached fetch or a fetch that would cross the 16B line.  ID needs room for
 // the whole pair, so slot 1 being occupied already blocks IF.
-assign id_room    = ({1'b0, id_tail} + 3'd2) <= 3'd3;
-assign id_fill    = allow[IF] & cur_valid_0[IF];
-assign id_fill_0  = id_fill;                          // slot t   : always real
-assign id_fill_1  = id_fill & ~ if_fetch_single;      // slot t+1 : real or bubble
-assign id_head_move = id_issue_0 | (id_fill & (id_tail == 2'd0));
+assign id_room          = ~ id_tail[1]; // id_tail + 2 <= 3
+assign id_fill          = allow[IF] & cur_valid_0[IF];      // do fill
+assign id_fill_0        = id_fill;                          // slot t   : always real
+assign id_fill_1        = id_fill & ~ if_fetch_single;      // slot t+1 : real or bubble
+assign id_head_move     = id_issue_0 | (id_fill & (id_tail == 2'd0));
 
 // shift: slot k takes slot k + id_deq
 assign id_shift_pc_0   = (id_deq == 2'd0) ? pc_0[ID]  : (id_deq == 2'd1) ? pc_1[ID]  : pc_2;
@@ -586,14 +574,14 @@ assign id_shift_valid = (id_deq == 2'd0) ? {cur_valid_2[ID], cur_valid_1[ID], cu
 
 // the incoming pair (for an exception only one nop = andi $r0, $r0, 0)
 assign id_fill_pc_0   = pc_0[IF];
-assign id_fill_inst_0 = if_excp ? 32'h0340_0000 : inst_rdata_0;
-assign id_fill_excp_0 = if_excp ? if_excp_cause : 13'h0;
+assign id_fill_inst_0 = adef_if ? 32'h0340_0000 : inst_rdata_0; // only adef should overwrite inst
+assign id_fill_excp_0 = if_excp_cause;
 assign id_fill_pc_1   = pc_0[IF] + 32'h4;
 assign id_fill_inst_1 = inst_rdata_1;
 assign id_fill_excp_1 = 13'h0;
 
 // slot next_valid: everything from id_tail up is the freed tail, filled with
-// the fetched pair (the second half may be the bubble described above)
+// the fetched pair (the second half may be the bubble)
 assign id_next_valid_0 = (id_tail == 2'd0) ? id_fill_0 : id_shift_valid[0];
 assign id_next_valid_1 = (id_tail == 2'd0) ? id_fill_1 :
                          (id_tail == 2'd1) ? id_fill_0 : id_shift_valid[1];
@@ -613,49 +601,43 @@ always @(posedge clk) begin
         excp_id_2 <= 13'b0;
     end
     else begin
-        // slot 0
-        if (id_tail == 2'd0) begin
-            pc_0[ID]   <= id_fill_pc_0;
-            inst_id_0 <= id_fill_inst_0;
-            excp_id_0 <= id_fill_excp_0;
-        end
-        else begin
-            pc_0[ID]   <= id_shift_pc_0;
-            inst_id_0 <= id_shift_inst_0;
-            excp_id_0 <= id_shift_excp_0;
-        end
-        // slot 1
         case (id_tail)
             2'd0: begin
-                pc_1[ID]   <= id_fill_pc_1;
+                pc_0[ID]  <= id_fill_pc_0;
+                inst_id_0 <= id_fill_inst_0;
+                excp_id_0 <= id_fill_excp_0;
+
+                pc_1[ID]  <= id_fill_pc_1;
                 inst_id_1 <= id_fill_inst_1;
                 excp_id_1 <= id_fill_excp_1;
-            end
-            2'd1: begin
-                pc_1[ID]   <= id_fill_pc_0;
-                inst_id_1 <= id_fill_inst_0;
-                excp_id_1 <= id_fill_excp_0;
-            end
-            default: begin
-                pc_1[ID]   <= id_shift_pc_1;
-                inst_id_1 <= id_shift_inst_1;
-                excp_id_1 <= id_shift_excp_1;
-            end
-        endcase
-        // slot 2: storage only, never decoded
-        case (id_tail)
-            2'd0: begin
-                pc_2   <= 32'b0;
-                inst_id_2 <= 32'h0340_0000;
+                
+                pc_2      <= 32'b0;
+                inst_id_2 <= 32'h0340_0000; // nop
                 excp_id_2 <= 13'b0;
             end
             2'd1: begin
-                pc_2   <= id_fill_pc_1;
+                pc_0[ID]  <= id_shift_pc_0;
+                inst_id_0 <= id_shift_inst_0;
+                excp_id_0 <= id_shift_excp_0;
+
+                pc_1[ID]  <= id_fill_pc_0;
+                inst_id_1 <= id_fill_inst_0;
+                excp_id_1 <= id_fill_excp_0;
+                
+                pc_2      <= id_fill_pc_1;
                 inst_id_2 <= id_fill_inst_1;
                 excp_id_2 <= id_fill_excp_1;
             end
-            default: begin
-                pc_2   <= id_shift_pc_2;
+            default: begin  // 2'd2 or 2'd3
+                pc_0[ID]  <= id_shift_pc_0;
+                inst_id_0 <= id_shift_inst_0;
+                excp_id_0 <= id_shift_excp_0;
+
+                pc_1[ID]  <= id_shift_pc_1;
+                inst_id_1 <= id_shift_inst_1;
+                excp_id_1 <= id_shift_excp_1;
+
+                pc_2      <= id_shift_pc_2;
                 inst_id_2 <= id_shift_inst_2;
                 excp_id_2 <= id_shift_excp_2;
             end
@@ -664,8 +646,9 @@ always @(posedge clk) begin
 end
 
 // ===========================================================================
-// unit position flags: born in ID, used in MEM
+// mul/div unit position flags: born in ID, used in MEM
 // ===========================================================================
+
 assign cur_mul_pos_0 = mul_pos_0 & ~flush[MEM];
 assign cur_mul_pos_1 = mul_pos_1 & ~flush[MEM];
 assign cur_div_pos_0 = div_pos_0 & ~flush[MEM];
@@ -690,7 +673,8 @@ end
 // ===========================================================================
 // ID: slot 0, full decode
 // ===========================================================================
-assign id_excp_cause_0 = excp_id_0 | id_excp_dec_0;
+
+assign id_excp_cause_0 = excp_id_0 | id_excp_decode_0;
 
 assign op_31_26  = inst_id_0[31:26];
 assign op_25_22  = inst_id_0[25:22];
@@ -885,19 +869,19 @@ assign id_csr_ctl_0[CSR_EXCP] = | id_excp_cause_0;
 assign id_invtlb_op_0 = inst_id_0[4:0];
 assign id_csr_mask_ones_0 = inst_csrwr;
 
-assign id_excp_dec_0[EXCP_SYS]  = inst_syscall;
-assign id_excp_dec_0[EXCP_BRK]  = inst_break;
-assign id_excp_dec_0[EXCP_INE]  = inst_ine | (inst_invtlb & (inst_id_0[4:0] > 5'd6));
-assign id_excp_dec_0[EXCP_ADEF] = 1'b0;
-assign id_excp_dec_0[EXCP_ALE]  = 1'b0;
-assign id_excp_dec_0[EXCP_INT]  = 1'b0;
-assign id_excp_dec_0[EXCP_IPE]  = 1'b0;
-assign id_excp_dec_0[EXCP_TLBR] = 1'b0;
-assign id_excp_dec_0[EXCP_PIF]  = 1'b0;
-assign id_excp_dec_0[EXCP_PIL]  = 1'b0;
-assign id_excp_dec_0[EXCP_PIS]  = 1'b0;
-assign id_excp_dec_0[EXCP_PME]  = 1'b0;
-assign id_excp_dec_0[EXCP_PPI]  = 1'b0;
+assign id_excp_decode_0[EXCP_SYS]  = inst_syscall;
+assign id_excp_decode_0[EXCP_BRK]  = inst_break;
+assign id_excp_decode_0[EXCP_INE]  = inst_ine | (inst_invtlb & (inst_id_0[4:0] > 5'd6));
+assign id_excp_decode_0[EXCP_ADEF] = 1'b0;
+assign id_excp_decode_0[EXCP_ALE]  = 1'b0;
+assign id_excp_decode_0[EXCP_INT]  = 1'b0;
+assign id_excp_decode_0[EXCP_IPE]  = 1'b0;
+assign id_excp_decode_0[EXCP_TLBR] = 1'b0;
+assign id_excp_decode_0[EXCP_PIF]  = 1'b0;
+assign id_excp_decode_0[EXCP_PIL]  = 1'b0;
+assign id_excp_decode_0[EXCP_PIS]  = 1'b0;
+assign id_excp_decode_0[EXCP_PME]  = 1'b0;
+assign id_excp_decode_0[EXCP_PPI]  = 1'b0;
 
 assign id_gr_we_0 = ~inst_st_w & ~inst_beq & ~inst_bne & ~inst_b
               & ~inst_st_b & ~inst_st_h
@@ -936,9 +920,10 @@ assign id_rf_raddr1_0 = rj;
 assign id_rf_raddr2_0 = src_reg_is_rd ? rd : rk;
 
 // ===========================================================================
-// ID: slot 1, alu / mul only
+// ID: slot 1, docode alu / mul only
 // ===========================================================================
-id_alu_mul_dec u_dec_slot1(
+
+id_alu_mul_decoder u_decoder_slot1(
     .inst        (inst_id_1       ),
     .legal       (id_legal_1      ),
     .alu_op      (id_alu_op_1     ),
@@ -954,25 +939,18 @@ id_alu_mul_dec u_dec_slot1(
 );
 
 // ===========================================================================
-// ID: is slot 1 ready to co-issue?
+// ID: is slot 1 co-issue ok signal generate
 // ===========================================================================
+
 // a CSR-class instruction is never executed in parallel with anything else
 assign id_csr_block_0 = inst_csr_any | inst_ertn | inst_idle | inst_tlb_any | inst_cacop_0
                       | inst_rdcntvl_w | inst_rdcntvh_w | inst_rdcntid;
-
-// slot 1 reads what slot 0 writes (RAW): do not co-issue.  Slot 1 stays in the
-// queue, falls into slot 0 next cycle and gets the value through the normal
-// forwarding network (v1 has no slot 0 -> slot 1 same-cycle bypass)
-assign id_dep_0_1 = cur_valid_0[ID] & id_gr_we_0 & (id_dest_0 != 5'd0)
-                  & ((id_src1_used_1 & (id_rf_raddr1_1 == id_dest_0))
-                   | (id_src2_used_1 & (id_rf_raddr2_1 == id_dest_0)));
 
 assign id_issue_1_ok = DUAL_EN
                      & id_legal_1
                      & ~ id_fw_pending_1        // its own operands are not ready
                      & ~ (| excp_id_1)          // carries an exception: handle it in slot 0
                      & ~ premem_excp_0          // slot 0 raises an exception / takes the interrupt
-                     & ~ id_dep_0_1             // RAW on slot 0
                      & ~ id_csr_block_0;        // CSR class never pairs
 
 // ===========================================================================
@@ -1012,10 +990,7 @@ br u_br(
 // fw_valid_mem_*: this MEM slot holds a result that is ready to be handed to
 // ID.  Only a plain ALU result qualifies: a load needs its data, mul/div
 // results are only selected at the MEM/WB edge, and a CSR write goes through
-// the dedicated RF port (ID waits for it via csr_dep).
-// the raw mul_pos / div_pos are used here (not cur_mul_pos / cur_div_pos): the
-// forwarded data feeds the ID branch compare, so it must not depend on flush
-// (which depends on br_taken_id_0) -- that would be a combinational loop
+// the dedicated RF port (ID waits for it via csr_wb_flying).
 assign fw_valid_mem_0 = ~ mem_en_0 & ~ csr_ctl_0[MEM][CSR_WB] & ~ mul_pos_0 & ~ div_pos_0;
 assign fw_data_mem_0  = alu_result_mem_0;
 assign fw_valid_mem_1 = ~ mul_pos_1;            // slot 1 is alu or mul, nothing else
@@ -1024,57 +999,66 @@ assign fw_data_mem_1  = alu_result_mem_1;
 // CSR-writes-RF dependency: a csrrd/csrwr/... writes the RF through the CSR
 // data port at WB with no read bypass, so ID waits until the write has landed.
 always @(posedge clk) begin
-    if (reset | flush[ID])                         csr_dep <= 1'b0;
-    else if (id_issue_0 & ~ csr_dep & id_csr_ctl_0[CSR_WB])
-                                                  csr_dep <= 1'b1;
-    else if (valid_0[WB] & csr_ctl_0[WB][CSR_WB])  csr_dep <= 1'b0;
+    if (reset | flush[ID])                          csr_wb_flying <= 1'b0;
+    else if (id_issue_0 & id_csr_ctl_0[CSR_WB])     csr_wb_flying <= 1'b1;
+    else if (valid_0[WB] & csr_ctl_0[WB][CSR_WB])   csr_wb_flying <= 1'b0;
 end
 
 // slot 0, source 1
-assign id_fw1_hit_m1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_0
+assign id_fw1_hit_mem_slot1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_0
                        & (id_rf_raddr1_0 != 5'd0) & (id_rf_raddr1_0 == dest_1[MEM]);
-assign id_fw1_hit_m0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_0
+assign id_fw1_hit_mem_slot0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_0
                        & (id_rf_raddr1_0 != 5'd0) & (id_rf_raddr1_0 == dest_0[MEM]);
-assign id_fw1_pend_0   = (id_fw1_hit_m1_0 & ~ fw_valid_mem_1)
-                       | (id_fw1_hit_m0_0 & ~ fw_valid_mem_0) | csr_dep;
-assign id_fw1_data_0   = ({32{id_fw1_hit_m1_0}} & fw_data_mem_1) |
-                         ({32{id_fw1_hit_m0_0}} & fw_data_mem_0) |
-                         ({32{~ id_fw1_hit_m1_0 & ~ id_fw1_hit_m0_0}} & id_rf_rdata1_0);
+
+assign id_fw1_pend_0   = (id_fw1_hit_mem_slot1_0 & ~ fw_valid_mem_1)
+                       | (id_fw1_hit_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw1_data_0   = ({32{id_fw1_hit_mem_slot1_0}} & fw_data_mem_1) |
+                         ({32{id_fw1_hit_mem_slot0_0}} & fw_data_mem_0) |
+                         ({32{~ id_fw1_hit_mem_slot1_0 & ~ id_fw1_hit_mem_slot0_0}} & id_rf_rdata1_0);
 
 // slot 0, source 2
-assign id_fw2_hit_m1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_0
+assign id_fw2_hit_mem_slot1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_0
                        & (id_rf_raddr2_0 != 5'd0) & (id_rf_raddr2_0 == dest_1[MEM]);
-assign id_fw2_hit_m0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_0
+assign id_fw2_hit_mem_slot0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_0
                        & (id_rf_raddr2_0 != 5'd0) & (id_rf_raddr2_0 == dest_0[MEM]);
-assign id_fw2_pend_0   = (id_fw2_hit_m1_0 & ~ fw_valid_mem_1)
-                       | (id_fw2_hit_m0_0 & ~ fw_valid_mem_0) | csr_dep;
-assign id_fw2_data_0   = ({32{id_fw2_hit_m1_0}} & fw_data_mem_1) |
-                         ({32{id_fw2_hit_m0_0}} & fw_data_mem_0) |
-                         ({32{~ id_fw2_hit_m1_0 & ~ id_fw2_hit_m0_0}} & id_rf_rdata2_0);
+
+assign id_fw2_pend_0   = (id_fw2_hit_mem_slot1_0 & ~ fw_valid_mem_1)
+                       | (id_fw2_hit_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw2_data_0   = ({32{id_fw2_hit_mem_slot1_0}} & fw_data_mem_1) |
+                         ({32{id_fw2_hit_mem_slot0_0}} & fw_data_mem_0) |
+                         ({32{~ id_fw2_hit_mem_slot1_0 & ~ id_fw2_hit_mem_slot0_0}} & id_rf_rdata2_0);
 
 assign id_fw_pending_0 = id_fw1_pend_0 | id_fw2_pend_0;
 
 // slot 1, source 1
-assign id_fw1_hit_m1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_1
+assign id_fw1_hit_id_slot0_1 = valid_0[ID] & id_gr_we_0 & id_src1_used_1 
+                            & (id_dest_0 != 5'd0) & (id_rf_raddr1_1 == id_dest_0);  // RAW
+assign id_fw1_hit_mem_slot1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_1
                        & (id_rf_raddr1_1 != 5'd0) & (id_rf_raddr1_1 == dest_1[MEM]);
-assign id_fw1_hit_m0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_1
+assign id_fw1_hit_mem_slot0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_1
                        & (id_rf_raddr1_1 != 5'd0) & (id_rf_raddr1_1 == dest_0[MEM]);
-assign id_fw1_pend_1   = (id_fw1_hit_m1_1 & ~ fw_valid_mem_1)
-                       | (id_fw1_hit_m0_1 & ~ fw_valid_mem_0) | csr_dep;
-assign id_fw1_data_1   = ({32{id_fw1_hit_m1_1}} & fw_data_mem_1) |
-                         ({32{id_fw1_hit_m0_1}} & fw_data_mem_0) |
-                         ({32{~ id_fw1_hit_m1_1 & ~ id_fw1_hit_m0_1}} & id_rf_rdata1_1);
+
+assign id_fw1_pend_1   = id_fw1_hit_id_slot0_1
+                       | (id_fw1_hit_mem_slot1_1 & ~ fw_valid_mem_1)
+                       | (id_fw1_hit_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw1_data_1   = ({32{id_fw1_hit_mem_slot1_1}} & fw_data_mem_1) |
+                         ({32{id_fw1_hit_mem_slot0_1}} & fw_data_mem_0) |
+                         ({32{~ id_fw1_hit_mem_slot1_1 & ~ id_fw1_hit_mem_slot0_1}} & id_rf_rdata1_1);
 
 // slot 1, source 2
-assign id_fw2_hit_m1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_1
+assign id_fw2_hit_id_slot0_1 = valid_0[ID] & id_gr_we_0 & id_src2_used_1 
+                            & (id_dest_0 != 5'd0) & (id_rf_raddr2_1 == id_dest_0);  // RAW
+assign id_fw2_hit_mem_slot1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_1
                        & (id_rf_raddr2_1 != 5'd0) & (id_rf_raddr2_1 == dest_1[MEM]);
-assign id_fw2_hit_m0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_1
+assign id_fw2_hit_mem_slot0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_1
                        & (id_rf_raddr2_1 != 5'd0) & (id_rf_raddr2_1 == dest_0[MEM]);
-assign id_fw2_pend_1   = (id_fw2_hit_m1_1 & ~ fw_valid_mem_1)
-                       | (id_fw2_hit_m0_1 & ~ fw_valid_mem_0) | csr_dep;
-assign id_fw2_data_1   = ({32{id_fw2_hit_m1_1}} & fw_data_mem_1) |
-                         ({32{id_fw2_hit_m0_1}} & fw_data_mem_0) |
-                         ({32{~ id_fw2_hit_m1_1 & ~ id_fw2_hit_m0_1}} & id_rf_rdata2_1);
+
+assign id_fw2_pend_1   = id_fw2_hit_id_slot0_1
+                       | (id_fw2_hit_mem_slot1_1 & ~ fw_valid_mem_1)
+                       | (id_fw2_hit_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw2_data_1   = ({32{id_fw2_hit_mem_slot1_1}} & fw_data_mem_1) |
+                         ({32{id_fw2_hit_mem_slot0_1}} & fw_data_mem_0) |
+                         ({32{~ id_fw2_hit_mem_slot1_1 & ~ id_fw2_hit_mem_slot0_1}} & id_rf_rdata2_1);
 
 assign id_fw_pending_1 = id_fw1_pend_1 | id_fw2_pend_1;
 
@@ -1103,8 +1087,7 @@ alu u_alu_1(
 
 mul u_mul_0(
     .clk    (clk            ),
-    .reset  (reset          ),
-    .allow  (id_issue_0     ),
+    .allow  (allow[ID]      ),
     .src1   (id_src1_0      ),
     .src2   (id_src2_0      ),
     .md_op  (id_md_op_0     ),
@@ -1113,8 +1096,7 @@ mul u_mul_0(
 
 mul u_mul_1(
     .clk    (clk            ),
-    .reset  (reset          ),
-    .allow  (id_issue_1     ),
+    .allow  (allow[ID]      ),
     .src1   (id_src1_1      ),
     .src2   (id_src2_1      ),
     .md_op  (id_md_op_1     ),
@@ -1133,8 +1115,7 @@ assign premem_excp_cause_0 = id_excp_cause_0
                            | (premem_ale_0 ? (13'h1 << EXCP_ALE) : 13'h0)
                            | (premem_int_take ? (13'h1 << EXCP_INT) : 13'h0);
 // mem_pre is "the access that will enter MEM next cycle", and the mmu uses it
-// to keep its state machine running even while MEM is held (so it must NOT be
-// gated by allow[MEM], exactly like the single-issue version).
+// to keep its state machine running even while MEM is held.
 assign premem_req   = cur_valid_0[ID] & ~ id_fw_pending_0
                     & (id_mem_en_0 | inst_cacop_0) & ~ premem_excp_0;
 
@@ -1255,7 +1236,7 @@ assign div_start     = cur_div_pos_0 & ~ div_started & ~ div_busy;
 assign div_reset     = reset | flush[MEM];
 
 always @(posedge clk) begin
-    if (div_reset)                    div_started <= 1'b0;
+    if (div_reset)                     div_started <= 1'b0;
     else if (div_start & ~ allow[MEM]) div_started <= 1'b1;
     else if (allow[MEM])               div_started <= 1'b0;
 end
@@ -1678,9 +1659,9 @@ mmu u_mmu(
 // ===========================================================================
 // debug / trace
 // ===========================================================================
+
 assign debug_wb_pc       = pc_0[WB];
-// the CSR GPR write uses the dedicated CSR data port, so the debug WB
-// interface must report both writes (the SoC testbench checks this output)
+// the CSR GPR write uses the dedicated CSR data port
 assign debug_wb_rf_we    = {4{rf_we_0 | rf_we_csr}};
 assign debug_wb_rf_wnum  = rf_waddr_0;
 assign debug_wb_rf_wdata = rf_we_csr ? rf_wdata_csr : rf_wdata_0;

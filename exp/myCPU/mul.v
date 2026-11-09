@@ -48,7 +48,6 @@
 // see docs/ex_opt_attempt/mul_carry_chain.md.
 module mul(
     input  wire        clk,
-    input  wire        reset,
     input  wire        allow,
     input  wire [31:0] src1,
     input  wire [31:0] src2,
@@ -161,12 +160,7 @@ csa64 u_l6(.a(L5[0]), .b(L5[1]), .c(L5[2]), .s(wsum), .co(wcarry));
 
 // the only register stage: the two vectors the tree collapsed to
 always @(posedge clk) begin
-    if (reset) begin
-        ws  <= 64'b0;
-        wc  <= 64'b0;
-        md1 <= 7'b0;
-    end
-    else if (allow) begin
+    if (allow) begin
         ws  <= wsum;
         wc  <= wcarry;
         md1 <= md_op;

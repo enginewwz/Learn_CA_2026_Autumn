@@ -10,7 +10,7 @@
 //
 // alu_op / md_op keep exactly the bit assignment of mycpu_top / alu.v / mul.v,
 // so slot 0 and slot 1 can share the ALU and mul modules.
-module id_alu_mul_dec(
+module id_alu_mul_decoder(
     input  wire [31:0] inst,
     output wire        legal,        // alu or mul: slot 1 may issue it
 

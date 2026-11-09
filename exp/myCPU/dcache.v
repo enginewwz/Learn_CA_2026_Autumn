@@ -96,6 +96,8 @@ wire [ 7:0] addr0_b0, addr0_b1, addr0_b2, addr0_b3;
 wire [ 7:0] addr1_b0, addr1_b1, addr1_b2, addr1_b3;
 wire [127:0] bank_din;
 
+wire [ 1:0] rword_offset;
+
 wire        lookup_sel_wire;
 reg         lookup_sel_reg;
 
@@ -151,23 +153,9 @@ assign addr1_b3 = wr_bank_way1[3] ? write_index : index;
 assign bank_din = write_req ? {4{write_data}} : refill_data;
 
 // word select: only the read bank is fresh, pick it with last_va[3:2]
-genvar i;
-generate
-    wire [31:0] rdata_way0_word_offset [3:0];
-    wire [31:0] rdata_way1_word_offset [3:0];
-    for (i = 0; i < 4; i = i + 1)begin: offset_sel
-        assign rdata_way0_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [0][(i + 1) * 32 - 1: i * 32] : 32'b0;
-        assign rdata_way1_word_offset [i] = (last_va[3:2] == i[1:0]) ? rdata_way_line [1][(i + 1) * 32 - 1: i * 32] : 32'b0;
-    end
-    assign rdata_way_word [0] = rdata_way0_word_offset [0]
-                              | rdata_way0_word_offset [1]
-                              | rdata_way0_word_offset [2]
-                              | rdata_way0_word_offset [3];
-    assign rdata_way_word [1] = rdata_way1_word_offset [0]
-                              | rdata_way1_word_offset [1]
-                              | rdata_way1_word_offset [2]
-                              | rdata_way1_word_offset [3];
-endgenerate
+assign rword_offset = last_va[3:2];
+assign rdata_way_word[0] = rdata_way_line[0][rword_offset * 32 +: 32]; 
+assign rdata_way_word[1] = rdata_way_line[1][rword_offset * 32 +: 32];
 
 assign {rtagvd_tag[0], rtagvd_v[0], rtagvd_d[0]} = rtagvd_way[0];
 assign {rtagvd_tag[1], rtagvd_v[1], rtagvd_d[1]} = rtagvd_way[1];

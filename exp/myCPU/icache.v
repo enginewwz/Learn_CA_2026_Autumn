@@ -67,38 +67,24 @@ reg         lru_r;      // lru_table[index] of the lookup in flight
 
 // word select inside the line: the fetched instruction, and the second one of a
 // pair (wraps to 0 at the line end; the caller gates that case out)
-wire [WORD_W-1:0] last_wsel_0;
-wire [WORD_W-1:0] last_wsel_1;
+wire [WORD_W-1:0] rword_offset_0;
+wire [WORD_W-1:0] rword_offset_1;
+wire [31:0] rdata_way_word_0 [1:0];
+wire [31:0] rdata_way_word_1 [1:0];
 
 assign en = read_req | cacop_lookup | cacop_en | refill_we;
 
 assign index      = va[11:6];
 assign last_index = last_va[11:6];
 
-assign last_wsel_0 = last_va[5:2];
-assign last_wsel_1 = last_va[5:2] + 1'b1;
+assign rword_offset_0 = last_va[5:2];
+assign rword_offset_1 = last_va[5:2] + 1'b1;    // will wrap around
 
-// 16:1 word mux per way (variable part select keeps this to one mux instead of a
-// mask-and-or per word)
-reg [31:0] rdata_way_word_0 [1:0];
-reg [31:0] rdata_way_word_1 [1:0];
-integer k;
-always @(*) begin
-    rdata_way_word_0[0] = 32'b0;
-    rdata_way_word_0[1] = 32'b0;
-    rdata_way_word_1[0] = 32'b0;
-    rdata_way_word_1[1] = 32'b0;
-    for (k = 0; k < 2**WORD_W; k = k + 1) begin
-        if (last_wsel_0 == k[WORD_W-1:0]) begin
-            rdata_way_word_0[0] = rdata_way_line[0][k*32 +: 32];
-            rdata_way_word_0[1] = rdata_way_line[1][k*32 +: 32];
-        end
-        if (last_wsel_1 == k[WORD_W-1:0]) begin
-            rdata_way_word_1[0] = rdata_way_line[0][k*32 +: 32];
-            rdata_way_word_1[1] = rdata_way_line[1][k*32 +: 32];
-        end
-    end
-end
+// 16:1 word mux per way
+assign rdata_way_word_0[0] = rdata_way_line[0][rword_offset_0 * 32 +: 32];
+assign rdata_way_word_0[1] = rdata_way_line[1][rword_offset_0 * 32 +: 32];
+assign rdata_way_word_1[0] = rdata_way_line[0][rword_offset_1 * 32 +: 32];
+assign rdata_way_word_1[1] = rdata_way_line[1][rword_offset_1 * 32 +: 32];
 
 assign {rtagvd_tag[0], rtagvd_v[0], rtagvd_d[0]} = rtagvd_way[0];
 assign {rtagvd_tag[1], rtagvd_v[1], rtagvd_d[1]} = rtagvd_way[1];

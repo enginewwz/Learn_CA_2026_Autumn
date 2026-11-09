@@ -8,7 +8,7 @@ module mmu(
     input  wire        if_allow,        // = allow[IF]
     output wire        if_pending,      // -> stall[IF]
     output wire [31:0] if_rdata_0,      // instruction at if_va
-    output wire [31:0] if_rdata_1,      // instruction at if_va + 4 (0 when it crosses a line)
+    output wire [31:0] if_rdata_1,      // instruction at if_va + 4 (don't care when it crosses a line)
 
     // CPU side: load / store
     input  wire        mem_pre,         // the access enters MEM at this edge
@@ -349,11 +349,9 @@ assign if_rdata_0 = if_direct              ? bridge_inst_rdata[31:0]
 // the pair is only returned when if_va + 4 is still inside the same 64B line
 // (a simple low-bit mux; the "nextpc" fetch just carries the same line) -- an
 // uncached fetch has one beat only, so it can never return a pair either
-assign if_rdata_1 = (if_va[5:2] == 4'hf) ? 32'b0
-                  : if_direct           ? 32'b0
-                  : if_state[cache_refill] ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
+assign if_rdata_1 = if_state[cache_refill] ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
                   : ic_read_hit            ? ic_read_data_1
-                                           : ic_refill_data[{if_wsel_1, 5'b0} +: 32];
+                                           : ic_refill_data[{if_wsel_1, 5'b0} +: 32];   // use valid to avoid dirty data
 assign mem_rdata = mem_direct             ? bridge_data_rdata[31:0]
                  : mem_state[cache_refill] ? dc_refill_data[{mem_va[3:2], 5'b0} +: 32]
                  : dc_read_hit            ? dc_read_data
