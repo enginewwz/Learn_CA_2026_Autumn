@@ -195,6 +195,7 @@ reg  [31:0] inst_id_0, inst_id_1, inst_id_2;
 reg  [12:0] excp_id_0, excp_id_1, excp_id_2;
 wire [ 1:0] id_deq, id_occ, id_tail, id_fill_req, id_fill_cnt;
 wire        id_fill, id_fill_0, id_fill_1, id_room, id_head_move;
+wire        id_fill_norm, id_fill_seq, id_fill_seq_pair;
 wire        id_next_valid_0, id_next_valid_1, id_next_valid_2;
 wire [ 2:0] id_shift_valid;
 wire [31:0] id_shift_pc_0,   id_shift_pc_1,   id_shift_pc_2;
@@ -570,12 +571,12 @@ assign id_room          = ~ id_tail[1]; // id_tail + 2 <= 3
 // normal fill: IF advanced, so its pair goes in.
 // sequential fill (if_seq_mode): IF is parked and the mmu pushes the words of
 // the refilling line instead.
-wire id_fill_norm       = allow[IF] & cur_valid_0[IF];
-// the queue's valid bits are only written when allow[ID] is high
-// (next_valid_* = ... & allow), so the seq fill has to wait for it too --
-// otherwise the word is written into the tail but its valid never latches
-wire id_fill_seq        = if_seq_mode & if_seq_get & allow[ID] & cur_valid_0[IF];
-wire id_fill_seq_pair   = id_fill_seq & if_seq_pair;
+assign id_fill_norm    = allow[IF] & cur_valid_0[IF];
+// the streamed word goes in whenever the queue has room for the pair
+// (allow[ID] is id_room now) and IF still holds a valid fetch: a flushed IF
+// stage must not push its word, it has to stay a bubble
+assign id_fill_seq     = if_seq_mode & if_seq_get & allow[ID] & cur_valid_0[IF];
+assign id_fill_seq_pair= id_fill_seq & if_seq_pair;
 
 assign id_fill          = id_fill_norm | id_fill_seq;       // do fill
 assign id_fill_0        = id_fill;                          // slot t   : always real

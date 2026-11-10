@@ -118,6 +118,9 @@ reg  [ 3:0] icnt;
 reg  [ 1:0] mcnt;
 reg  [511:0] ibuf;
 reg  [127:0] mbuf;
+// which beats of ibuf are in (set once per beat, cleared by the next request):
+// the sequential fetch in the 1x domain consumes these instead of the count
+reg  [ 15:0] inst_got_r;
 
 // write beat issue
 reg mem_write_entry_cycle;
@@ -136,7 +139,6 @@ reg         waw_req;
 wire        mem_read_req;
 wire        mem_write_req;
 
-wire        read_req_fire;
 wire        read_rsp_fire;
 wire        read_req_occupy;
 
@@ -157,13 +159,16 @@ wire        mem_read_take;
 wire        mem_write_take;
 
 // use for 2x clock
-wire        read_req_fire_w;    
+wire        read_req_fire_w;
+wire        inst_read_req_w;       // AR handshake belongs to the fetch channel
+wire        mem_read_req_w;        // ... or to the data channel    
 wire        inst_read_rsp_done_w;
 wire        mem_read_rsp_done_w;
 wire        write_req_fire_w;
 wire        write_rsp_done_w;
 
-reg         read_req_fire_r;    
+reg         inst_read_req_r;       // sticky, per channel: cleared when *its* fsm leaves REQ
+reg         mem_read_req_r;    
 reg         inst_read_rsp_done_r;
 reg         mem_read_rsp_done_r;
 reg         write_req_fire_r;
@@ -267,18 +272,39 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk2) begin
-    read_req_fire_r <= read_req_fire_w;
-    inst_read_rsp_done_r <= inst_read_rsp_done_w;
-    mem_read_rsp_done_r <= mem_read_rsp_done_w;
-    write_req_fire_r <= write_req_fire_w;
-    write_rsp_done_r <= write_rsp_done_w;
+    if (reset2) begin
+        inst_read_req_r      <= 1'b0;
+        mem_read_req_r       <= 1'b0;
+        inst_read_rsp_done_r <= 1'b0;
+        mem_read_rsp_done_r  <= 1'b0;
+        write_req_fire_r     <= 1'b0;
+        write_rsp_done_r     <= 1'b0;
+    end
+    else begin
+        if (inst_read_req_w)                                inst_read_req_r      <= 1'b1;
+        else if (~ inst_state[req])                         inst_read_req_r      <= 1'b0;
+
+        if (mem_read_req_w)                                 mem_read_req_r       <= 1'b1;
+        else if (~ mem_read_state[req])                     mem_read_req_r       <= 1'b0;
+
+        if (inst_read_rsp_done_w)                           inst_read_rsp_done_r <= 1'b1;
+        else if (~ inst_state[rsp])                         inst_read_rsp_done_r <= 1'b0;
+
+        if (mem_read_rsp_done_w)                            mem_read_rsp_done_r  <= 1'b1;
+        else if (~ mem_read_state[rsp])                     mem_read_rsp_done_r  <= 1'b0;
+
+        if (write_req_fire_w)                               write_req_fire_r     <= 1'b1;
+        else if (~ mem_write_state[req])                    write_req_fire_r     <= 1'b0;
+
+        if (write_rsp_done_w)                               write_rsp_done_r     <= 1'b1;
+        else if (~ mem_write_state[rsp])                    write_rsp_done_r     <= 1'b0;
+    end
 end
 
-assign read_req_fire = read_req_fire_r | read_req_fire_w;
 assign inst_read_rsp_done = inst_read_rsp_done_r | inst_read_rsp_done_w;
-assign mem_read_rsp_done = mem_read_rsp_done_r | mem_read_rsp_done_w;
-assign write_req_fire = write_req_fire_r | write_req_fire_w;
-assign write_rsp_done = write_rsp_done_r | write_rsp_done_w;
+assign mem_read_rsp_done  = mem_read_rsp_done_r  | mem_read_rsp_done_w;
+assign write_req_fire     = write_req_fire_r     | write_req_fire_w;
+assign write_rsp_done     = write_rsp_done_r     | write_rsp_done_w;
 
 // read beats: one counter + buffer per channel, gated by the response id.
 // the last beat is merged combinationally so the data is complete on the cycle
@@ -299,7 +325,6 @@ end
 // that was never true (7 -> 8 -> 15).  A flag is set exactly once, so whatever the
 // 1x side samples is either "not yet" or "arrived" -- both are safe; a stale
 // sample only makes the fetch wait one more cycle.
-reg [15:0] inst_got_r;
 always @(posedge clk2) begin
     if (reset2 | inst_req)       inst_got_r <= 16'b0;
     else if (inst_read_rsp_fire) inst_got_r[icnt] <= 1'b1;
@@ -324,10 +349,12 @@ end
 // bus; an uncached access is a single beat at position 0.  Building the line
 // this way keeps the 128-bit variable shifter (a 4:1 mux on every bit) out of
 // the AXI rdata -> cache data RAM / load-data path.
-assign inst_rdata = inst_state[rsp]     ? (inst_line_r ? {rdata, ibuf[479:0]} : {480'b0, rdata})
-                                        : ibuf;
-assign data_rdata = mem_read_state[rsp] ? (rd_line_r   ? {rdata, mbuf[95:0]} : {96'b0, rdata})
-                                        : mbuf;
+assign inst_rdata = (inst_state[rsp]     & ~ inst_read_rsp_done_r)
+                  ? (inst_line_r ? {rdata, ibuf[479:0]} : {480'b0, rdata})
+                  : ibuf;
+assign data_rdata = (mem_read_state[rsp] & ~ mem_read_rsp_done_r)
+                  ? (rd_line_r ? {rdata, mbuf[95:0]} : {96'b0, rdata})
+                  : mbuf;
 
 // write beats: AW is one beat, W is one or four
 assign awvalid = mem_write_state[req] & ~ aw_done;
@@ -369,16 +396,19 @@ assign inst_read_rsp_done_w = inst_read_rsp_fire  & rlast;
 assign mem_read_rsp_done_w  = mem_read_rsp_fire   & rlast;
 
 assign read_req_fire_w  = arvalid & arready;
-assign read_rsp_fire  = rvalid & rready;
+assign inst_read_req_w  = read_req_fire_w & inst_state[req];
+assign mem_read_req_w   = read_req_fire_w & mem_read_state[req];
+assign read_rsp_fire    = rvalid & rready;
 
 assign write_req_fire_w = (aw_done | aw_fire) & (w_done | w_last_fire);
 assign write_rsp_fire = bvalid & bready;
 assign write_rsp_done_w = mem_write_state[rsp] & write_rsp_fire & (bid == mem_wid);
-assign write_slot_free = mem_write_state[ret] | write_rsp_done;
+
+assign write_slot_free = mem_write_state[ret];
 
 assign arid    = inst_state[req] ? inst_rid : mem_rid;
 assign araddr  = inst_state[req] ? inst_addr_r : rd_addr_r;
-assign arvalid = (inst_state[req] | mem_read_state[req]) & ~ read_req_fire_r;
+assign arvalid = (inst_state[req] & ~ inst_read_req_r) | (mem_read_state[req] & ~ mem_read_req_r);
 assign rready  = (inst_state[rsp] & ~ inst_read_rsp_done_r) | (mem_read_state[rsp] & ~ mem_read_rsp_done_r);
 
 assign awaddr  = awaddr_r;
@@ -415,7 +445,7 @@ always @(*) begin
             else next_inst_state = QUE;
         end
         REQ: begin
-            if (read_req_fire) next_inst_state = RSP;
+            if (read_req_fire_w | inst_read_req_r) next_inst_state = RSP;
             else next_inst_state = REQ;
         end
         RSP: begin
@@ -450,7 +480,7 @@ always @(*) begin
             else next_mem_read_state = QUE;
         end
         REQ: begin
-            if (read_req_fire) next_mem_read_state = RSP;
+            if (read_req_fire_w | mem_read_req_r) next_mem_read_state = RSP;
             else next_mem_read_state = REQ;
         end
         RSP: begin
@@ -472,14 +502,11 @@ always @(*) begin
     case (mem_write_state)
         REQ: begin
             if (write_req_fire) next_mem_write_state = RSP;
-            else next_mem_write_state = REQ;
+            else                next_mem_write_state = REQ;
         end
         RSP: begin
-            if (write_rsp_done) begin
-                if (mem_write_req | waw_req) next_mem_write_state = REQ;
-                else                         next_mem_write_state = RET;
-            end
-            else next_mem_write_state = RSP;
+            if (write_rsp_done) next_mem_write_state = RET;
+            else                next_mem_write_state = RSP;
         end
         RET: begin
             if (mem_write_req | waw_req) next_mem_write_state = REQ;

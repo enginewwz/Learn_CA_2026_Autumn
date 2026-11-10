@@ -129,6 +129,7 @@ wire [11:0] dc_va;
 wire [19:0] dc_pt;
 
 wire        if_take;
+wire        if_line_in;            // IF's pc is inside the line being refilled
 
 // cacop view of the memory access in flight
 wire        ic_cacop, dc_cacop;
@@ -363,8 +364,6 @@ assign if_wsel_1 = if_va[5:2] + 4'd1;
 // ---------------------------------------------------------------------------
 assign if_seq_mode = if_state[mem_read];
 
-wire [4:0] if_seq_off  = {1'b0, if_va[5:2]};
-
 // word 15 waits for the refill to finish (CACHE_REFILL feeds it), so the
 // streamed pc never steps out of the line
 assign if_seq_get  = if_seq_mode & (if_va[5:2] != 4'd15) & bridge_inst_got[if_va[5:2]];
@@ -374,7 +373,7 @@ assign if_seq_get  = if_seq_mode & (if_va[5:2] != 4'd15) & bridge_inst_got[if_va
 // into a single fetch, which also keeps seq_pc from adding 8
 assign if_seq_pair = if_seq_get & (if_va[5:2] <= 4'd13) & bridge_inst_got[if_va[5:2] + 4'd1];
 
-wire if_line_in = (if_state[cache_refill] | if_state[mem_read]);
+assign if_line_in = (if_state[cache_refill] | if_state[mem_read]);
 
 assign if_rdata_0 = if_direct              ? bridge_inst_rdata[31:0]
                   : if_line_in             ? ic_refill_data[{if_va[5:2], 5'b0} +: 32]
