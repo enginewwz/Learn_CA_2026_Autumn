@@ -171,6 +171,11 @@ reg  [31:0] pc_2;
 // fetch / redirect
 wire [31:0] nextpc, seq_pc;
 wire        preif_adef, if_fetch_single, if_excp, if_abort;
+// sequential fetch: while a line is refilling the mmu hands its words out one
+// (or two) per cycle.  IF itself stays parked (if_pending is exactly as before,
+// so the VIPT/stall machinery is untouched); the words go straight into the ID
+// queue and pc_0[IF] follows the consumption.
+wire        if_seq_mode, if_seq_get, if_seq_pair;
 wire [12:0] if_excp_cause, if_fetch_cause;
 reg         adef_if;  // store preif adef
 wire        br_taken_id_0;
@@ -426,7 +431,7 @@ assign stall[WB]  = 1'b0;
 // ---- allow ----------------------------------------------------------------
 assign allow[WB]  = 1'b1;
 assign allow[MEM] = ~ stall[MEM] & allow[WB];
-assign allow[ID]  = ~ stall[ID]  & allow[MEM];
+assign allow[ID]  = id_room;
 assign allow[IF]  = ~ stall[IF]  & allow[ID];
 
 // ---- issue = dequeue from the ID queue ------------------------------------
@@ -438,22 +443,21 @@ assign id_issue_1 = cur_valid_1[ID] & ~ id_fw_pending_0 & ~ stall[MEM] & id_issu
 // ---- next_valid -----------------------------------------------------------
 // The source of the ID bit is the ID queue fill (id_next_valid_k) instead of
 // cur_valid & stall
-assign next_valid_0 = {cur_valid_0[MEM:ID] & ~ stall[MEM:ID],  // -> WB, MEM
+assign next_valid_0 = {cur_valid_0[MEM:ID] & ~ stall[MEM:ID] 
+                    & allow[WB:MEM] | (~ allow[WB:MEM] & cur_valid_0[WB:MEM]),  // -> WB, MEM
                        id_next_valid_0,                        // -> ID
-                       1'b1}                                   // -> IF: a new fetch starts
-                    & allow | (~ allow & cur_valid_0);
+                       allow[IF] ? 1'b1 : cur_valid_0[IF]};    // -> IF
 
 // lane 1: the MEM bit also needs the slot 1 issue qualification, so a slot 1
 // that does not issue sends a bubble instead
-assign next_valid_1 = {cur_valid_1[MEM] & ~ stall[MEM],                 // -> WB
-                       cur_valid_1[ID]  & ~ stall[ID] & id_issue_1_ok,  // -> MEM (or bubble)
+assign next_valid_1 = {{cur_valid_1[MEM] & ~ stall[MEM],                // -> WB
+                       cur_valid_1[ID]  & ~ stall[ID] & id_issue_1_ok}  // -> MEM (or bubble)                                            // -> IF
+                    & allow[WB:MEM] | (~ allow[WB:MEM] & cur_valid_1[WB:MEM]),
                        id_next_valid_1,                                 // -> ID
-                       1'b0}                                            // -> IF
-                    & allow | (~ allow & cur_valid_1);
+                       1'b0};
 
 // slot 2 is storage only: it never leaves ID
-assign next_valid_2 = {2'b0, id_next_valid_2, 1'b0} & allow
-                    | (~allow & cur_valid_2);
+assign next_valid_2 = {2'b0, id_next_valid_2, 1'b0};
 
 always @(posedge clk) begin
     if (reset) begin
@@ -522,6 +526,11 @@ always @(posedge clk) begin
             pc_0[IF]    <= nextpc;
             adef_if     <= preif_adef;
         end
+        else if (id_fill_seq) begin
+            // a word of the refilling line was just handed to ID: walk pc along
+            pc_0[IF]    <= pc_0[IF] + (id_fill_seq_pair ? 32'h8 : 32'h4);
+            adef_if     <= 1'b0;
+        end
     end
 end
 
@@ -529,7 +538,7 @@ end
 // pair: only one nop carrying the exception enters the queue
 assign if_excp_cause = ({12'b0, adef_if} << EXCP_ADEF) | if_fetch_cause;
 assign if_excp       = | if_excp_cause;
-assign if_abort      = | if_fetch_cause | flush[IF];
+assign if_abort      = if_excp | flush[IF];
 
 // ===========================================================================
 // ID: 3-slot compacting queue
@@ -552,9 +561,21 @@ assign id_tail = id_occ - id_deq;              // enqueue base = occupancy after
 // uncached fetch or a fetch that would cross the 16B line.  ID needs room for
 // the whole pair, so slot 1 being occupied already blocks IF.
 assign id_room          = ~ id_tail[1]; // id_tail + 2 <= 3
-assign id_fill          = allow[IF] & cur_valid_0[IF];      // do fill
+
+// normal fill: IF advanced, so its pair goes in.
+// sequential fill (if_seq_mode): IF is parked and the mmu pushes the words of
+// the refilling line instead.
+wire id_fill_norm       = allow[IF] & cur_valid_0[IF];
+// the queue's valid bits are only written when allow[ID] is high
+// (next_valid_* = ... & allow), so the seq fill has to wait for it too --
+// otherwise the word is written into the tail but its valid never latches
+wire id_fill_seq        = if_seq_mode & if_seq_get & allow[ID] & cur_valid_0[IF];
+wire id_fill_seq_pair   = id_fill_seq & if_seq_pair;
+
+assign id_fill          = id_fill_norm | id_fill_seq;       // do fill
 assign id_fill_0        = id_fill;                          // slot t   : always real
-assign id_fill_1        = id_fill & ~ if_fetch_single;      // slot t+1 : real or bubble
+assign id_fill_1        = (id_fill_norm & ~ if_fetch_single) // slot t+1 : real or bubble
+                        | id_fill_seq_pair;
 assign id_head_move     = id_issue_0 | (id_fill & (id_tail == 2'd0));
 
 // shift: slot k takes slot k + id_deq
@@ -568,9 +589,7 @@ assign id_shift_excp_0 = (id_deq == 2'd0) ? excp_id_0 : (id_deq == 2'd1) ? excp_
 assign id_shift_excp_1 = (id_deq == 2'd0) ? excp_id_1 : (id_deq == 2'd1) ? excp_id_2 : 13'b0;
 assign id_shift_excp_2 = (id_deq == 2'd0) ? excp_id_2 : 13'b0;
 
-assign id_shift_valid = (id_deq == 2'd0) ? {cur_valid_2[ID], cur_valid_1[ID], cur_valid_0[ID]} :
-                        (id_deq == 2'd1) ? {1'b0, cur_valid_2[ID], cur_valid_1[ID]} :
-                                           {1'b0, 1'b0, cur_valid_2[ID]};
+assign id_shift_valid = {cur_valid_2[ID], cur_valid_1[ID], cur_valid_0[ID]} >> id_deq;
 
 // the incoming pair (for an exception only one nop = andi $r0, $r0, 0)
 assign id_fill_pc_0   = pc_0[IF];
@@ -1087,7 +1106,7 @@ alu u_alu_1(
 
 mul u_mul_0(
     .clk    (clk            ),
-    .allow  (allow[ID]      ),
+    .allow  (id_issue_0     ),
     .src1   (id_src1_0      ),
     .src2   (id_src2_0      ),
     .md_op  (id_md_op_0     ),
@@ -1096,7 +1115,7 @@ mul u_mul_0(
 
 mul u_mul_1(
     .clk    (clk            ),
-    .allow  (allow[ID]      ),
+    .allow  (id_issue_1     ),
     .src1   (id_src1_1      ),
     .src2   (id_src2_1      ),
     .md_op  (id_md_op_1     ),
@@ -1581,6 +1600,9 @@ mmu u_mmu(
     .if_va          (pc_0[IF]          ),
     .if_allow       (allow[IF]       ),
     .if_pending     (if_pending     ),
+    .if_seq_mode    (if_seq_mode    ),
+    .if_seq_get     (if_seq_get     ),
+    .if_seq_pair    (if_seq_pair    ),
     .if_rdata_0     (inst_rdata_0   ),
     .if_rdata_1     (inst_rdata_1   ),
 

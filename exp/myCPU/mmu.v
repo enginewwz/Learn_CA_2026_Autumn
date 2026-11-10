@@ -7,6 +7,9 @@ module mmu(
     input  wire [31:0] if_va,           // = pc[IF]
     input  wire        if_allow,        // = allow[IF]
     output wire        if_pending,      // -> stall[IF]
+    output wire        if_seq_mode,     // the fetch is streaming a line that is still refilling
+    output wire        if_seq_get,      // the word IF is pointing at is already in the buffer
+    output wire        if_seq_pair,     // ... and so is the next one (hand out a pair)
     output wire [31:0] if_rdata_0,      // instruction at if_va
     output wire [31:0] if_rdata_1,      // instruction at if_va + 4 (don't care when it crosses a line)
 
@@ -147,6 +150,7 @@ wire [127:0] wb_line;
 
 // bridge
 wire        bridge_if_req, bridge_if_flush, bridge_if_pending;
+wire [ 4:0] bridge_inst_beat;      // beats already in bridge_inst_rdata
 wire [31:0] bridge_if_addr;
 wire        bridge_data_req, bridge_mem_pending;
 wire [31:0] bridge_data_addr;
@@ -341,15 +345,44 @@ assign should_write_back = mem_cacop ? cacop_wb : dc_lookup_d;
 // cycle, so its data is available in CACHE_REFILL
 assign if_wsel_1 = if_va[5:2] + 4'd1;
 
+// ---------------------------------------------------------------------------
+// sequential fetch out of a refill that is still in flight
+//
+// The line comes back one beat per cycle in bridge_inst_rdata.  Instead of
+// holding IF until the whole line is there, hand out the words that have
+// already arrived: if_pending stays low while the word IF wants is in, so the
+// pipeline starts running the line before the burst ends.
+//
+// The plan's counter "b" (words consumed) is implicit here: consumption and pc
+// are locked together (every consumption is a pc += 4/8), so the word to hand
+// out is exactly if_va[5:2] and "b < a" is "if_va[5:2] < inst_beat".  A
+// redirect that leaves this line makes the line compare fail, so the fetch
+// falls back to the old "stall until the refill is done" behaviour; a branch
+// inside the same line keeps streaming (the words are the same).
+// ---------------------------------------------------------------------------
+assign if_seq_mode = if_state[mem_read];
+
+wire [4:0] if_seq_off  = {1'b0, if_va[5:2]};
+
+// word 15 should wait refill done
+assign if_seq_get  = if_seq_mode & (if_va[5:2] < bridge_inst_beat[3:0]);
+
+// a pair needs the second word as well, and must not step over the line end
+// (consume words off and off+1, so off+2 <= 15); the top turns a missing pair
+// into a single fetch, which also keeps seq_pc from adding 8
+assign if_seq_pair = if_seq_get & ((if_va[5:2] + 4'd1) < bridge_inst_beat[3:0]);
+
+wire if_line_in = (if_state[cache_refill] | if_state[mem_read]);
+
 assign if_rdata_0 = if_direct              ? bridge_inst_rdata[31:0]
-                  : if_state[cache_refill] ? ic_refill_data[{if_va[5:2], 5'b0} +: 32]
+                  : if_line_in             ? ic_refill_data[{if_va[5:2], 5'b0} +: 32]
                   : ic_read_hit            ? ic_read_data_0
                                            : ic_refill_data[{if_va[5:2], 5'b0} +: 32];
 
 // the pair is only returned when if_va + 4 is still inside the same 64B line
 // (a simple low-bit mux; the "nextpc" fetch just carries the same line) -- an
 // uncached fetch has one beat only, so it can never return a pair either
-assign if_rdata_1 = if_state[cache_refill] ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
+assign if_rdata_1 = if_line_in             ? ic_refill_data[{if_wsel_1, 5'b0} +: 32]
                   : ic_read_hit            ? ic_read_data_1
                                            : ic_refill_data[{if_wsel_1, 5'b0} +: 32];   // use valid to avoid dirty data
 assign mem_rdata = mem_direct             ? bridge_data_rdata[31:0]
@@ -520,6 +553,7 @@ sram_axi_bridge u_bridge(
     .inst_flush   (bridge_if_flush    ),
     .inst_rdata   (bridge_inst_rdata  ),
     .inst_pending (bridge_if_pending  ),
+    .inst_beat    (bridge_inst_beat   ),
 
     .data_req     (bridge_data_req    ),
     .data_we      (bridge_data_we     ),

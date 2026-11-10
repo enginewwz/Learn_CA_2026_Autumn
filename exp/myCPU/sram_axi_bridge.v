@@ -9,6 +9,8 @@ module sram_axi_bridge(
     input  wire        inst_flush,   // drop a queued request
     output wire [511:0] inst_rdata,  // beat 0 at [31:0], single access -> [31:0]
     output wire        inst_pending,
+    output wire [ 4:0] inst_beat,    // beats already collected in inst_rdata (the
+                                     // mmu hands them out while the burst runs)
 
     input  wire [ 1:0] crmd_plv,
 
@@ -95,6 +97,7 @@ reg inst_line_r, rd_line_r, wr_line_r;
 // read beat collection, one set per read channel.  The icache line is 64B (16
 // beats), the dcache line stays 16B (4 beats).
 reg  [ 3:0] icnt;
+reg  [ 4:0] inst_beat_r;   // 0..16, saturating (icnt wraps at 16)
 reg  [ 1:0] mcnt;
 reg  [511:0] ibuf;
 reg  [127:0] mbuf;
@@ -243,6 +246,15 @@ always @(posedge clk) begin
     if (reset | inst_req)     icnt <= 4'b0;
     else if (inst_r_fire)     icnt <= icnt + 4'd1;
 end
+
+// same beat count, but 5 bits so it reads 16 (not 0) after the last beat of a
+// full line: the mmu compares the word offset against it to decide whether the
+// next word has arrived yet
+always @(posedge clk) begin
+    if (reset | inst_req)          inst_beat_r <= 5'd0;
+    else if (inst_r_fire & ~&inst_beat_r) inst_beat_r <= inst_beat_r + 5'd1;
+end
+assign inst_beat = inst_beat_r;
 
 always @(posedge clk) begin
     if (reset | mem_read_take) mcnt <= 2'b0;
