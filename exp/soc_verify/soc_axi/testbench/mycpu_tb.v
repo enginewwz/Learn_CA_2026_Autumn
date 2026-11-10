@@ -65,7 +65,10 @@ begin
     #2000;
     resetn = 1'b1;
 end
-always #5 clk=~clk;
+// 200 MHz test clock: soc_lite_top divides it by 2 for the core and drives the
+// memory subsystem with it directly, so the core still runs at 10 ns/cycle
+// while memory/AXI runs 2x -- the same 2:1 ratio as the 50/100 MHz clk_pll pair.
+always #2.5 clk=~clk;
 soc_lite_top #(.SIMULATION(1'b1)) soc_lite
 (
        .resetn      (resetn     ), 
@@ -263,12 +266,16 @@ begin
 end
 
 //模拟串口打印
+// confreg 现在跑在 2x 的 mem_clk 上，write_uart_valid 只保持一个 mem 拍，
+// 所以这里用 mem_clk 采样（原先在 soc_clk 上采，2x 之后会漏字符）。
 wire uart_display;
 wire [7:0] uart_data;
+wire       soc_mem_clk;
 assign uart_display = `CONFREG_UART_DISPLAY;
 assign uart_data    = `CONFREG_UART_DATA;
+assign soc_mem_clk  = soc_lite.mem_clk;
 
-always @(posedge soc_clk)
+always @(posedge soc_mem_clk)
 begin
     if(uart_display)
     begin

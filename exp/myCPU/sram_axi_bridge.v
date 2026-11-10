@@ -1,6 +1,24 @@
+// ===========================================================================
+// CPU-side <-> AXI adapter.
+//
+// TWO CLOCKS:
+//   clk     : processor clock (1x).  Everything on the CPU side lives here.
+//   clk2    : memory clock (2x clk, same PLL, edges aligned).  The AXI side
+//             (ar/r/aw/w/b) belongs here so a 16-beat line refill can be
+//             drained at 2 beats per processor cycle.
+//
+// The gluing of the two domains -- which signals cross, how the CPU-side
+// single-cycle pulses are turned into 2x-side events and how the collected
+// beats/pending come back -- is *not* written yet: for now every register and
+// every output still runs on clk, exactly as before, and clk2/reset2 are
+// brought in but unused.  That keeps the whole SoC regression green while the
+// 2x clock is already routed here (see docs/fetch_opt_step1_clock.md).
+// ===========================================================================
 module sram_axi_bridge(
-    input  wire        clk,
-    input  wire        reset,
+    input  wire        clk,          // 1x: processor clock
+    input  wire        clk2,         // 2x: memory / AXI clock
+    input  wire        reset,        // 1x domain reset
+    input  wire        reset2,       // 2x domain reset (synchronised to clk2)
 
     // fetch side: inst_req is a single-cycle pulse
     input  wire        inst_req,
@@ -82,7 +100,6 @@ reg  [3:0] inst_state,      next_inst_state;
 reg  [3:0] mem_read_state,  next_mem_read_state;
 reg  [3:0] mem_write_state, next_mem_write_state;
 
-
 reg [31:0] inst_addr_r, rd_addr_r;
 reg [31:0] awaddr_r, wdata_r;
 reg [127:0] wdata128_r;   // whole line of a burst write, latched with the AW
@@ -120,8 +137,8 @@ wire        read_req_fire;
 wire        read_rsp_fire;
 wire        read_req_occupy;
 
-wire        inst_r_fire;
-wire        mem_r_fire;
+wire        inst_read_rsp_fire;
+wire        mem_read_rsp_fire;
 
 wire        inst_read_rsp_done;
 wire        mem_read_rsp_done;
@@ -135,6 +152,19 @@ wire        write_slot_free;
 wire        mem_read_takes_req;
 wire        mem_read_take;
 wire        mem_write_take;
+
+// use for 2x clock
+wire        read_req_fire_w;    
+wire        inst_read_rsp_done_w;
+wire        mem_read_rsp_done_w;
+wire        write_req_fire_w;
+wire        write_rsp_done_w;
+
+reg         read_req_fire_r;    
+reg         inst_read_rsp_done_r;
+reg         mem_read_rsp_done_r;
+reg         write_req_fire_r;
+reg         write_rsp_done_r;
 
 // AXI constant attributes
 assign arsize  = 3'd2;  // 4 bytes
@@ -233,28 +263,42 @@ always @(posedge clk) begin
     end
 end
 
+always @(posedge clk2) begin
+    read_req_fire_r <= read_req_fire_w;
+    inst_read_rsp_done_r <= inst_read_rsp_done_w;
+    mem_read_rsp_done_r <= mem_read_rsp_done_w;
+    write_req_fire_r <= write_req_fire_w;
+    write_rsp_done_r <= write_rsp_done_w;
+end
+
+assign read_req_fire = read_req_fire_r | read_req_fire_w;
+assign inst_read_rsp_done = inst_read_rsp_done_r | inst_read_rsp_done_w;
+assign mem_read_rsp_done = mem_read_rsp_done_r | mem_read_rsp_done_w;
+assign write_req_fire = write_req_fire_r | write_req_fire_w;
+assign write_rsp_done = write_rsp_done_r | write_rsp_done_w;
+
 // read beats: one counter + buffer per channel, gated by the response id.
 // the last beat is merged combinationally so the data is complete on the cycle
 // the response ends (the mmu samples it when pending drops).
-assign inst_r_fire = inst_state[rsp]     & rvalid & rready & (rid == inst_rid);
-assign mem_r_fire  = mem_read_state[rsp] & rvalid & rready & (rid == mem_rid);
+assign inst_read_rsp_fire   = inst_state[rsp]     & read_rsp_fire & (rid == inst_rid);
+assign mem_read_rsp_fire    = mem_read_state[rsp] & read_rsp_fire & (rid == mem_rid);
 
-always @(posedge clk) begin
-    if (reset | inst_req)     icnt <= 4'b0;
-    else if (inst_r_fire)     icnt <= icnt + 4'd1;
+always @(posedge clk2) begin
+    if (reset2 | inst_req)      icnt <= 4'b0;
+    else if (inst_read_rsp_fire)icnt <= icnt + 4'd1;
 end
 
-always @(posedge clk) begin
-    if (reset | mem_read_take) mcnt <= 2'b0;
-    else if (mem_r_fire)       mcnt <= mcnt + 2'd1;
+always @(posedge clk2) begin
+    if (reset2 | mem_read_take) mcnt <= 2'b0;
+    else if (mem_read_rsp_fire) mcnt <= mcnt + 2'd1;
 end
 
-always @(posedge clk) begin
-    if (inst_r_fire) ibuf[icnt*32 +: 32] <= rdata;
+always @(posedge clk2) begin
+    if (inst_read_rsp_fire) ibuf[icnt*32 +: 32] <= rdata;
 end
 
-always @(posedge clk) begin
-    if (mem_r_fire) mbuf[mcnt*32 +: 32] <= rdata;
+always @(posedge clk2) begin
+    if (mem_read_rsp_fire) mbuf[mcnt*32 +: 32] <= rdata;
 end
 
 // A line refill is always a 4-beat burst (arlen=3), so on its last beat the
@@ -279,8 +323,8 @@ assign aw_fire = awvalid & awready;
 assign w_fire  = wvalid  & wready;
 assign w_last_fire = w_fire & (wr_line_r ? (w_cnt == 2'd3) : 1'b1);
 
-always @(posedge clk) begin
-    if (reset | mem_write_take) begin
+always @(posedge clk2) begin
+    if (reset2 | mem_write_take) begin
         w_cnt   <= 2'b0;
         aw_done <= 1'b0;
         w_done  <= 1'b0;
@@ -303,24 +347,24 @@ assign mem_write_req = data_req &  | data_we;
 assign mem_read_take  = mem_read_req  & mem_read_state[ret];
 assign mem_write_take = (mem_write_req | waw_req) & write_slot_free;
 
-assign inst_read_rsp_done = inst_r_fire     & rlast;
-assign mem_read_rsp_done  = mem_r_fire      & rlast;
+assign inst_read_rsp_done_w = inst_read_rsp_fire  & rlast;
+assign mem_read_rsp_done_w  = mem_read_rsp_fire   & rlast;
 
-assign read_req_fire  = arvalid & arready;
+assign read_req_fire_w  = arvalid & arready;
 assign read_rsp_fire  = rvalid & rready;
 
-assign write_req_fire = (aw_done | aw_fire) & (w_done | w_last_fire);
+assign write_req_fire_w = (aw_done | aw_fire) & (w_done | w_last_fire);
 assign write_rsp_fire = bvalid & bready;
-assign write_rsp_done = mem_write_state[rsp] & write_rsp_fire & (bid == mem_wid);
+assign write_rsp_done_w = mem_write_state[rsp] & write_rsp_fire & (bid == mem_wid);
 assign write_slot_free = mem_write_state[ret] | write_rsp_done;
 
 assign arid    = inst_state[req] ? inst_rid : mem_rid;
 assign araddr  = inst_state[req] ? inst_addr_r : rd_addr_r;
-assign arvalid = inst_state[req] | mem_read_state[req];
-assign rready  = inst_state[rsp] | mem_read_state[rsp];
+assign arvalid = (inst_state[req] | mem_read_state[req]) & ~ read_req_fire_r;
+assign rready  = (inst_state[rsp] & ~ inst_read_rsp_done_r) | (mem_read_state[rsp] & ~ mem_read_rsp_done_r);
 
 assign awaddr  = awaddr_r;
-assign bready  = mem_write_state[rsp];
+assign bready  = mem_write_state[rsp] & ~ write_rsp_done_r;
 
 assign inst_pending = ~ inst_state[ret] & ~ inst_read_rsp_done;
 assign mem_pending  = (~ mem_read_state[ret] & ~ mem_read_rsp_done)

@@ -86,6 +86,25 @@ foreach ip {axi_ram clk_pll axi_crossbar_1x2 inst_ram data_ram tagvd tagvd64} {
     }
 }
 
+# The AXI RAM's program image.  Its xci points at
+#   ../../../../../func/obj/inst_ram.coe      (relative to the IP directory)
+# and Vivado writes <ip>/axi_ram.mif from it together with the output products.
+# A *.mif left over from an older build is a DIFFERENT program (EXP=19 vs the
+# current EXP=23) and the sim would silently run off into that old code (the
+# classic symptom: pc never gets past 1c000008).  Drop it, then let
+# generate_target rebuild it from the COE.
+set AxiRamDir  [file normalize $ScriptDir/../rtl/xilinx_ip/axi_ram]
+set AxiRamMif  [file join $AxiRamDir axi_ram.mif]
+set AxiRamCoe  [file normalize $AxiRamDir/../../../../../func/obj/inst_ram.coe]
+if {[file exists $AxiRamMif]} {
+    puts "removing stale generated file $AxiRamMif"
+    file delete -force $AxiRamMif
+}
+if {![file exists $AxiRamCoe]} {
+    error "program image missing: $AxiRamCoe  (run 'make EXP=23' in exp/func first)"
+}
+puts "axi_ram program image (COE) = $AxiRamCoe"
+
 # Generate every IP's output products now.  In project mode Vivado would do
 # this lazily, but doing it here makes the project immediately usable in a
 # batch run as well.
@@ -93,6 +112,13 @@ set AllIps [get_ips]
 puts "IPs in project: $AllIps"
 if {[catch {generate_target all $AllIps} err]} {
     puts "WARNING: generate_target all failed: $err"
+}
+
+if {![file exists $AxiRamMif]} {
+    puts "WARNING: $AxiRamMif was NOT regenerated -- check that the axi_ram COE\
+          path above resolves, otherwise the sim loads the wrong/no program"
+} else {
+    puts "axi_ram.mif regenerated: [file size $AxiRamMif] bytes"
 }
 
 # Add simulation files

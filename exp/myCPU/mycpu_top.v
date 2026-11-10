@@ -13,6 +13,7 @@
 // ===========================================================================
 module mycpu_top(
     input  wire        aclk,
+    input  wire        mclk,         // memory / AXI clock, 2x aclk: drives the bridge only
     input  wire        aresetn,      // low active
 
     // AXI read address channel
@@ -83,6 +84,10 @@ localparam DUAL_EN = 1'b1;      // 0: slot 1 never issues (single-issue bring-up
 
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
+
+// the bridge runs on mclk (2x), so its reset is re-synchronised in that domain
+reg         reset_m;
+always @(posedge mclk) reset_m <= ~aresetn;
 
 localparam IF                = 0;
 localparam ID                = 1;
@@ -1575,11 +1580,13 @@ assign tlb_w_v1    = tlbelo1_o[0];
 
 mmu u_mmu(
     .clk            (clk            ),
+    .mclk           (mclk           ),
+    .mreset         (reset_m        ),
     .reset          (reset          ),
 
     .if_pre         (preif_req      ),
-    .if_va          (pc_0[IF]          ),
-    .if_allow       (allow[IF]       ),
+    .if_va          (pc_0[IF]       ),
+    .if_allow       (allow[IF]      ),
     .if_pending     (if_pending     ),
     .if_rdata_0     (inst_rdata_0   ),
     .if_rdata_1     (inst_rdata_1   ),
@@ -1589,7 +1596,7 @@ mmu u_mmu(
     .mem_wstrb      (mem_wstrb      ),
     .mem_stdata     (mem_stdata     ),
     .mem_abort      (mem_abort      ),
-    .mem_allow      (allow[MEM]      ),
+    .mem_allow      (allow[MEM]     ),
     .mem_pending    (mem_pending    ),
     .mem_rdata      (mem_rdata      ),
 

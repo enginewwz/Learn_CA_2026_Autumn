@@ -1,5 +1,7 @@
 module mmu(
     input  wire        clk,
+    input  wire        mclk,        // bridge / AXI clock, 2x clk
+    input  wire        mreset,      // bridge reset, synchronised to mclk
     input  wire        reset,
 
     // CPU side: fetch
@@ -192,8 +194,7 @@ wire         if_lu_now;
 // fetch after the current one (which enters IF next cycle)
 assign if_lu_now = (if_state[idle]         & if_take)
                  | (if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)) & if_take)
-                 | (if_state[cache_refill] & if_take)
-                 | (if_state[direct_acc]   & ~ bridge_if_pending & if_take);
+                 | (if_state[cache_refill] & if_take);
 
 // an icache hit-invalidate compares the tag in phase 2, so the cacop has to
 // issue its own tag read in phase 1 (it owns the port in both phases).  It gets
@@ -292,8 +293,6 @@ assign ic_read_use = if_state[tlb_acc] & ~ if_direct & ~ ic_cacop;
 assign mem_hit_done = ~ mem_cacop & ~ mem_direct & dc_read_hit;
 assign dc_lu_now    = mem_pre
                     & (mem_state[idle] | mem_state[cache_refill]
-                       | mem_state[mem_writeback] & dc_cacop & ~ bridge_mem_pending
-                       | mem_state[direct_acc] & ~ bridge_mem_pending
                        | mem_state[tlb_acc] & (mem_hit_done | mem_abort));
 
 assign dc_read_req = dc_lu_now;
@@ -393,7 +392,6 @@ assign if_take = if_pre & if_allow;
 assign if_pending = ic_cacop
                   | (~ if_state[idle]
                      & ~(if_state[tlb_acc]      & (if_abort | (ic_read_hit & ~ if_direct)))
-                     & ~(if_state[direct_acc]   & ~ bridge_if_pending)
                      & ~(if_state[cache_refill] & if_pre));
 
 always @(*) begin
@@ -426,10 +424,9 @@ always @(*) begin
         end
         DIRECT_ACC: begin
             if (~ bridge_if_pending) begin
-                if (if_take) next_if_state = TLB_ACC;
-                else         next_if_state = IDLE;
+                            next_if_state = IDLE;
             end
-            else             next_if_state = DIRECT_ACC;
+            else            next_if_state = DIRECT_ACC;
         end
         default:            next_if_state = IDLE;
     endcase
@@ -442,10 +439,7 @@ end
 // otherwise the next access's lookup and the refill fight over the dcache port.
 assign mem_pending = ~ mem_state[idle]
                    & ~(mem_state[cache_refill]  & mem_pre)
-                   & ~(mem_state[mem_writeback] & mem_cacop & ~ bridge_mem_pending
-                                                & mem_pre)
-                   & ~(mem_state[tlb_acc]       & (mem_abort | (mem_hit_done & ~ dc_rw_conflict)))
-                   & ~(mem_state[direct_acc]    & ~ bridge_mem_pending & mem_pre);
+                   & ~(mem_state[tlb_acc]       & (mem_abort | (mem_hit_done & ~ dc_rw_conflict)));
 
 always @(*) begin
     case (mem_state)
@@ -472,8 +466,7 @@ always @(*) begin
         MEM_WRITEBACK: begin
             if (~ bridge_mem_pending) begin
                 if (mem_cacop) begin
-                    if (mem_pre)                        next_mem_state = TLB_ACC;   // cacop_act takes place earlier
-                    else                                next_mem_state = IDLE;
+                                                        next_mem_state = IDLE;
                 end                    
                 else                                    next_mem_state = MEM_READ;
             end
@@ -489,10 +482,9 @@ always @(*) begin
         end
         DIRECT_ACC: begin
             if (~ bridge_mem_pending) begin
-                if (mem_pre) next_mem_state = TLB_ACC;
-                else         next_mem_state = IDLE;
+                            next_mem_state = IDLE;
             end
-            else             next_mem_state = DIRECT_ACC;
+            else            next_mem_state = DIRECT_ACC;
         end
         default:            next_mem_state = IDLE;
     endcase
@@ -512,7 +504,9 @@ end
 // bridge
 sram_axi_bridge u_bridge(
     .clk          (clk                ),
+    .clk2         (mclk               ),   // 2x memory clock, for the AXI side
     .reset        (reset              ),
+    .reset2       (mreset             ),   // reset for the 2x domain
 
     .inst_req     (bridge_if_req      ),
     .inst_addr    (bridge_if_addr     ),
