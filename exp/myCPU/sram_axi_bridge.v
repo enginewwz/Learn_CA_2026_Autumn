@@ -390,8 +390,8 @@ always @(*) begin
 end
 
 // the fetch must not enter REQ in the same cycle
-assign mem_read_takes_req = ~ read_req_occupy & mem_read_req & mem_write_state[ret]
-                                                 & (mem_read_state[que] | mem_read_state[ret]);
+assign mem_read_takes_req = ~ read_req_occupy & mem_write_state[ret]
+                             & (mem_read_state[que] | mem_read_state[ret] & mem_read_req);
 
 always @(*) begin
     case (mem_read_state)
