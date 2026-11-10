@@ -27,6 +27,9 @@ module sram_axi_bridge(
     input  wire        inst_flush,   // drop a queued request
     output wire [511:0] inst_rdata,  // beat 0 at [31:0], single access -> [31:0]
     output wire        inst_pending,
+    output wire [15:0] inst_got,     // one set-once flag per beat already collected
+                                     // in inst_rdata (the mmu hands them out while
+                                     // the burst is still running)
 
     input  wire [ 1:0] crmd_plv,
 
@@ -288,6 +291,21 @@ always @(posedge clk2) begin
     else if (inst_read_rsp_fire)icnt <= icnt + 4'd1;
 end
 
+// "which beats are in ibuf", as one set-once flag per beat, for the sequential
+// fetch in the 1x domain.
+//
+// This cannot be a counter: icnt lives in the 2x domain and can advance twice per
+// cpu cycle, so a 1x sample of the count may catch it mid-change and read a value
+// that was never true (7 -> 8 -> 15).  A flag is set exactly once, so whatever the
+// 1x side samples is either "not yet" or "arrived" -- both are safe; a stale
+// sample only makes the fetch wait one more cycle.
+reg [15:0] inst_got_r;
+always @(posedge clk2) begin
+    if (reset2 | inst_req)       inst_got_r <= 16'b0;
+    else if (inst_read_rsp_fire) inst_got_r[icnt] <= 1'b1;
+end
+assign inst_got = inst_got_r;
+
 always @(posedge clk2) begin
     if (reset2 | mem_read_take) mcnt <= 2'b0;
     else if (mem_read_rsp_fire) mcnt <= mcnt + 2'd1;
@@ -422,8 +440,8 @@ always @(*) begin
 end
 
 // the fetch must not enter REQ in the same cycle
-assign mem_read_takes_req = ~ read_req_occupy & mem_read_req & mem_write_state[ret]
-                                                 & (mem_read_state[que] | mem_read_state[ret]);
+assign mem_read_takes_req = ~ read_req_occupy & mem_write_state[ret]
+                             & (mem_read_state[que] | mem_read_state[ret] & mem_read_req);
 
 always @(*) begin
     case (mem_read_state)
