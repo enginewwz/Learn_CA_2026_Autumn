@@ -153,7 +153,7 @@ wire [127:0] wb_line;
 
 // bridge
 wire        bridge_if_req, bridge_if_flush, bridge_if_pending;
-wire [15:0] bridge_inst_got;       // set-once "beat k is in bridge_inst_rdata" flags
+wire [ 4:0] bridge_inst_beat;      // beats already in bridge_inst_rdata
 wire [31:0] bridge_if_addr;
 wire        bridge_data_req, bridge_mem_pending;
 wire [31:0] bridge_data_addr;
@@ -355,23 +355,22 @@ assign if_wsel_1 = if_va[5:2] + 4'd1;
 //
 // The plan's counter "b" (words consumed) is implicit here: consumption and pc
 // are locked together (every consumption is a pc += 4/8), so the word to hand
-// out is exactly if_va[5:2], and "b < a" is "beat if_va[5:2] has arrived" --
-// bridge_inst_got carries one set-once flag per collected beat (a counter could
-// not be sampled safely across the 2x->1x boundary, see the bridge).  A
+// out is exactly if_va[5:2], and "b < a" is "if_va[5:2] < inst_beat".  A
 // redirect leaves this line, which drops cur_valid_0[IF] and stops the stream,
 // so the fetch falls back to the old "stall until the refill is done"; a branch
 // inside the same line keeps streaming (the words are the same).
 // ---------------------------------------------------------------------------
 assign if_seq_mode = if_state[mem_read];
 
-// word 15 waits for the refill to finish (CACHE_REFILL feeds it), so the
-// streamed pc never steps out of the line
-assign if_seq_get  = if_seq_mode & (if_va[5:2] != 4'd15) & bridge_inst_got[if_va[5:2]];
+// word 15 waits for the refill to finish (CACHE_REFILL feeds it), so the streamed
+// pc never steps out of the line: the counter's low 4 bits wrap to 0 at 16, and
+// "15 < 0" is false
+assign if_seq_get  = if_seq_mode & (if_va[5:2] < bridge_inst_beat[3:0]);
 
-// a pair needs the second word as well, and must not step over the line end
-// (consume words off and off+1, so off+2 <= 15); the top turns a missing pair
-// into a single fetch, which also keeps seq_pc from adding 8
-assign if_seq_pair = if_seq_get & (if_va[5:2] <= 4'd13) & bridge_inst_got[if_va[5:2] + 4'd1];
+// a pair needs the second word as well; (off+1) is a 4-bit add, so off=13 needs
+// beat 15 and off=14 needs 16 (impossible after the wrap) -- the pair can never
+// step over the line end, and the top turns a missing pair into a single fetch
+assign if_seq_pair = if_seq_get & ((if_va[5:2] + 4'd1) < bridge_inst_beat[3:0]);
 
 assign if_line_in = (if_state[cache_refill] | if_state[mem_read]);
 
@@ -549,7 +548,7 @@ sram_axi_bridge u_bridge(
     .inst_flush   (bridge_if_flush    ),
     .inst_rdata   (bridge_inst_rdata  ),
     .inst_pending (bridge_if_pending  ),
-    .inst_got     (bridge_inst_got    ),
+    .inst_beat    (bridge_inst_beat   ),
 
     .data_req     (bridge_data_req    ),
     .data_we      (bridge_data_we     ),

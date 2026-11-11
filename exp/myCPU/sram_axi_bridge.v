@@ -27,9 +27,8 @@ module sram_axi_bridge(
     input  wire        inst_flush,   // drop a queued request
     output wire [511:0] inst_rdata,  // beat 0 at [31:0], single access -> [31:0]
     output wire        inst_pending,
-    output wire [15:0] inst_got,     // one set-once flag per beat already collected
-                                     // in inst_rdata (the mmu hands them out while
-                                     // the burst is still running)
+    output wire [ 4:0] inst_beat,    // beats already collected in inst_rdata (the
+                                     // mmu hands them out while the burst runs)
 
     input  wire [ 1:0] crmd_plv,
 
@@ -118,9 +117,10 @@ reg  [ 3:0] icnt;
 reg  [ 1:0] mcnt;
 reg  [511:0] ibuf;
 reg  [127:0] mbuf;
-// which beats of ibuf are in (set once per beat, cleared by the next request):
-// the sequential fetch in the 1x domain consumes these instead of the count
-reg  [ 15:0] inst_got_r;
+// beat counter for the sequential fetch: 5 bits so it reads 16 (not 0) after the
+// last beat of a full line; the mmu compares the word offset against its low 4
+// bits, so the wrap at 16 is what keeps word 15 out of the streaming window
+reg  [ 4:0] inst_beat_r;
 
 // write beat issue
 reg mem_write_entry_cycle;
@@ -317,19 +317,11 @@ always @(posedge clk2) begin
     else if (inst_read_rsp_fire)icnt <= icnt + 4'd1;
 end
 
-// "which beats are in ibuf", as one set-once flag per beat, for the sequential
-// fetch in the 1x domain.
-//
-// This cannot be a counter: icnt lives in the 2x domain and can advance twice per
-// cpu cycle, so a 1x sample of the count may catch it mid-change and read a value
-// that was never true (7 -> 8 -> 15).  A flag is set exactly once, so whatever the
-// 1x side samples is either "not yet" or "arrived" -- both are safe; a stale
-// sample only makes the fetch wait one more cycle.
 always @(posedge clk2) begin
-    if (reset2 | inst_req)       inst_got_r <= 16'b0;
-    else if (inst_read_rsp_fire) inst_got_r[icnt] <= 1'b1;
+    if (reset2 | inst_req)            inst_beat_r <= 5'd0;
+    else if (inst_read_rsp_fire & ~&inst_beat_r) inst_beat_r <= inst_beat_r + 5'd1;
 end
-assign inst_got = inst_got_r;
+assign inst_beat = inst_beat_r;
 
 always @(posedge clk2) begin
     if (reset2 | mem_read_take) mcnt <= 2'b0;
