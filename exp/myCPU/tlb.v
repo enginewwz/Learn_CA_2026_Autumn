@@ -4,7 +4,7 @@ module tlb
 )
 (
     input  wire                      clk,
-    input  wire                      reset,
+    input  wire                      reset,   // unused: E is cleared by the initial value
 
     // search port 0 (for fetch)
     input  wire [              18:0] s0_vppn,
@@ -251,31 +251,27 @@ assign s1_ps  = s1_ps4 ? 6'd21 : 6'd12;
 
 assign w_ps4mb = (w_ps == 6'd21);
 
-always @(posedge clk) begin
-    if (reset) begin
-        tlb_e <= {(TLBNUM){1'b0}};
-    end
-    else begin
-        if (invtlb_valid)
-            tlb_e <= tlb_e & ~inv_clear;
+initial tlb_e = {(TLBNUM){1'b0}};
 
-        if (we) begin
-            tlb_e    [w_index] <= w_e;
-            tlb_ps4MB[w_index] <= w_ps4mb;
-            tlb_vppn [w_index] <= w_vppn;
-            tlb_asid [w_index] <= w_asid;
-            tlb_g    [w_index] <= w_g;
-            tlb_ppn0 [w_index] <= w_ppn0;
-            tlb_plv0 [w_index] <= w_plv0;
-            tlb_mat0 [w_index] <= w_mat0;
-            tlb_d0   [w_index] <= w_d0;
-            tlb_v0   [w_index] <= w_v0;
-            tlb_ppn1 [w_index] <= w_ppn1;
-            tlb_plv1 [w_index] <= w_plv1;
-            tlb_mat1 [w_index] <= w_mat1;
-            tlb_d1   [w_index] <= w_d1;
-            tlb_v1   [w_index] <= w_v1;
-        end
+always @(posedge clk) begin
+    if (invtlb_valid)
+        tlb_e <= tlb_e & ~inv_clear;
+    if (we) begin
+        tlb_e    [w_index] <= w_e;
+        tlb_ps4MB[w_index] <= w_ps4mb;
+        tlb_vppn [w_index] <= w_vppn;
+        tlb_asid [w_index] <= w_asid;
+        tlb_g    [w_index] <= w_g;
+        tlb_ppn0 [w_index] <= w_ppn0;
+        tlb_plv0 [w_index] <= w_plv0;
+        tlb_mat0 [w_index] <= w_mat0;
+        tlb_d0   [w_index] <= w_d0;
+        tlb_v0   [w_index] <= w_v0;
+        tlb_ppn1 [w_index] <= w_ppn1;
+        tlb_plv1 [w_index] <= w_plv1;
+        tlb_mat1 [w_index] <= w_mat1;
+        tlb_d1   [w_index] <= w_d1;
+        tlb_v1   [w_index] <= w_v1;
     end
 end
 
