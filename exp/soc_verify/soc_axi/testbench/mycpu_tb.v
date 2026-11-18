@@ -65,7 +65,10 @@ begin
     #2000;
     resetn = 1'b1;
 end
-always #5 clk=~clk;
+// 200 MHz test clock: soc_lite_top divides it by 2 for the core and drives the
+// memory subsystem with it directly, so the core still runs at 10 ns/cycle
+// while memory/AXI runs 2x -- the same 2:1 ratio as the 50/100 MHz clk_pll pair.
+always #2.5 clk=~clk;
 soc_lite_top #(.SIMULATION(1'b1)) soc_lite
 (
        .resetn      (resetn     ), 
@@ -93,11 +96,20 @@ wire [31:0] debug_wb_pc;
 wire [3 :0] debug_wb_rf_we;
 wire [4 :0] debug_wb_rf_wnum;
 wire [31:0] debug_wb_rf_wdata;
+// dual issue: slot 1 of the pair (the younger write-back)
+wire [31:0] debug_wb_pc_1;
+wire [3 :0] debug_wb_rf_we_1;
+wire [4 :0] debug_wb_rf_wnum_1;
+wire [31:0] debug_wb_rf_wdata_1;
 assign soc_clk           = soc_lite.cpu_clk;
 assign debug_wb_pc       = soc_lite.debug_wb_pc;
 assign debug_wb_rf_we    = soc_lite.debug_wb_rf_we;
 assign debug_wb_rf_wnum  = soc_lite.debug_wb_rf_wnum;
 assign debug_wb_rf_wdata = soc_lite.debug_wb_rf_wdata;
+assign debug_wb_pc_1       = soc_lite.debug_wb_pc_1;
+assign debug_wb_rf_we_1    = soc_lite.debug_wb_rf_we_1;
+assign debug_wb_rf_wnum_1  = soc_lite.debug_wb_rf_wnum_1;
+assign debug_wb_rf_wdata_1 = soc_lite.debug_wb_rf_wdata_1;
 
 // open the trace file;
 integer trace_ref;
@@ -109,39 +121,85 @@ end
 reg        trace_cmp_flag;
 reg        debug_end;
 
-reg [31:0] ref_wb_pc;
-reg [4 :0] ref_wb_rf_wnum;
-reg [31:0] ref_wb_rf_wdata;
+// one reference entry per write-back; a dual-issue core may produce two in the
+// same cycle (slot 0 first, then slot 1), so two entries are fetched here
+reg [31:0] ref_wb_pc        [1:0];
+reg [4 :0] ref_wb_rf_wnum   [1:0];
+reg [31:0] ref_wb_rf_wdata  [1:0];
+reg        ref_wb_vld       [1:0];
 
-always @(posedge soc_clk)
-begin 
-    #1;
-    if(|debug_wb_rf_we && debug_wb_rf_wnum!=5'd0 && !debug_end && `CONFREG_OPEN_TRACE)
+task get_ref;
+    input integer slot;
     begin
         trace_cmp_flag=1'b0;
         while (!trace_cmp_flag && !($feof(trace_ref)))
         begin
             $fscanf(trace_ref, "%h %h %h %h", trace_cmp_flag,
-                    ref_wb_pc, ref_wb_rf_wnum, ref_wb_rf_wdata);
+                    ref_wb_pc[slot], ref_wb_rf_wnum[slot], ref_wb_rf_wdata[slot]);
         end
+        ref_wb_vld[slot] = 1'b1;
+    end
+endtask
+
+always @(posedge soc_clk)
+begin 
+    #1;
+    ref_wb_vld[0] = 1'b0;
+    ref_wb_vld[1] = 1'b0;
+    if(!debug_end && `CONFREG_OPEN_TRACE)
+    begin
+        if (|debug_wb_rf_we   && (debug_wb_rf_wnum   != 5'd0)) get_ref(0);
+        if (|debug_wb_rf_we_1 && (debug_wb_rf_wnum_1 != 5'd0)) get_ref(1);
     end
 end
 
 //wdata[i*8+7 : i*8] is valid, only wehile wen[i] is valid
 wire [31:0] debug_wb_rf_wdata_v;
-wire [31:0] ref_wb_rf_wdata_v;
+wire [31:0] debug_wb_rf_wdata_v_1;
+wire [31:0] ref_wb_rf_wdata_v   [1:0];
 assign debug_wb_rf_wdata_v[31:24] = debug_wb_rf_wdata[31:24] & {8{debug_wb_rf_we[3]}};
 assign debug_wb_rf_wdata_v[23:16] = debug_wb_rf_wdata[23:16] & {8{debug_wb_rf_we[2]}};
 assign debug_wb_rf_wdata_v[15: 8] = debug_wb_rf_wdata[15: 8] & {8{debug_wb_rf_we[1]}};
 assign debug_wb_rf_wdata_v[7 : 0] = debug_wb_rf_wdata[7 : 0] & {8{debug_wb_rf_we[0]}};
-assign   ref_wb_rf_wdata_v[31:24] =   ref_wb_rf_wdata[31:24] & {8{debug_wb_rf_we[3]}};
-assign   ref_wb_rf_wdata_v[23:16] =   ref_wb_rf_wdata[23:16] & {8{debug_wb_rf_we[2]}};
-assign   ref_wb_rf_wdata_v[15: 8] =   ref_wb_rf_wdata[15: 8] & {8{debug_wb_rf_we[1]}};
-assign   ref_wb_rf_wdata_v[7 : 0] =   ref_wb_rf_wdata[7 : 0] & {8{debug_wb_rf_we[0]}};
+assign debug_wb_rf_wdata_v_1[31:24] = debug_wb_rf_wdata_1[31:24] & {8{debug_wb_rf_we_1[3]}};
+assign debug_wb_rf_wdata_v_1[23:16] = debug_wb_rf_wdata_1[23:16] & {8{debug_wb_rf_we_1[2]}};
+assign debug_wb_rf_wdata_v_1[15: 8] = debug_wb_rf_wdata_1[15: 8] & {8{debug_wb_rf_we_1[1]}};
+assign debug_wb_rf_wdata_v_1[7 : 0] = debug_wb_rf_wdata_1[7 : 0] & {8{debug_wb_rf_we_1[0]}};
+assign   ref_wb_rf_wdata_v[0][31:24] = ref_wb_rf_wdata[0][31:24] & {8{debug_wb_rf_we[3]}};
+assign   ref_wb_rf_wdata_v[0][23:16] = ref_wb_rf_wdata[0][23:16] & {8{debug_wb_rf_we[2]}};
+assign   ref_wb_rf_wdata_v[0][15: 8] = ref_wb_rf_wdata[0][15: 8] & {8{debug_wb_rf_we[1]}};
+assign   ref_wb_rf_wdata_v[0][7 : 0] = ref_wb_rf_wdata[0][7 : 0] & {8{debug_wb_rf_we[0]}};
+assign   ref_wb_rf_wdata_v[1][31:24] = ref_wb_rf_wdata[1][31:24] & {8{debug_wb_rf_we_1[3]}};
+assign   ref_wb_rf_wdata_v[1][23:16] = ref_wb_rf_wdata[1][23:16] & {8{debug_wb_rf_we_1[2]}};
+assign   ref_wb_rf_wdata_v[1][15: 8] = ref_wb_rf_wdata[1][15: 8] & {8{debug_wb_rf_we_1[1]}};
+assign   ref_wb_rf_wdata_v[1][7 : 0] = ref_wb_rf_wdata[1][7 : 0] & {8{debug_wb_rf_we_1[0]}};
 
 
 //compare result in rsing edge 
 reg debug_wb_err;
+task chk_wb;
+    input integer slot;
+    input [31:0] wb_pc;
+    input [4 :0] wb_wnum;
+    input [31:0] wb_wdata_v;
+    begin
+        if (  (wb_pc!==ref_wb_pc[slot]) || (wb_wnum!==ref_wb_rf_wnum[slot])
+            ||(wb_wdata_v!==ref_wb_rf_wdata_v[slot]) )
+        begin
+            $display("--------------------------------------------------------------");
+            $display("[%t] Error!!! (slot %0d)",$time, slot);
+            $display("    reference: PC = 0x%8h, wb_rf_wnum = 0x%2h, wb_rf_wdata = 0x%8h",
+                      ref_wb_pc[slot], ref_wb_rf_wnum[slot], ref_wb_rf_wdata_v[slot]);
+            $display("    mycpu    : PC = 0x%8h, wb_rf_wnum = 0x%2h, wb_rf_wdata = 0x%8h",
+                      wb_pc, wb_wnum, wb_wdata_v);
+            $display("--------------------------------------------------------------");
+            debug_wb_err <= 1'b1;
+            #40;
+            $finish;
+        end
+    end
+endtask
+
 always @(posedge soc_clk)
 begin
     #2;
@@ -149,22 +207,10 @@ begin
     begin
         debug_wb_err <= 1'b0;
     end
-    else if(|debug_wb_rf_we && debug_wb_rf_wnum!=5'd0 && !debug_end && `CONFREG_OPEN_TRACE)
+    else if(!debug_end && `CONFREG_OPEN_TRACE)
     begin
-        if (  (debug_wb_pc!==ref_wb_pc) || (debug_wb_rf_wnum!==ref_wb_rf_wnum)
-            ||(debug_wb_rf_wdata_v!==ref_wb_rf_wdata_v) )
-        begin
-            $display("--------------------------------------------------------------");
-            $display("[%t] Error!!!",$time);
-            $display("    reference: PC = 0x%8h, wb_rf_wnum = 0x%2h, wb_rf_wdata = 0x%8h",
-                      ref_wb_pc, ref_wb_rf_wnum, ref_wb_rf_wdata_v);
-            $display("    mycpu    : PC = 0x%8h, wb_rf_wnum = 0x%2h, wb_rf_wdata = 0x%8h",
-                      debug_wb_pc, debug_wb_rf_wnum, debug_wb_rf_wdata_v);
-            $display("--------------------------------------------------------------");
-            debug_wb_err <= 1'b1;
-            #40;
-            $finish;
-        end
+        if (ref_wb_vld[0]) chk_wb(0, debug_wb_pc,   debug_wb_rf_wnum,   debug_wb_rf_wdata_v);
+        if (ref_wb_vld[1]) chk_wb(1, debug_wb_pc_1, debug_wb_rf_wnum_1, debug_wb_rf_wdata_v_1);
     end
 end
 
@@ -220,12 +266,16 @@ begin
 end
 
 //模拟串口打印
+// confreg 现在跑在 2x 的 mem_clk 上，write_uart_valid 只保持一个 mem 拍，
+// 所以这里用 mem_clk 采样（原先在 soc_clk 上采，2x 之后会漏字符）。
 wire uart_display;
 wire [7:0] uart_data;
+wire       soc_mem_clk;
 assign uart_display = `CONFREG_UART_DISPLAY;
 assign uart_data    = `CONFREG_UART_DATA;
+assign soc_mem_clk  = soc_lite.mem_clk;
 
-always @(posedge soc_clk)
+always @(posedge soc_mem_clk)
 begin
     if(uart_display)
     begin

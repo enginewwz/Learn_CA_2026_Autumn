@@ -383,7 +383,7 @@ assign badv_nxt = excp_badv_en_i ? excp_badv_i :
 assign eentry_va_nxt = `CSR_FIELD(wr_eentry, eentry_va, wdata_i[31:6], wmask_i[31:6]);
 
 // TLB CSRs
-// A TLB instruction commits at WB, i.e. after its flush has emptied IF..EX, so
+// A TLB instruction commits at WB, i.e. after its flush has emptied IF..MEM, so
 // its reads already see the software writes and no pass-through is needed here.
 assign tlbidx_index_sw = `CSR_FIELD(wr_tlbidx, tlbidx_index, wdata_i[3:0],   wmask_i[3:0]);
 assign tlbidx_ps_sw    = `CSR_FIELD(wr_tlbidx, tlbidx_ps,    wdata_i[29:24], wmask_i[29:24]);
