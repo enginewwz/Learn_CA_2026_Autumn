@@ -200,12 +200,7 @@ assign wid  = mem_wid;
 
 // request latches
 always @(posedge clk) begin
-    if (reset) begin
-        inst_addr_r    <= 32'b0;
-        inst_arprot0_r <= 1'b0;
-        inst_line_r    <= 1'b0;
-    end
-    else if (inst_req) begin
+    if (inst_req) begin
         inst_addr_r    <= inst_addr;
         inst_arprot0_r <= (crmd_plv == 2'b00);
         inst_line_r    <= inst_line;
@@ -213,12 +208,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (reset) begin
-        rd_addr_r     <= 32'b0;
-        mem_arprot0_r <= 1'b0;
-        rd_line_r     <= 1'b0;
-    end
-    else if (mem_read_take) begin
+    if (mem_read_take) begin
         rd_addr_r     <= data_addr;
         mem_arprot0_r <= (crmd_plv == 2'b00);
         rd_line_r     <= data_line;
@@ -234,15 +224,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (reset) begin
-        awaddr_c  <= 32'b0;
-        wdata_c   <= 32'b0;
-        wdata128_c<= 128'b0;
-        wstrb_c   <= 4'b0;
-        awprot0_c <= 1'b0;
-        wr_line_c <= 1'b0;
-    end
-    else if (w_capture) begin
+    if (w_capture) begin
         awaddr_c  <= data_addr;
         wdata_c   <= data_wdata[31:0];
         wdata128_c<= data_wdata;
@@ -253,15 +235,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk) begin
-    if (reset) begin
-        awaddr_r  <= 32'b0;
-        wdata_r   <= 32'b0;
-        wdata128_r<= 128'b0;
-        wstrb_r   <= 4'b0;
-        awprot0_r <= 1'b0;
-        wr_line_r <= 1'b0;
-    end
-    else if (mem_write_take) begin
+    if (mem_write_take) begin
         awaddr_r  <= waw_req ? awaddr_c : data_addr;
         wdata_r   <= waw_req ? wdata_c : data_wdata[31:0];
         wdata128_r<= waw_req ? wdata128_c : data_wdata;
@@ -313,18 +287,18 @@ assign inst_read_rsp_fire   = inst_state[rsp]     & read_rsp_fire & (rid == inst
 assign mem_read_rsp_fire    = mem_read_state[rsp] & read_rsp_fire & (rid == mem_rid);
 
 always @(posedge clk2) begin
-    if (reset2 | inst_req)      icnt <= 4'b0;
+    if (inst_req)               icnt <= 4'b0;
     else if (inst_read_rsp_fire)icnt <= icnt + 4'd1;
 end
 
 always @(posedge clk2) begin
-    if (reset2 | inst_req)            inst_beat_r <= 5'd0;
-    else if (inst_read_rsp_fire & ~&inst_beat_r) inst_beat_r <= inst_beat_r + 5'd1;
+    if (inst_req)                                   inst_beat_r <= 5'd0;
+    else if (inst_read_rsp_fire & ~&inst_beat_r)    inst_beat_r <= inst_beat_r + 5'd1;
 end
 assign inst_beat = inst_beat_r;
 
 always @(posedge clk2) begin
-    if (reset2 | mem_read_take) mcnt <= 2'b0;
+    if (mem_read_take)          mcnt <= 2'b0;
     else if (mem_read_rsp_fire) mcnt <= mcnt + 2'd1;
 end
 

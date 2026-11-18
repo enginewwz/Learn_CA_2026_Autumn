@@ -62,6 +62,10 @@ wire [21:0] wtagvd_data;
 
 wire [IDX_W-1:0]  last_index;
 reg  [2**IDX_W-1:0] lru_table;
+// FPGA: no reset on the table; the power-up value is the configuration bit
+// instead.  It must still be defined for 4-state simulation.
+initial lru_table = {2**IDX_W{1'b0}};
+
 reg  [11:0] last_va;
 reg         lru_r;      // lru_table[index] of the lookup in flight
 
@@ -133,8 +137,7 @@ end
 
 // LRU: only the access that consumes its lookup result may touch it
 always @(posedge clk) begin
-    if (reset)                          lru_table <= {2**IDX_W{1'b0}};
-    else if (read_use & read_hit)       lru_table[last_index] <= hit_way[0];
+    if (read_use & read_hit)            lru_table[last_index] <= hit_way[0];
     else if (refill_we)                 lru_table[index] <= ~ lru_table[index];
 end
 

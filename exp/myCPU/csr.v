@@ -462,44 +462,37 @@ assign timer_nxt = timer + 64'd1;
 // registers
 always @(posedge clk) begin
     if (reset) begin
-        tlb_excp_r    <= 1'b0;
+        // architecturally defined reset state (LoongArch 32-bit reduced 6.3)
+        tlb_excp_r    <= 1'b0;      // internal: ertn's DA/PG restore
         csr_crmd_da   <= 1'b1;
         csr_crmd_pg   <= 1'b0;
         csr_crmd_datf <= 2'b0;
         csr_crmd_datm <= 2'b0;
         crmd_plv      <= 2'b0;
         crmd_ie       <= 1'b0;
-        prmd_pplv     <= 2'b0;
-        prmd_pie      <= 1'b0;
         estat_is0     <= 1'b0;
         estat_is1     <= 1'b0;
-        estat_ti      <= 1'b0;
-        estat_ecode   <= 6'b0;
-        estat_esubcode<= 9'b0;
-        era           <= 32'b0;
-        badv          <= 32'b0;
-        eentry_va     <= 26'b0;
-        tlbidx_index  <= 4'b0;
-        tlbidx_ps     <= 6'b0;
-        tlbidx_ne     <= 1'b0;
-        tlbehi_vppn   <= 19'b0;
-        tlbelo0       <= 28'b0;
-        tlbelo1       <= 28'b0;
-        asid          <= 10'b0;
-        tlbrentry_pa  <= 26'b0;
+        estat_ecode   <= 6'b0;      // implementation: tlb_w_e reads it
+        asid          <= 10'b0;     // TLB lookups key on it; 0 is the natural boot value
         dmw0          <= 32'b0;
         dmw1          <= 32'b0;
-        save[0]       <= 32'b0;
-        save[1]       <= 32'b0;
-        save[2]       <= 32'b0;
-        save[3]       <= 32'b0;
         ecfg_lie      <= 13'b0;
-        tid           <= 32'b0;
         tcfg_en       <= 1'b0;
+        timer         <= 64'b0;     // Stable Counter resets to 0
+
+        // kept for a deterministic core, not mandated by the architecture
+        prmd_pplv     <= 2'b0;      // ertn before the first exception
+        prmd_pie      <= 1'b0;
+        estat_ti      <= 1'b0;      // IS[11] otherwise starts as X
+        estat_esubcode<= 9'b0;      // ESTAT readback
         tcfg_periodic <= 1'b0;
         tcfg_initval  <= 30'b0;
         tval          <= 32'b0;
-        timer         <= 64'b0;
+
+        // ERA / BADV / EENTRY / TLBIDX / TLBEHI / TLBELO0/1 / TLBRENTRY /
+        // SAVE / TID are left undefined at reset: software must
+        // initialise them before use.  ASID is kept at 0 because every TLB
+        // lookup keys on it.
     end
     else begin
         tlb_excp_r    <= tlb_excp_nxt;

@@ -614,60 +614,47 @@ assign id_next_valid_2 = (id_tail == 2'd0) ? 1'b0 :
                          (id_tail == 2'd1) ? id_fill_1 : id_shift_valid[2];
 
 always @(posedge clk) begin
-    if (reset) begin
-        pc_0[ID]   <= 32'b0;
-        pc_1[ID]   <= 32'b0;
-        pc_2   <= 32'b0;
-        inst_id_0 <= 32'h0340_0000;
-        inst_id_1 <= 32'h0340_0000;
-        inst_id_2 <= 32'h0340_0000;
-        excp_id_0 <= 13'b0;
-        excp_id_1 <= 13'b0;
-        excp_id_2 <= 13'b0;
-    end
-    else begin
-        case (id_tail)
-            2'd0: begin
-                pc_0[ID]  <= id_fill_pc_0;
-                inst_id_0 <= id_fill_inst_0;
-                excp_id_0 <= id_fill_excp_0;
+    case (id_tail)
+        2'd0: begin
+            pc_0[ID]  <= id_fill_pc_0;
+            inst_id_0 <= id_fill_inst_0;
+            excp_id_0 <= id_fill_excp_0;
 
-                pc_1[ID]  <= id_fill_pc_1;
-                inst_id_1 <= id_fill_inst_1;
-                excp_id_1 <= id_fill_excp_1;
-                
-                pc_2      <= 32'b0;
-                inst_id_2 <= 32'h0340_0000; // nop
-                excp_id_2 <= 13'b0;
-            end
-            2'd1: begin
-                pc_0[ID]  <= id_shift_pc_0;
-                inst_id_0 <= id_shift_inst_0;
-                excp_id_0 <= id_shift_excp_0;
+            pc_1[ID]  <= id_fill_pc_1;
+            inst_id_1 <= id_fill_inst_1;
+            excp_id_1 <= id_fill_excp_1;
 
-                pc_1[ID]  <= id_fill_pc_0;
-                inst_id_1 <= id_fill_inst_0;
-                excp_id_1 <= id_fill_excp_0;
-                
-                pc_2      <= id_fill_pc_1;
-                inst_id_2 <= id_fill_inst_1;
-                excp_id_2 <= id_fill_excp_1;
-            end
-            default: begin  // 2'd2 or 2'd3
-                pc_0[ID]  <= id_shift_pc_0;
-                inst_id_0 <= id_shift_inst_0;
-                excp_id_0 <= id_shift_excp_0;
+            pc_2      <= 32'b0;
+            inst_id_2 <= 32'h0340_0000; // nop
+            excp_id_2 <= 13'b0;
+        end
+        2'd1: begin
+            pc_0[ID]  <= id_shift_pc_0;
+            inst_id_0 <= id_shift_inst_0;
+            excp_id_0 <= id_shift_excp_0;
 
-                pc_1[ID]  <= id_shift_pc_1;
-                inst_id_1 <= id_shift_inst_1;
-                excp_id_1 <= id_shift_excp_1;
+            pc_1[ID]  <= id_fill_pc_0;
+            inst_id_1 <= id_fill_inst_0;
+            excp_id_1 <= id_fill_excp_0;
 
-                pc_2      <= id_shift_pc_2;
-                inst_id_2 <= id_shift_inst_2;
-                excp_id_2 <= id_shift_excp_2;
-            end
-        endcase
-    end
+            pc_2      <= id_fill_pc_1;
+            inst_id_2 <= id_fill_inst_1;
+            excp_id_2 <= id_fill_excp_1;
+        end
+        default: begin  // 2'd2 or 2'd3
+            pc_0[ID]  <= id_shift_pc_0;
+            inst_id_0 <= id_shift_inst_0;
+            excp_id_0 <= id_shift_excp_0;
+
+            pc_1[ID]  <= id_shift_pc_1;
+            inst_id_1 <= id_shift_inst_1;
+            excp_id_1 <= id_shift_excp_1;
+
+            pc_2      <= id_shift_pc_2;
+            inst_id_2 <= id_shift_inst_2;
+            excp_id_2 <= id_shift_excp_2;
+        end
+    endcase
 end
 
 // ===========================================================================
@@ -993,7 +980,7 @@ assign id_br_valid   = valid_0[ID] & ~ id_br_sent & ~ id_fw_pending_0;   // raw 
 // a taken branch already redirected the fetch; do not resolve it again while it
 // sits in slot 0 waiting for MEM (the head moving clears the flag)
 always @(posedge clk) begin
-    if (reset | flush[ID])       id_br_sent <= 1'b0;
+    if (reset | flush[ID])      id_br_sent <= 1'b0;
     else if (id_head_move)      id_br_sent <= 1'b0;
     else if (~ id_fw_pending_0) id_br_sent <= 1'b1;
 end
