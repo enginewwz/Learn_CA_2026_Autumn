@@ -1,15 +1,3 @@
-// Slot 1 decoder of the dual-issue core: only the ALU and MUL subsets.
-//
-// Slot 1 never issues anything else (a load/store, branch, CSR, TLB, cacop, div
-// or an illegal instruction just waits there and falls into slot 0), so this
-// decoder is much smaller than the full one in mycpu_top:
-//   * no mem / csr / tlb / branch / exception decode at all,
-//   * every instruction it accepts writes rd (gr_we is implied by `legal`),
-//   * src2 is never rd (no `src_reg_is_rd` instruction is in the set),
-//   * no "src2 = 4" (that is jirl / bl only).
-//
-// alu_op / md_op keep exactly the bit assignment of mycpu_top / alu.v / mul.v,
-// so slot 0 and slot 1 can share the ALU and mul modules.
 module id_alu_mul_decoder(
     input  wire [31:0] inst,
     output wire        legal,        // alu or mul: slot 1 may issue it

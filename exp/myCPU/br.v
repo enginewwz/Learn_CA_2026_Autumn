@@ -1,15 +1,3 @@
-// Branch unit for the ID stage: decide taken and build the target.
-//
-// The comparison tree lives here now (it used to be the ALU's borrow prefix
-// tree): ltu32 is the root of the same 2->4->8->16->32 prefix tree that the
-// old ALU exported, and lt is the sign fold of it.  eq is a plain XOR + OR
-// reduction.  The ALU no longer exports compare taps.
-//
-// beq / bne / blt / bge / bltu / bgeu / jirl / b / bl are all handled here.
-// jirl, b and bl are unconditional: their br_op[JIRL] bit alone decides taken,
-// and base+offs is the target (jirl: rj + i16<<2; b/bl: pc + i26<<2).  The top
-// simply muxes i26/i16 into offs, so b/bl reuse the conditional branches'
-// adder instead of building pc+i26 in a second adder.
 module br(
     input  wire [31:0] src1,     // compare operands
     input  wire [31:0] src2,

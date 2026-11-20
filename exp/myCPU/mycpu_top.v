@@ -1,16 +1,3 @@
-// ===========================================================================
-// Dual-issue (2-wide) in-order core.
-//
-//   IF  : preif sends nextpc to the mmu; mmu / icache return 1 or 2 words
-//         (both inside the same 16B line), parked into the ID queue.
-//   ID  : 3-slot compacting queue.  Slot 0 = full decode, slot 1 = alu/mul
-//         only, slot 2 = storage only (no decode).  Up to 2 instructions are
-//         issued per cycle; slot 0 is always the older one.
-//   MEM : the pair moves as one unit.  Load / store, CSR, TLB, cacop, div and
-//         every exception live on slot 0 only.
-//   WB  : the pair moves as one unit, 2 write ports.  Slot 1 is the younger
-//         instruction, so it wins a WAW inside a pair.
-// ===========================================================================
 module mycpu_top(
     input  wire        aclk,
     input  wire        mclk,         // memory / AXI clock, 2x aclk: drives the bridge only
@@ -84,10 +71,6 @@ localparam DUAL_EN = 1'b1;      // 0: slot 1 never issues (single-issue bring-up
 
 reg         reset;
 always @(posedge clk) reset <= ~resetn;
-
-// the bridge runs on mclk (2x), so its reset is re-synchronised in that domain
-reg         reset_m;
-always @(posedge mclk) reset_m <= ~aresetn;
 
 localparam IF                = 0;
 localparam ID                = 1;
@@ -291,14 +274,21 @@ wire        div_busy, div_is_signed, div_is_mod, div_start, div_reset;
 reg         div_started;
 
 // forwarding
+reg         fw_valid_id_0;
+reg  [31:0] fw_data_id_0;
 wire        fw_valid_mem_0, fw_valid_mem_1;
 wire [31:0] fw_data_mem_0, fw_data_mem_1;
 wire [31:0] id_fw1_data_0, id_fw2_data_0, id_fw1_data_1, id_fw2_data_1;
 wire        id_fw1_pend_0, id_fw2_pend_0, id_fw1_pend_1, id_fw2_pend_1;
 wire        id_fw_pending_0, id_fw_pending_1;
 wire        id_fw1_hit_mem_slot1_0, id_fw1_hit_mem_slot0_0, id_fw2_hit_mem_slot1_0, id_fw2_hit_mem_slot0_0;
+wire        id_fw1_sel_mem_slot1_0, id_fw1_sel_mem_slot0_0, id_fw2_sel_mem_slot1_0, id_fw2_sel_mem_slot0_0;
+wire        id_fw1_sel_rf_0, id_fw2_sel_rf_0; 
 wire        id_fw1_hit_id_slot0_1, id_fw2_hit_id_slot0_1;  
 wire        id_fw1_hit_mem_slot1_1, id_fw1_hit_mem_slot0_1, id_fw2_hit_mem_slot1_1, id_fw2_hit_mem_slot0_1;
+wire        id_fw1_sel_id_slot0_1, id_fw2_sel_id_slot0_1;  
+wire        id_fw1_sel_mem_slot1_1, id_fw1_sel_mem_slot0_1, id_fw2_sel_mem_slot1_1, id_fw2_sel_mem_slot0_1;
+wire        id_fw1_sel_rf_1, id_fw2_sel_rf_1;
 wire [31:0] id_rf_rdata1_0, id_rf_rdata2_0, id_rf_rdata1_1, id_rf_rdata2_1;
 reg         csr_wb_flying;
 
@@ -1022,11 +1012,15 @@ assign id_fw1_hit_mem_slot1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_0
 assign id_fw1_hit_mem_slot0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_0
                        & (id_rf_raddr1_0 != 5'd0) & (id_rf_raddr1_0 == dest_0[MEM]);
 
-assign id_fw1_pend_0   = (id_fw1_hit_mem_slot1_0 & ~ fw_valid_mem_1)
-                       | (id_fw1_hit_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
-assign id_fw1_data_0   = ({32{id_fw1_hit_mem_slot1_0}} & fw_data_mem_1) |
-                         ({32{id_fw1_hit_mem_slot0_0}} & fw_data_mem_0) |
-                         ({32{~ id_fw1_hit_mem_slot1_0 & ~ id_fw1_hit_mem_slot0_0}} & id_rf_rdata1_0);
+assign id_fw1_sel_mem_slot1_0 = id_fw1_hit_mem_slot1_0;
+assign id_fw1_sel_mem_slot0_0 = ~ id_fw1_hit_mem_slot1_0 &   id_fw1_hit_mem_slot0_0;
+assign id_fw1_sel_rf_0        = ~ id_fw1_hit_mem_slot1_0 & ~ id_fw1_hit_mem_slot0_0;
+
+assign id_fw1_pend_0   = (id_fw1_sel_mem_slot1_0 & ~ fw_valid_mem_1)
+                       | (id_fw1_sel_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw1_data_0   = ({32{id_fw1_sel_mem_slot1_0}} & fw_data_mem_1) |
+                         ({32{id_fw1_sel_mem_slot0_0}} & fw_data_mem_0) |
+                         ({32{id_fw1_sel_rf_0       }} & id_rf_rdata1_0);
 
 // slot 0, source 2
 assign id_fw2_hit_mem_slot1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_0
@@ -1034,11 +1028,15 @@ assign id_fw2_hit_mem_slot1_0 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_0
 assign id_fw2_hit_mem_slot0_0 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_0
                        & (id_rf_raddr2_0 != 5'd0) & (id_rf_raddr2_0 == dest_0[MEM]);
 
-assign id_fw2_pend_0   = (id_fw2_hit_mem_slot1_0 & ~ fw_valid_mem_1)
-                       | (id_fw2_hit_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
-assign id_fw2_data_0   = ({32{id_fw2_hit_mem_slot1_0}} & fw_data_mem_1) |
-                         ({32{id_fw2_hit_mem_slot0_0}} & fw_data_mem_0) |
-                         ({32{~ id_fw2_hit_mem_slot1_0 & ~ id_fw2_hit_mem_slot0_0}} & id_rf_rdata2_0);
+assign id_fw2_sel_mem_slot1_0 = id_fw2_hit_mem_slot1_0;
+assign id_fw2_sel_mem_slot0_0 = ~ id_fw2_hit_mem_slot1_0 &   id_fw2_hit_mem_slot0_0;
+assign id_fw2_sel_rf_0        = ~ id_fw2_hit_mem_slot1_0 & ~ id_fw2_hit_mem_slot0_0;
+
+assign id_fw2_pend_0   = (id_fw2_sel_mem_slot1_0 & ~ fw_valid_mem_1)
+                       | (id_fw2_sel_mem_slot0_0 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw2_data_0   = ({32{id_fw2_sel_mem_slot1_0}} & fw_data_mem_1) |
+                         ({32{id_fw2_sel_mem_slot0_0}} & fw_data_mem_0) |
+                         ({32{id_fw2_sel_rf_0       }} & id_rf_rdata2_0);
 
 assign id_fw_pending_0 = id_fw1_pend_0 | id_fw2_pend_0;
 
@@ -1050,12 +1048,18 @@ assign id_fw1_hit_mem_slot1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src1_used_1
 assign id_fw1_hit_mem_slot0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src1_used_1
                        & (id_rf_raddr1_1 != 5'd0) & (id_rf_raddr1_1 == dest_0[MEM]);
 
-assign id_fw1_pend_1   = id_fw1_hit_id_slot0_1
-                       | (id_fw1_hit_mem_slot1_1 & ~ fw_valid_mem_1)
-                       | (id_fw1_hit_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
-assign id_fw1_data_1   = ({32{id_fw1_hit_mem_slot1_1}} & fw_data_mem_1) |
-                         ({32{id_fw1_hit_mem_slot0_1}} & fw_data_mem_0) |
-                         ({32{~ id_fw1_hit_mem_slot1_1 & ~ id_fw1_hit_mem_slot0_1}} & id_rf_rdata1_1);
+assign id_fw1_sel_id_slot0_1  = id_fw1_hit_id_slot0_1;
+assign id_fw1_sel_mem_slot1_1 = ~ id_fw1_hit_id_slot0_1  &   id_fw1_hit_mem_slot1_1;
+assign id_fw1_sel_mem_slot0_1 = ~ id_fw1_hit_id_slot0_1  & ~ id_fw1_hit_mem_slot1_1 &   id_fw1_hit_mem_slot0_1;
+assign id_fw1_sel_rf_1        = ~ id_fw1_hit_id_slot0_1  & ~ id_fw1_hit_mem_slot1_1 & ~ id_fw1_hit_mem_slot0_1;
+
+assign id_fw1_pend_1   = (id_fw1_sel_id_slot0_1  & ~ fw_valid_id_0)
+                       | (id_fw1_sel_mem_slot1_1 & ~ fw_valid_mem_1)
+                       | (id_fw1_sel_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw1_data_1   = ({32{id_fw1_sel_id_slot0_1 }} & fw_data_id_0 ) |
+                         ({32{id_fw1_sel_mem_slot1_1}} & fw_data_mem_1) |
+                         ({32{id_fw1_sel_mem_slot0_1}} & fw_data_mem_0) |
+                         ({32{id_fw1_sel_rf_1       }} & id_rf_rdata1_1);
 
 // slot 1, source 2
 assign id_fw2_hit_id_slot0_1 = valid_0[ID] & id_gr_we_0 & id_src2_used_1 
@@ -1065,14 +1069,30 @@ assign id_fw2_hit_mem_slot1_1 = valid_1[MEM] & gr_we_1[MEM] & id_src2_used_1
 assign id_fw2_hit_mem_slot0_1 = valid_0[MEM] & gr_we_0[MEM] & id_src2_used_1
                        & (id_rf_raddr2_1 != 5'd0) & (id_rf_raddr2_1 == dest_0[MEM]);
 
-assign id_fw2_pend_1   = id_fw2_hit_id_slot0_1
-                       | (id_fw2_hit_mem_slot1_1 & ~ fw_valid_mem_1)
-                       | (id_fw2_hit_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
-assign id_fw2_data_1   = ({32{id_fw2_hit_mem_slot1_1}} & fw_data_mem_1) |
-                         ({32{id_fw2_hit_mem_slot0_1}} & fw_data_mem_0) |
-                         ({32{~ id_fw2_hit_mem_slot1_1 & ~ id_fw2_hit_mem_slot0_1}} & id_rf_rdata2_1);
+assign id_fw2_sel_id_slot0_1  = id_fw2_hit_id_slot0_1;
+assign id_fw2_sel_mem_slot1_1 = ~ id_fw2_hit_id_slot0_1  &   id_fw2_hit_mem_slot1_1;
+assign id_fw2_sel_mem_slot0_1 = ~ id_fw2_hit_id_slot0_1  & ~ id_fw2_hit_mem_slot1_1 &   id_fw2_hit_mem_slot0_1;
+assign id_fw2_sel_rf_1        = ~ id_fw2_hit_id_slot0_1  & ~ id_fw2_hit_mem_slot1_1 & ~ id_fw2_hit_mem_slot0_1;
+
+assign id_fw2_pend_1   = (id_fw2_sel_id_slot0_1  & ~ fw_valid_id_0)
+                       | (id_fw2_sel_mem_slot1_1 & ~ fw_valid_mem_1)
+                       | (id_fw2_sel_mem_slot0_1 & ~ fw_valid_mem_0) | csr_wb_flying;
+assign id_fw2_data_1   = ({32{id_fw2_sel_id_slot0_1 }} & fw_data_id_0 ) |
+                         ({32{id_fw2_sel_mem_slot1_1}} & fw_data_mem_1) |
+                         ({32{id_fw2_sel_mem_slot0_1}} & fw_data_mem_0) |
+                         ({32{id_fw2_sel_rf_1       }} & id_rf_rdata2_1);
 
 assign id_fw_pending_1 = id_fw1_pend_1 | id_fw2_pend_1;
+
+always @(posedge clk) begin
+    if (reset) fw_valid_id_0 <= 1'b0;
+    else if (allow[MEM]) fw_valid_id_0 <= 1'b0;
+    else fw_valid_id_0 <= ~ id_fw_pending_0 & ~ id_mem_en_0 & ~ id_csr_ctl_0[CSR_WB] & ~|id_md_op_0 & valid_0[ID];
+end
+
+always @(posedge clk) begin
+    fw_data_id_0 <= alu_result_id_0;
+end
 
 // ID datapath: the operands are already resolved by the ID forwarding network
 assign id_src1_0 = id_src1_is_pc_0  ? pc_0[ID] : id_fw1_data_0;
@@ -1588,7 +1608,6 @@ assign tlb_w_v1    = tlbelo1_o[0];
 mmu u_mmu(
     .clk            (clk            ),
     .mclk           (mclk           ),
-    .mreset         (reset_m        ),
     .reset          (reset          ),
 
     .if_pre         (preif_req      ),

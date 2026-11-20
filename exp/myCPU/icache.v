@@ -1,16 +1,3 @@
-// 2-way, 64-set, 64-byte-line (16 words) instruction cache = 8 KB.
-//
-// Why 64 sets: the fetch lookup is a VIPT one -- the index comes from nextpc
-// one cycle before the translation is available, so the index bits must stay
-// inside the 4 KB page offset.  With a 64 B line the page offset splits into
-//   va[11:6] index (6 bits, 64 sets) | va[5:2] word (4 bits) | va[1:0] byte
-// and the tag compare stays the 4 KB page number (pt), exactly as before.
-//
-// The line RAM (inst_ram) is 64 x 512 (WRITE_FIRST) and the tag RAM (tagvd64) is
-// 64 x 22 (tag + valid + dirty, NO_CHANGE) -- the dcache keeps its own 256 x 22
-// tagvd.  local_testbench/cache_ram_sim.v has the iverilog stand-ins and
-// exp/soc_verify/soc_axi/run_vivado/create_project.tcl generates the real IPs
-// with the same geometry.
 module icache(
     input  wire         clk,
     input  wire         reset,

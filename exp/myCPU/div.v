@@ -1,18 +1,3 @@
-// Non-pipelined (blocking) 32-bit divider, radix-4 restoring
-//
-//   start (1-cycle pulse) -> busy ... -> done (1-cycle pulse)
-//   quot / rem are valid in the cycle where done is high
-//
-// The division runs on the unsigned magnitudes for 16 iterations (2 bits per
-// cycle) and the results are sign-fixed at the end:
-//   - quotient  truncates toward zero
-//   - remainder keeps the sign of the dividend
-//   - is_signed selects div.w/mod.w (1) vs div.wu/mod.wu (0)
-//   - divisor == 0 gives quot = 32'hffffffff, rem = dividend (the functional
-//     tests never divide by zero; change this if you need another convention)
-//
-// This is the non-pipelined unit: assert start, then hold the pipeline until
-// done. The exact cycle count is not part of the contract; use busy/done.
 module div(
     input  wire        clk,
     input  wire        reset,

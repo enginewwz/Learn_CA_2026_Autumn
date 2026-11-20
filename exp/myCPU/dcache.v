@@ -1,26 +1,3 @@
-//==============================================================================
-// dcache.v -- 2-way / 256-set / 16-byte-line, write-back data cache
-//
-// VIPT: va (low 12 bits of VA and PA) indexes the RAMs in the lookup cycle;
-//       pt is the physical tag from the async TLB, valid in the response
-//       cycle.  So: tag compare -> current pt, word select -> last_va.
-//
-// Per-bank enable (bank = va[3:2] / write_va[3:2]):
-//   read    : bank va[3:2] of both ways          (rd_en)
-//   store   : bank write_va[3:2] of the hit way
-//   refill  : all four banks of the replaced way
-//   lookup  : all four banks of both ways -> data_wayN holds the whole line
-// A read and a write may share a cycle iff same line and different bank.
-//
-// Lookup / response is pipelined: read_req in cycle N, read_hit / read_data /
-// lookup_d in cycle N+1 with read_use high.  read_use qualifies every state
-// update, so a lookup whose result is not consumed (e.g. a conflict with a
-// store, or an access that turns out to be uncached) cannot corrupt the LRU or
-// the kept lookup way.
-//
-// Store: cycle 1 read_req (data_wayN / read_hit / lookup_d),
-//        cycle 2 write_req with the byte-merged word; d is set there.
-//==============================================================================
 module dcache(
     input  wire         clk,
     input  wire         reset,

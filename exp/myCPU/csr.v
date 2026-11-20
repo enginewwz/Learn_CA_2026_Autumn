@@ -1,3 +1,4 @@
+// ===========================================================================
 // Control and status register file
 //
 // one asynchronous read port and one clocked write port.
@@ -20,6 +21,7 @@
 //   counter              | TVAL (down), `timer` (free-running 64-bit for
 //                        | rdcntvl.w / rdcntvh.w)
 //   write-only           | TICLR: reads 0
+// ===========================================================================
 
 module csr(
     input  wire        clk,

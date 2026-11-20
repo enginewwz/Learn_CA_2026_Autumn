@@ -1,24 +1,7 @@
-// ===========================================================================
-// CPU-side <-> AXI adapter.
-//
-// TWO CLOCKS:
-//   clk     : processor clock (1x).  Everything on the CPU side lives here.
-//   clk2    : memory clock (2x clk, same PLL, edges aligned).  The AXI side
-//             (ar/r/aw/w/b) belongs here so a 16-beat line refill can be
-//             drained at 2 beats per processor cycle.
-//
-// The gluing of the two domains -- which signals cross, how the CPU-side
-// single-cycle pulses are turned into 2x-side events and how the collected
-// beats/pending come back -- is *not* written yet: for now every register and
-// every output still runs on clk, exactly as before, and clk2/reset2 are
-// brought in but unused.  That keeps the whole SoC regression green while the
-// 2x clock is already routed here (see docs/fetch_opt_step1_clock.md).
-// ===========================================================================
 module sram_axi_bridge(
     input  wire        clk,          // 1x: processor clock
     input  wire        clk2,         // 2x: memory / AXI clock
     input  wire        reset,        // 1x domain reset
-    input  wire        reset2,       // 2x domain reset (synchronised to clk2)
 
     // fetch side: inst_req is a single-cycle pulse
     input  wire        inst_req,
@@ -246,7 +229,7 @@ always @(posedge clk) begin
 end
 
 always @(posedge clk2) begin
-    if (reset2) begin
+    if (reset) begin
         inst_read_req_r      <= 1'b0;
         mem_read_req_r       <= 1'b0;
         inst_read_rsp_done_r <= 1'b0;
@@ -335,7 +318,7 @@ assign w_fire  = wvalid  & wready;
 assign w_last_fire = w_fire & (wr_line_r ? (w_cnt == 2'd3) : 1'b1);
 
 always @(posedge clk2) begin
-    if (reset2 | mem_write_take) begin
+    if (reset | mem_write_take) begin
         w_cnt   <= 2'b0;
         aw_done <= 1'b0;
         w_done  <= 1'b0;

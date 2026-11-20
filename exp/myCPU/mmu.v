@@ -1,7 +1,6 @@
 module mmu(
     input  wire        clk,
     input  wire        mclk,        // bridge / AXI clock, 2x clk
-    input  wire        mreset,      // bridge reset, synchronised to mclk
     input  wire        reset,
 
     // CPU side: fetch
@@ -540,7 +539,6 @@ sram_axi_bridge u_bridge(
     .clk          (clk                ),
     .clk2         (mclk               ),   // 2x memory clock, for the AXI side
     .reset        (reset              ),
-    .reset2       (mreset             ),   // reset for the 2x domain
 
     .inst_req     (bridge_if_req      ),
     .inst_addr    (bridge_if_addr     ),
